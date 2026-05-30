@@ -8,6 +8,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static JSON: AtomicBool = AtomicBool::new(false);
+static DRY_RUN: AtomicBool = AtomicBool::new(false);
 
 /// Enables/disables JSON output. Call once at startup from the global flag.
 pub fn set_json(on: bool) {
@@ -18,10 +19,23 @@ pub fn is_json() -> bool {
     JSON.load(Ordering::Relaxed)
 }
 
-/// Emits a successful operation result.
-/// Text:  `op src [dst]`
-/// JSON:  `{"operation":op,"success":true,"source":src[,"destination":dst]}`
+/// Marks the process as running under `--dry-run`. Call once at startup from the
+/// global flag so result lines can be visibly distinguished from real ops.
+pub fn set_dry_run(on: bool) {
+    DRY_RUN.store(on, Ordering::Relaxed);
+}
+
+pub fn is_dry_run() -> bool {
+    DRY_RUN.load(Ordering::Relaxed)
+}
+
+/// Emits a successful operation result. Under `--dry-run` the text branch
+/// prefixes a `(dry-run) ` marker and the JSON branch adds `"dryRun": true`
+/// (omitted otherwise) so dry-run output is never mistaken for a real op.
+/// Text:  `[(dry-run) ]op src [dst]`
+/// JSON:  `{"operation":op,"success":true,"source":src[,"destination":dst][,"dryRun":true]}`
 pub fn op_success(op: &str, src: &str, dst: Option<&str>) {
+    let dry = is_dry_run();
     if is_json() {
         let mut v = serde_json::json!({
             "operation": op,
@@ -31,11 +45,15 @@ pub fn op_success(op: &str, src: &str, dst: Option<&str>) {
         if let Some(d) = dst {
             v["destination"] = serde_json::Value::String(d.to_string());
         }
+        if dry {
+            v["dryRun"] = serde_json::Value::Bool(true);
+        }
         println!("{v}");
     } else {
+        let marker = if dry { "(dry-run) " } else { "" };
         match dst {
-            Some(d) => println!("{op} {src} {d}"),
-            None => println!("{op} {src}"),
+            Some(d) => println!("{marker}{op} {src} {d}"),
+            None => println!("{marker}{op} {src}"),
         }
     }
 }

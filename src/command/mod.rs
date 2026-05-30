@@ -148,6 +148,8 @@ pub struct CompletionArgs {
 /// Runs the parsed CLI.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::output::set_json(cli.global.json);
+    // Honor `--dry-run` so result lines are visibly marked (set once, globally).
+    crate::output::set_dry_run(cli.global.dry_run);
     match cli.command {
         Command::Ls(args) => ls::run(&cli.global, args).await,
         Command::Cp(args) => cp::run(&cli.global, args, false).await,

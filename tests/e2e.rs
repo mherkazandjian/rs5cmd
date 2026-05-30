@@ -1325,3 +1325,69 @@ fn cp_skips_broken_symlink_and_transfers_rest() {
     rs5cmd().args(["rm", &s3("/u/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+/// Upstream #697: a `--dry-run` op must be visibly distinguishable from a real
+/// one. The text success line is prefixed with `(dry-run) ` and the JSON line
+/// gains `"dryRun":true`; a real op carries neither. All commands here are
+/// short, non-streaming `cp`/`ls`/`mb`/`rb`/`rm` invocations driven through the
+/// blocking `assert_cmd` helper used by every other e2e test (no signals, no
+/// long-lived children) so the suite cannot hang.
+#[test]
+fn dry_run_output_is_marked() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("dry.txt");
+    std::fs::write(&local, b"dry-run payload").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // --dry-run (text): success line carries the marker.
+    rs5cmd()
+        .args(["--dry-run", "cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(dry-run)"));
+
+    // The dry-run must NOT have created the object.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry.txt").not());
+
+    // --dry-run --json: success object gains "dryRun":true.
+    rs5cmd()
+        .args(["--json", "--dry-run", "cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"dryRun\":true"));
+
+    // Real op (text): no marker.
+    rs5cmd()
+        .args(["cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(dry-run)").not());
+
+    // The real op DID create the object.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry.txt"));
+
+    // Real op (json): no dryRun field at all.
+    rs5cmd()
+        .args(["--json", "cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dryRun").not());
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
