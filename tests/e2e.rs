@@ -1207,3 +1207,79 @@ fn ls_prefix_with_object_equal_to_prefix() {
     rs5cmd().args(["rm", &s3("/a/b")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn rb_force_deletes_nonempty_bucket() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x.txt");
+    std::fs::write(&f, b"data").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["a.txt", "b.txt", "c.txt"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/{k}"))])
+            .assert()
+            .success();
+    }
+    // Plain rb fails on a non-empty bucket (current behavior preserved).
+    rs5cmd().args(["rb", &s3("")]).assert().failure();
+    // Bucket + objects still present.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"));
+    // rb --force empties then removes; prints per-object rm lines and the rb line.
+    rs5cmd()
+        .args(["rb", "--force", &s3("")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"))
+        .stdout(predicate::str::contains("rb "));
+    // Bucket is gone: ls now fails (NoSuchBucket).
+    rs5cmd().args(["ls", &s3("/")]).assert().failure();
+}
+
+#[test]
+fn rb_force_dry_run_deletes_nothing() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x.txt");
+    std::fs::write(&f, b"d").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &s3("/a.txt")])
+        .assert()
+        .success();
+    // Dry-run deletes nothing. rs5cmd's S3 listing path short-circuits under
+    // --dry-run, so the force-empty loop sees no objects and emits no per-object
+    // would-delete lines; remove_bucket is also a no-op under dry-run. The
+    // command still succeeds and prints the final "rb <url>" line. The real
+    // guarantee -- that nothing is deleted -- is verified by the follow-up ls.
+    rs5cmd()
+        .args(["--dry-run", "rb", "--force", &s3("")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rb "));
+    // Object still present and bucket still exists: dry-run deleted nothing.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"));
+    // Real cleanup.
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
