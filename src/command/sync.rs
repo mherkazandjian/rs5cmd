@@ -82,6 +82,13 @@ pub struct SyncArgs {
     /// run fails at the end if any operation failed.
     #[arg(long)]
     pub exit_on_error: bool,
+
+    /// Safety cap on `--delete`: abort the whole sync (before copying or
+    /// deleting anything) if more than N destination objects would be deleted.
+    /// Guards against a misconfigured source silently wiping the destination
+    /// (rsync's `--max-delete`). Ignored unless `--delete` is also set.
+    #[arg(long)]
+    pub max_delete: Option<usize>,
 }
 
 /// Returns true if an error is a fatal AWS error that should abort the whole
@@ -155,6 +162,22 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
             if let Some(u) = dst_obj.url {
                 to_delete.push(u);
             }
+        }
+    }
+
+    // `--max-delete` safety cap: if the delete set is larger than the allowed
+    // maximum, abort *before* performing any copy or delete. A source that
+    // expanded to far fewer objects than expected (wrong path, failed mount,
+    // etc.) would otherwise delete the bulk of the destination; failing fast
+    // here makes that mistake recoverable rather than destructive.
+    if let Some(max) = args.max_delete {
+        if to_delete.len() > max {
+            anyhow::bail!(
+                "aborting sync: --delete would remove {} objects, exceeding --max-delete {} \
+                 (nothing was copied or deleted)",
+                to_delete.len(),
+                max
+            );
         }
     }
 

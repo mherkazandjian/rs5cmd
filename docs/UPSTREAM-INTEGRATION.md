@@ -50,7 +50,7 @@ port can get right and lock in with MinIO regression tests. Cheap, high-trust.
 | **`sync --delete` wipes dest when source list fails** | PR#698 | A swallowed listing/network error yields an empty source set, which `--delete` treats as "delete everything." | Never treat a *failed* listing as an authoritative empty source; abort the delete phase on listing error. |
 | **stdout/stderr hygiene** | #804, PR#860 | Errors/usage/logs go to stdout, corrupting `cat`/`pipe` pipelines and `--json`. | All diagnostics → stderr; only payload/`--json` → stdout. |
 | **Panic on override stat failure** | PR#838 | With size/modtime override, a swallowed not-found on the *source* stat causes a nil deref. | Guard the size+modtime compare against a missing source stat (likely an `unwrap()`/`None` in `sync_strategy`). |
-| **`--max-delete N` safety cap** | PR#699 | No guard against a runaway `--delete`. | rsync-style cap on number of deletions; natural companion to the `--delete` fixes. |
+| **`--max-delete N` safety cap** ✅ DONE | PR#699 | No guard against a runaway `--delete`. | rsync-style cap on number of deletions; natural companion to the `--delete` fixes. **Implemented** in `sync.rs`: aborts before any copy/delete if the delete set exceeds N; e2e test `sync_max_delete_aborts_without_touching_anything`. |
 
 **Recommended first PR.** Bundle these as one "sync/listing correctness +
 exit-code/stream hygiene" change with targeted MinIO tests for each.

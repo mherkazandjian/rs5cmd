@@ -21,7 +21,9 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   parallel download** (`--part-size <MiB>`, `--concurrency <N>`); small objects use
   a single PUT/GET. `mv` deletes the source only after a successful transfer.
 - **`sync`** with size-only and size+modtime strategies, `--delete`,
-  `--include`/`--exclude` globs, and `--exit-on-error`.
+  `--include`/`--exclude` globs, `--exit-on-error`, and a `--max-delete N`
+  safety cap that aborts before touching anything if `--delete` would remove
+  more than N objects (guards against a misconfigured source wiping the dest).
 - **Listing** (`ls`) with `-H/--humanize`, `--storage-class`, `--etag`,
   `--summarize` (totals footer), and JSON output. **`du`** size/count summaries
   (`--exclude`, `--all-versions`, group-by-storage-class).
@@ -59,7 +61,7 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   mb   <s3://bucket>               make bucket
   rb   <s3://bucket>               remove bucket
   sync <src> <dst>                 sync (--delete, --size-only, --include/--exclude,
-                                   --exit-on-error)
+                                   --exit-on-error, --max-delete N)
   du   [s3://bucket/prefix/*]      summarize size/count (--exclude, --all-versions)
   pipe <s3://bucket/key>           upload stdin (--sse, --sse-kms-key-id, multipart)
   head <s3://bucket[/key]>         print object metadata / check bucket

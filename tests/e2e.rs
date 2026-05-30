@@ -163,6 +163,88 @@ fn sync_size_only_is_idempotent_and_deletes() {
 }
 
 #[test]
+fn sync_max_delete_aborts_without_touching_anything() {
+    // --max-delete must abort the whole sync (no copies, no deletes) when the
+    // delete set exceeds the cap, and leave the destination intact.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    // An empty source directory against a destination with 3 objects: a plain
+    // `--delete` would remove all 3. `--max-delete 2` must refuse.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("empty");
+    std::fs::create_dir(&dir).unwrap();
+
+    let seed = tmp.path().join("seed.txt");
+    std::fs::write(&seed, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        rs5cmd()
+            .args(["cp", seed.to_str().unwrap(), &s3(&format!("/m/{name}"))])
+            .assert()
+            .success();
+    }
+
+    // Over the cap (3 > 2): aborts with a non-zero exit and deletes nothing.
+    rs5cmd()
+        .args([
+            "sync",
+            "--delete",
+            "--max-delete",
+            "2",
+            &format!("{}/", dir.to_str().unwrap()),
+            &s3("/m/"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("max-delete"));
+
+    // All three objects must still be present (nothing was deleted).
+    rs5cmd()
+        .args(["ls", &s3("/m/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one.txt"))
+        .stdout(predicate::str::contains("two.txt"))
+        .stdout(predicate::str::contains("three.txt"));
+
+    // At the cap (3 <= 3): proceeds and deletes all three. The sync's own
+    // output reports the three deletions (we assert on that rather than a
+    // follow-up `ls`, since `ls` on the now-empty prefix exits non-zero with
+    // "no object found").
+    rs5cmd()
+        .args([
+            "sync",
+            "--delete",
+            "--max-delete",
+            "3",
+            &format!("{}/", dir.to_str().unwrap()),
+            &s3("/m/"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one.txt"))
+        .stdout(predicate::str::contains("two.txt"))
+        .stdout(predicate::str::contains("three.txt"))
+        .stdout(predicate::str::contains("rm "));
+
+    // The prefix is now empty: `ls` finds nothing.
+    rs5cmd()
+        .args(["ls", &s3("/m/")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no object found"));
+
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn du_counts_objects_with_wildcard() {
     if !endpoint_configured() {
         eprintln!("skipping: no S3 endpoint configured");
