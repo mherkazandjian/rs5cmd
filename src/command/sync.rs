@@ -46,6 +46,12 @@ pub struct SyncArgs {
     #[arg(long)]
     pub size_only: bool,
 
+    /// Compare content checksums (S3 ETag / MD5) instead of size+modtime. For a
+    /// local source the file's MD5 is computed; objects whose ETag is a
+    /// multipart composite (contains `-`) can't be compared and are re-copied.
+    #[arg(long)]
+    pub checksum: bool,
+
     /// (Accepted for compatibility) compare exact timestamps. The default
     /// strategy already compares modification times, so this is a no-op here.
     #[arg(long)]
@@ -133,7 +139,7 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
     let src = Url::parse(&args.src).map_err(|e| anyhow::anyhow!(e))?;
     let dst = Url::parse(&args.dst).map_err(|e| anyhow::anyhow!(e))?;
     let metadata = args.metadata();
-    let strategy = SyncStrategy::new(args.size_only);
+    let strategy = SyncStrategy::new(args.size_only, args.checksum);
 
     // Compile include/exclude filters into regexes once. Inline patterns are
     // combined with any read from `--include-from`/`--exclude-from` files.
@@ -147,7 +153,8 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
 
     // Build the keyed source and destination maps.
     let source_objects =
-        collect_source_objects(&src, &opts, args.follow_symlinks, is_batch, &filters).await?;
+        collect_source_objects(&src, &opts, args.follow_symlinks, is_batch, &filters, args.checksum)
+            .await?;
     let dest_objects = collect_dest_objects(&dst, &opts, &filters).await?;
 
     // Partition into copy / common / delete groups.
@@ -462,6 +469,7 @@ async fn collect_source_objects(
     follow_symlinks: bool,
     is_batch: bool,
     filters: &Filters,
+    checksum: bool,
 ) -> anyhow::Result<HashMap<String, Object>> {
     let client = new_client(src, opts).await?;
     let mut map: HashMap<String, Object> = HashMap::new();
@@ -476,6 +484,13 @@ async fn collect_source_objects(
                 if obj.url.is_none() {
                     obj.url = Some(src.clone());
                 }
+                // For checksum mode, a local source has no ETag from stat; fill
+                // it with the file's MD5 so the strategy can compare.
+                if checksum && !src.is_remote() {
+                    if let Some(h) = local_md5_hex(&src.absolute()) {
+                        obj.etag = h;
+                    }
+                }
                 map.insert(key, obj);
             }
         }
@@ -484,6 +499,7 @@ async fn collect_source_objects(
 
     let mut rx = client.list(src, follow_symlinks);
     while let Some(obj) = rx.recv().await {
+        let mut obj = obj;
         if let Some(err) = obj.err {
             // A fatal listing error (AccessDenied / NoSuchBucket) aborts the
             // sync; annotate it with the source for a clearer message.
@@ -498,14 +514,41 @@ async fn collect_source_objects(
         if obj.storage_class.is_glacier() {
             continue;
         }
-        let Some(obj_url) = &obj.url else { continue };
+        let Some(obj_url) = obj.url.clone() else { continue };
         let key = to_slash(&obj_url.relative());
         if filters.should_skip(&key) {
             continue;
         }
+        // For checksum mode, compute the MD5 of each local source file (remote
+        // sources already carry an ETag from the listing).
+        if checksum && !obj_url.is_remote() {
+            if let Some(h) = local_md5_hex(&obj_url.absolute()) {
+                obj.etag = h;
+            }
+        }
         map.insert(key, obj);
     }
     Ok(map)
+}
+
+/// Computes the lowercase hex MD5 of a local file, streaming it in chunks so
+/// large files don't have to be held in memory. Returns `None` on any IO error
+/// (the caller then treats the checksum as missing and re-copies to be safe).
+fn local_md5_hex(path: &str) -> Option<String> {
+    use md5::{Digest, Md5};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Md5::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// Lists the destination recursively and returns its objects keyed by relative

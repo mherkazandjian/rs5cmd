@@ -61,6 +61,7 @@ humansize = "2"
 url = "2"
 bytesize = "1"
 filetime = "0.2"
+md-5 = "0.10"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
