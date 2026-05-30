@@ -21,6 +21,9 @@ use super::{
 /// Max keys per DeleteObjects request (S3 API limit).
 const DELETE_CHUNK_SIZE: usize = 1000;
 
+/// Process-wide counter for unique `--client-copy` temp file names.
+static CLIENT_COPY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// Hard S3 limit on the source size of a single `CopyObject`: 5 GiB. Sources
 /// larger than this must be copied server-side with multipart `UploadPartCopy`.
 const DEFAULT_MULTIPART_COPY_THRESHOLD: u64 = 5 * 1024 * 1024 * 1024;
@@ -1456,6 +1459,41 @@ impl S3 {
             .collect::<anyhow::Result<Vec<_>>>()?;
         parts.sort_by_key(|p| p.part_number().unwrap_or(0));
         Ok(parts)
+    }
+
+    /// Copies a remote object to another remote key by streaming through the
+    /// client: download to a temp file, then upload. Used for `--client-copy`,
+    /// when a server-side `CopyObject` is unavailable or disallowed. The
+    /// source's content-type is carried over unless `metadata` overrides it.
+    pub async fn client_copy(
+        &self,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+        // Unique temp path (no Date/rand needed): pid + a process-wide counter.
+        let n = CLIENT_COPY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("rs5cmd-cc-{}-{}", std::process::id(), n));
+
+        self.download(src, &tmp).await?;
+
+        // Preserve the source content-type unless the caller set one.
+        let owned;
+        let upload_meta = if metadata.content_type.as_deref().unwrap_or("").is_empty() {
+            let mut m = metadata.clone();
+            m.content_type = self.head_content_type(src).await.ok().flatten();
+            owned = m;
+            &owned
+        } else {
+            metadata
+        };
+
+        let r = self.upload(&tmp, dst, upload_meta).await;
+        let _ = std::fs::remove_file(&tmp);
+        r
     }
 
     /// Returns the source object's content-type via HeadObject, if any.

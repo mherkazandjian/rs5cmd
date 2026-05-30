@@ -157,6 +157,10 @@ pub struct Options {
     /// mtime is stored as object metadata; on download it is restored onto the
     /// written file.
     pub preserve_timestamps: bool,
+    /// Perform remote→remote copies by streaming through the client
+    /// (download then upload) instead of a server-side `CopyObject`. Useful
+    /// when server-side copy is unavailable or disallowed.
+    pub client_copy: bool,
 }
 
 /// Default multipart part size (bytes). Mirrors a common 8 MiB default and is
@@ -181,6 +185,7 @@ impl Default for Options {
             part_size: DEFAULT_PART_SIZE,
             concurrency: DEFAULT_CONCURRENCY,
             preserve_timestamps: false,
+            client_copy: false,
         }
     }
 }
