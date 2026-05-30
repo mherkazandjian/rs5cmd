@@ -157,6 +157,7 @@ mod tests {
             json: false,
             region: None,
             profile: None,
+            addressing_style: None,
             numworkers: 256,
             retry_count: 10,
         }
