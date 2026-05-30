@@ -63,7 +63,7 @@ Real missing behavior (not just polish).
 
 | Item | Refs | Gap | Effort |
 |------|------|-----|--------|
-| **Multipart server-side copy > 5 GiB** | PR#856 | Plain `CopyObject` fails on sources > 5 GiB; rs5cmd's S3→S3 `cp`/`mv` has this exact gap. Fall back to `UploadPartCopy` on `EntityTooLarge`. | M |
+| **Multipart server-side copy > 5 GiB** ✅ DONE | PR#856 | Plain `CopyObject` fails on sources > 5 GiB; rs5cmd's S3→S3 `cp`/`mv` had this exact gap. **Implemented** in `s3.rs`: a single `CopyObject` is tried first, and on the 5 GiB `EntityTooLarge` error it falls back to multipart `UploadPartCopy` (part size auto-grown to stay within the 10k-part limit, source content-type carried over). e2e test `s3_to_s3_multipart_copy_for_large_source` forces the path via `RS5CMD_MULTIPART_COPY_THRESHOLD` and byte-verifies the copy. | M |
 | **Skip per-object HEAD when no progress bar** | PR#793 | Remote→local `cp` issues an extra HEAD per object just to size the bar; wasteful when no bar is shown. Clean perf/cost win that complements the io_uring fast path. | S |
 | **Full `--profile` credential chain** | PR#847 | `--profile` should use the shared-config chain (SSO, assume-role), not just `~/.aws/credentials`. | S |
 | **Session-token renewal on expiry** | PR#683 | Long-running jobs with web-identity creds fail on `ExpiredToken`; re-read the projected-token file. Relevant only for very long transfers. | M |

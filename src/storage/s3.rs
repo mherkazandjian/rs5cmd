@@ -21,6 +21,23 @@ use super::{
 /// Max keys per DeleteObjects request (S3 API limit).
 const DELETE_CHUNK_SIZE: usize = 1000;
 
+/// Hard S3 limit on the source size of a single `CopyObject`: 5 GiB. Sources
+/// larger than this must be copied server-side with multipart `UploadPartCopy`.
+const DEFAULT_MULTIPART_COPY_THRESHOLD: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Max parts in a multipart upload/copy (S3 API limit). Used to grow the copy
+/// part size for very large sources so the part count stays within bounds.
+const MAX_MULTIPART_PARTS: u64 = 10_000;
+
+/// Returns true if a `CopyObject` error indicates the source exceeds the 5 GiB
+/// single-copy limit, so we should retry via multipart copy. Matches the S3
+/// message ("larger than the maximum allowable size for a copy source") and the
+/// `EntityTooLarge` code, case-insensitively against the full Display chain.
+fn is_copy_source_too_large(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}").to_ascii_lowercase();
+    m.contains("larger than the maximum allowable size") || m.contains("entitytoolarge")
+}
+
 /// Builds an HTTP client for the AWS SDK whose TLS layer skips certificate
 /// verification (and hostname checking) — used only when `--no-verify-ssl`
 /// is set, for self-signed HTTPS endpoints.
@@ -173,6 +190,11 @@ pub struct S3 {
     pub(crate) request_payer_str: Option<String>,
     part_size: u64,
     concurrency: usize,
+    /// Source-size threshold above which server-side copy switches from a single
+    /// `CopyObject` to multipart `UploadPartCopy`. Defaults to the 5 GiB S3
+    /// limit; overridable via `RS5CMD_MULTIPART_COPY_THRESHOLD` (bytes) so the
+    /// multipart-copy path can be exercised in tests without a 5 GiB object.
+    multipart_copy_threshold: u64,
 }
 
 impl S3 {
@@ -236,6 +258,10 @@ impl S3 {
             request_payer_str: opts.request_payer.clone(),
             part_size: opts.part_size.max(5 * 1024 * 1024),
             concurrency: opts.concurrency.max(1),
+            multipart_copy_threshold: std::env::var("RS5CMD_MULTIPART_COPY_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_MULTIPART_COPY_THRESHOLD),
         })
     }
 
@@ -1082,17 +1108,56 @@ impl Storage for S3 {
         if self.dry_run {
             return Ok(());
         }
-        let mut copy_source = src.escaped_path();
-        if !src.version_id.is_empty() {
-            copy_source = format!("{copy_source}?versionId={}", src.version_id);
+
+        // When the threshold has been lowered (only happens via the test
+        // override env var), decide by source size up front so the multipart
+        // path can be exercised without a literal 5 GiB object. In production
+        // the threshold is the 5 GiB S3 limit, so this branch is skipped and we
+        // pay no extra HeadObject — we rely on the error-driven fallback below.
+        if self.multipart_copy_threshold < DEFAULT_MULTIPART_COPY_THRESHOLD {
+            let size = self.head_size(src).await?;
+            if size > self.multipart_copy_threshold {
+                return self.copy_multipart(src, dst, metadata, size).await;
+            }
         }
 
+        // Common path: a single server-side CopyObject. If S3 rejects it because
+        // the source exceeds the 5 GiB single-copy limit, fall back to multipart
+        // copy (s5cmd upstream PR#856).
+        match self.copy_object_single(src, dst, metadata).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_copy_source_too_large(&e) => {
+                let size = self.head_size(src).await?;
+                self.copy_multipart(src, dst, metadata, size).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl S3 {
+    /// Builds the `x-amz-copy-source` value (`bucket/key[?versionId=...]`).
+    fn copy_source_header(src: &Url) -> String {
+        let mut s = src.escaped_path();
+        if !src.version_id.is_empty() {
+            s = format!("{s}?versionId={}", src.version_id);
+        }
+        s
+    }
+
+    /// A single server-side `CopyObject` (the original copy implementation).
+    async fn copy_object_single(
+        &self,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
         let mut req = self
             .client
             .copy_object()
             .bucket(&dst.bucket)
             .key(&dst.path)
-            .copy_source(copy_source)
+            .copy_source(Self::copy_source_header(src))
             .set_request_payer(self.request_payer());
 
         if let Some(sc) = &metadata.storage_class {
@@ -1127,6 +1192,164 @@ impl Storage for S3 {
 
         req.send().await?;
         Ok(())
+    }
+
+    /// Server-side copy of a large object via multipart `UploadPartCopy`. Used
+    /// for sources over the 5 GiB single-`CopyObject` limit. The new object's
+    /// metadata is set on `CreateMultipartUpload`; when no content-type override
+    /// is supplied, the source's content-type is carried over (a HeadObject),
+    /// since a multipart copy cannot use a COPY metadata-directive.
+    async fn copy_multipart(
+        &self,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+        size: u64,
+    ) -> anyhow::Result<()> {
+        let copy_source = Self::copy_source_header(src);
+
+        // Resolve the content-type to stamp on the new object.
+        let content_type = match &metadata.content_type {
+            Some(ct) if !ct.is_empty() => Some(ct.clone()),
+            _ => self.head_content_type(src).await.ok().flatten(),
+        };
+
+        let mut create = self
+            .client
+            .create_multipart_upload()
+            .bucket(&dst.bucket)
+            .key(&dst.path)
+            .set_request_payer(self.request_payer());
+        if let Some(ct) = content_type {
+            create = create.content_type(ct);
+        }
+        if let Some(sc) = &metadata.storage_class {
+            if !sc.is_empty() {
+                create = create.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
+            }
+        }
+        if let Some(acl) = &metadata.acl {
+            if !acl.is_empty() {
+                create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
+            }
+        }
+        if let Some(cc) = &metadata.cache_control {
+            if !cc.is_empty() {
+                create = create.cache_control(cc);
+            }
+        }
+        let created = create.send().await?;
+        let upload_id = created
+            .upload_id()
+            .ok_or_else(|| anyhow::anyhow!("CreateMultipartUpload returned no upload id"))?
+            .to_string();
+
+        match self.copy_parts(&copy_source, dst, &upload_id, size).await {
+            Ok(parts) => {
+                let completed = CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build();
+                self.client
+                    .complete_multipart_upload()
+                    .bucket(&dst.bucket)
+                    .key(&dst.path)
+                    .upload_id(&upload_id)
+                    .multipart_upload(completed)
+                    .set_request_payer(self.request_payer())
+                    .send()
+                    .await?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best-effort abort so we don't leak an incomplete upload.
+                let _ = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&dst.bucket)
+                    .key(&dst.path)
+                    .upload_id(&upload_id)
+                    .set_request_payer(self.request_payer())
+                    .send()
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Copies the source object in byte-range parts via `UploadPartCopy`,
+    /// returning the completed parts in ascending part-number order.
+    async fn copy_parts(
+        &self,
+        copy_source: &str,
+        dst: &Url,
+        upload_id: &str,
+        size: u64,
+    ) -> anyhow::Result<Vec<CompletedPart>> {
+        // Grow the part size if needed so the part count stays within the S3
+        // 10,000-part limit (a 5 TB object with the default 50 MiB part size
+        // would otherwise need 100k parts).
+        let mut part_size = self.part_size;
+        let min_part = size.div_ceil(MAX_MULTIPART_PARTS);
+        if part_size < min_part {
+            part_size = min_part.div_ceil(1024 * 1024) * 1024 * 1024;
+        }
+        let n_parts = size.div_ceil(part_size) as i32;
+
+        let tasks = (0..n_parts).map(|i| {
+            let part_number = i + 1;
+            let offset = i as u64 * part_size;
+            let len = part_size.min(size - offset);
+            let range = format!("bytes={}-{}", offset, offset + len - 1);
+            let client = self.client.clone();
+            let bucket = dst.bucket.clone();
+            let key = dst.path.clone();
+            let upload_id = upload_id.to_string();
+            let copy_source = copy_source.to_string();
+            let rp = self.request_payer();
+            async move {
+                let resp = client
+                    .upload_part_copy()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(upload_id)
+                    .part_number(part_number)
+                    .copy_source(copy_source)
+                    .copy_source_range(range)
+                    .set_request_payer(rp)
+                    .send()
+                    .await?;
+                anyhow::Ok(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .set_e_tag(resp.copy_part_result().and_then(|r| r.e_tag().map(String::from)))
+                        .build(),
+                )
+            }
+        });
+
+        let mut parts: Vec<CompletedPart> = stream::iter(tasks)
+            .buffer_unordered(self.concurrency)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        parts.sort_by_key(|p| p.part_number().unwrap_or(0));
+        Ok(parts)
+    }
+
+    /// Returns the source object's content-type via HeadObject, if any.
+    async fn head_content_type(&self, src: &Url) -> anyhow::Result<Option<String>> {
+        let mut req = self
+            .client
+            .head_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let out = req.send().await?;
+        Ok(out.content_type().map(|s| s.to_string()))
     }
 }
 

@@ -245,6 +245,57 @@ fn sync_max_delete_aborts_without_touching_anything() {
 }
 
 #[test]
+fn s3_to_s3_multipart_copy_for_large_source() {
+    // Server-side copy must fall back to multipart UploadPartCopy for sources
+    // over the 5 GiB CopyObject limit (s5cmd PR#856). We can't make a 5 GiB
+    // object on MinIO cheaply, so RS5CMD_MULTIPART_COPY_THRESHOLD=1 forces the
+    // multipart path, and --part-size 5 makes the ~11 MiB source copy in three
+    // ranged parts. The copy must be byte-identical to the source.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    // ~11 MiB with a position-dependent pattern so a mis-ordered or mis-ranged
+    // part would corrupt the result and fail the byte comparison.
+    let n = 11 * 1024 * 1024 + 123;
+    let mut data = vec![0u8; n];
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    let local = tmp.path().join("big.bin");
+    std::fs::write(&local, &data).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", local.to_str().unwrap(), &s3("/big.bin")])
+        .assert()
+        .success();
+
+    // Force the multipart-copy path with 5 MiB parts (=> 3 UploadPartCopy parts).
+    rs5cmd()
+        .env("RS5CMD_MULTIPART_COPY_THRESHOLD", "1")
+        .args(["cp", "--part-size", "5", &s3("/big.bin"), &s3("/big-copy.bin")])
+        .assert()
+        .success();
+
+    // Download the copy and verify it is byte-identical to the source.
+    let out = tmp.path().join("out.bin");
+    rs5cmd()
+        .args(["cp", &s3("/big-copy.bin"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), data);
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn du_counts_objects_with_wildcard() {
     if !endpoint_configured() {
         eprintln!("skipping: no S3 endpoint configured");

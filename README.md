@@ -19,7 +19,9 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   copy) — with wildcard, prefix, and recursive expansion over a concurrency-limited
   worker pool. Large objects use concurrent **multipart upload** and **ranged
   parallel download** (`--part-size <MiB>`, `--concurrency <N>`); small objects use
-  a single PUT/GET. `mv` deletes the source only after a successful transfer.
+  a single PUT/GET. Server-side S3→S3 copies of objects over the 5 GiB
+  `CopyObject` limit transparently fall back to **multipart `UploadPartCopy`**.
+  `mv` deletes the source only after a successful transfer.
 - **`sync`** with size-only and size+modtime strategies, `--delete`,
   `--include`/`--exclude` globs, `--exit-on-error`, and a `--max-delete N`
   safety cap that aborts before touching anything if `--delete` would remove
