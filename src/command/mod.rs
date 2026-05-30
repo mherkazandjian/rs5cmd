@@ -63,6 +63,12 @@ pub struct GlobalOpts {
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
+    /// S3 addressing style: `path` (e.g. host/bucket/key) or `virtual`
+    /// (bucket.host/key). Defaults to path-style for custom endpoints and
+    /// virtual-host for real AWS.
+    #[arg(long, global = true, value_parser = ["path", "virtual"])]
+    pub addressing_style: Option<String>,
+
     /// Number of concurrent workers for batch operations.
     #[arg(long, global = true, default_value_t = 256)]
     pub numworkers: usize,
@@ -82,6 +88,7 @@ impl GlobalOpts {
             use_list_objects_v1: self.use_list_objects_v1,
             region: self.region.clone(),
             profile: self.profile.clone(),
+            addressing_style: self.addressing_style.clone(),
             max_retries: self.retry_count,
             ..Default::default()
         }

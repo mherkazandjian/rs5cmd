@@ -178,6 +178,14 @@ fn walk_dir(f: &Filesystem, src: &Url, follow_symlinks: bool, tx: &mpsc::Sender<
         if entry.file_type().is_dir() {
             continue;
         }
+        // Skip non-regular files — sockets, FIFOs, block/char devices — which
+        // cannot be uploaded as objects and would otherwise abort the walk with
+        // a read error (s5cmd PR#776). With `follow_links`, walkdir reports the
+        // resolved target's type, so symlinks-to-regular files still pass.
+        if !entry.file_type().is_file() {
+            eprintln!("skipping non-regular file {}", entry.path().display());
+            continue;
+        }
         let mut fileurl = match Url::new(&entry.path().to_string_lossy(), UrlOptions::default()) {
             Ok(u) => u,
             Err(e) => {

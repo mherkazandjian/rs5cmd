@@ -251,7 +251,20 @@ impl S3 {
             .or_else(|| std::env::var("S3_ENDPOINT_URL").ok());
 
         if let Some(ep) = endpoint {
-            builder = builder.endpoint_url(ep).force_path_style(true);
+            builder = builder.endpoint_url(ep);
+            // Default to path-style for custom endpoints (MinIO and most
+            // S3-compatible servers only support path-style), unless the user
+            // forces an addressing style explicitly.
+            let force_path = match opts.addressing_style.as_deref() {
+                Some("virtual") => false,
+                Some("path") => true,
+                _ => true,
+            };
+            builder = builder.force_path_style(force_path);
+        } else if let Some(style) = opts.addressing_style.as_deref() {
+            // No custom endpoint (real AWS): honor an explicit override; the SDK
+            // default is virtual-host style.
+            builder = builder.force_path_style(style == "path");
         }
         // Default region fallback so requests against MinIO don't fail config.
         if shared.region().is_none() && opts.region.is_none() {

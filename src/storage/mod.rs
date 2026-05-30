@@ -144,6 +144,10 @@ pub struct Options {
     pub request_payer: Option<String>,
     pub profile: Option<String>,
     pub region: Option<String>,
+    /// Force S3 addressing style: `Some("path")` or `Some("virtual")`. When
+    /// `None`, path-style is used for custom endpoints (MinIO etc.) and the SDK
+    /// default (virtual-host) for real AWS — matching prior behavior.
+    pub addressing_style: Option<String>,
     /// Multipart part size in bytes. Objects larger than this are transferred
     /// in parallel parts; smaller ones use a single PUT/GET.
     pub part_size: u64,
@@ -169,6 +173,7 @@ impl Default for Options {
             request_payer: None,
             profile: None,
             region: None,
+            addressing_style: None,
             part_size: DEFAULT_PART_SIZE,
             concurrency: DEFAULT_CONCURRENCY,
         }
