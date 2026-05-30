@@ -38,6 +38,24 @@ fn is_copy_source_too_large(e: &anyhow::Error) -> bool {
     m.contains("larger than the maximum allowable size") || m.contains("entitytoolarge")
 }
 
+/// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
+/// header value (the part after the final `/`).
+fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
+    cr?.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+/// True if a GetObject error indicates the requested range was not satisfiable
+/// (HTTP 416) — e.g. a zero-byte object probed with a `bytes=0-N` range. Matched
+/// against the Debug chain; misclassification is harmless because the caller
+/// falls back to a plain (correct) GET on a match.
+fn is_range_not_satisfiable<E: std::fmt::Debug>(e: &E) -> bool {
+    let m = format!("{e:?}").to_ascii_lowercase();
+    m.contains("rangenotsatisfiable")
+        || m.contains("invalidrange")
+        || m.contains("range not satisfiable")
+        || m.contains("requested range not satisfiable")
+}
+
 /// Builds an HTTP client for the AWS SDK whose TLS layer skips certificate
 /// verification (and hostname checking) — used only when `--no-verify-ssl`
 /// is set, for self-signed HTTPS endpoints.
@@ -301,8 +319,15 @@ impl S3 {
         Ok(out.content_length().unwrap_or(0).max(0) as u64)
     }
 
-    /// Downloads the remote object to a local path. Objects larger than the
-    /// configured part size are fetched as concurrent byte ranges.
+    /// Downloads the remote object to a local path.
+    ///
+    /// The first part is fetched with a ranged GET (`bytes=0-part_size-1`) whose
+    /// `Content-Range` header reports the object's total size, so the
+    /// single-vs-ranged decision is made from that one response — there is no
+    /// separate HeadObject round-trip (saving a request per download; cf.
+    /// upstream s5cmd #793). Small objects (<= part size) are therefore one
+    /// request total; larger objects fetch the remaining parts as concurrent
+    /// byte ranges, reusing the already-downloaded first part.
     pub async fn download(&self, src: &Url, dst: &Path) -> anyhow::Result<()> {
         if self.dry_run {
             return Ok(());
@@ -312,14 +337,55 @@ impl S3 {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
-        let size = self.head_size(src).await?;
-        if size <= self.part_size {
-            return self.download_single(src, dst).await;
+
+        let part_size = self.part_size;
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .range(format!("bytes=0-{}", part_size - 1))
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
         }
-        self.download_ranged(src, dst, size).await
+        let resp = match req.send().await {
+            Ok(r) => r,
+            // A zero-byte object makes the ranged request unsatisfiable (HTTP
+            // 416); fall back to a plain GET, which returns the whole (possibly
+            // empty) body and creates the file correctly.
+            Err(e) if is_range_not_satisfiable(&e) => {
+                return self.download_single(src, dst).await;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let total = parse_content_range_total(resp.content_range())
+            .or_else(|| resp.content_length().map(|l| l.max(0) as u64))
+            .unwrap_or(0);
+        let first = resp.body.collect().await?.into_bytes();
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dst)?;
+        file.set_len(total)?;
+        {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(&first, 0)?;
+        }
+
+        // Small object: the first part was the whole object.
+        if total <= part_size {
+            return Ok(());
+        }
+        // Large object: fetch parts 1..n concurrently into the preallocated file.
+        self.download_remaining_parts(src, file, total, part_size).await
     }
 
-    /// Single streaming GET to a file.
+    /// Single streaming GET to a file. Used as the zero-byte / range-error
+    /// fallback for `download`.
     async fn download_single(&self, src: &Url, dst: &Path) -> anyhow::Result<()> {
         let mut body = self.read(src).await?;
         let mut file = tokio::fs::File::create(dst).await?;
@@ -331,22 +397,21 @@ impl S3 {
         Ok(())
     }
 
-    /// Concurrent ranged GETs written at their offsets into a preallocated file.
-    async fn download_ranged(&self, src: &Url, dst: &Path, size: u64) -> anyhow::Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(dst)?;
-        file.set_len(size)?;
+    /// Fetches parts `1..n` (part 0 is already written) as concurrent ranged
+    /// GETs written at their offsets into the preallocated file.
+    async fn download_remaining_parts(
+        &self,
+        src: &Url,
+        file: std::fs::File,
+        total: u64,
+        part_size: u64,
+    ) -> anyhow::Result<()> {
         let file = std::sync::Arc::new(file);
+        let n_parts = total.div_ceil(part_size);
 
-        let part_size = self.part_size;
-        let n_parts = size.div_ceil(part_size);
-
-        let tasks = (0..n_parts).map(|i| {
+        let tasks = (1..n_parts).map(|i| {
             let offset = i * part_size;
-            let len = part_size.min(size - offset);
+            let len = part_size.min(total - offset);
             let client = self.client.clone();
             let bucket = src.bucket.clone();
             let key = src.path.clone();
