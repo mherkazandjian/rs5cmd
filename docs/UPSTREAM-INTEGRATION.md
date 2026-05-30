@@ -77,12 +77,12 @@ Small, well-scoped, mostly additive.
 
 | Item | Refs | Notes | Effort |
 |------|------|-------|--------|
-| `ls --show-fullpath` | PR#599/#601 | Prints absolute key, suppresses columns; script/`xargs`-friendly. | S |
-| `ls --start-after` | PR#850 | Maps directly to `ListObjectsV2 StartAfter` for resume/pagination. | S |
-| `sync` progress + "nothing to sync" message | #787, #796, #753 | Reuse the existing cp progress renderer at op-count granularity (not byte-level); emit a line on no-op. | S/M |
-| `--exclude-from` / `--include-from` | #868 | Read filter patterns from a file (with `#` comments). | S |
-| Exit code 130 on SIGINT | PR#863 | POSIX-correct Ctrl-C exit code. | S |
-| Shell completion | v2.1.0 | `clap_complete` makes bash/zsh/fish/pwsh near-trivial. | S |
+| `ls --show-fullpath` ✅ DONE | PR#599/#601 | Prints absolute s3:// path, suppresses columns; script/`xargs`-friendly. Implemented in `ls.rs`. | S |
+| `ls --start-after` ✅ DONE | PR#850 | `ListObjectsV2 StartAfter` (V1 `Marker`) plumbed through `Url`/`UrlOptions` into both list paths. | S |
+| `sync` "nothing to sync" message ✅ DONE | #796 | sync already printed a run summary on stderr; now says "nothing to sync" explicitly when no copies/deletes occurred. (Byte-level progress is out of scope; op-count progress bars already exist.) | S |
+| `--exclude-from` / `--include-from` ✅ DONE | #868 | `sync` and `rm` read extra filter globs from files (one per line; blank lines and `#` comments ignored), combined with inline `--include`/`--exclude`. | S |
+| Exit code 130 on SIGINT | PR#863 | POSIX-correct Ctrl-C exit code. Not yet done. | S |
+| Shell completion ✅ DONE | v2.1.0 | `completion <shell>` subcommand via `clap_complete` (bash/zsh/fish/powershell/elvish). | S |
 | `ls` local-timezone timestamps | #822, #845 | Optional flag to show local tz like aws-cli. | S |
 | `--humanize` byte suffix | #817 | Print `B` suffix for sub-KiB sizes. | S |
 | Addressing-style toggle | #794, PR#795 | `--addressing-style path|virtual` for S3-compatible providers. | S/M |

@@ -7,7 +7,7 @@ Go s5cmd on small-object throughput and CPU efficiency.
 Development and testing are fully containerized (no Rust toolchain needed on the
 host); the suite runs against a MinIO S3-compatible server via docker-compose.
 
-- **14 commands**: `ls cp mv rm cat mb rb sync du pipe head presign select run bucket-version`
+- **15 commands**: `ls cp mv rm cat mb rb sync du pipe head presign select run bucket-version completion`
 - **Two transfer engines**: a portable `tokio` + `aws-sdk-s3` path (default), and
   an opt-in `--fast` io_uring path (Linux, `fast` feature) for many small objects.
 - **Tested end-to-end** against MinIO: 92 tests on the default build, 99 with the
@@ -55,7 +55,8 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
        [--no-sign-request] [--no-verify-ssl] [--use-list-objects-v1]
        [--retry-count N] [--dry-run] [--numworkers N] <command>
 
-  ls   [s3://bucket[/prefix]] [--summarize]  list buckets or objects
+  ls   [s3://bucket[/prefix]] [--summarize] [--show-fullpath] [--start-after KEY]
+                                   list buckets or objects
   cp   <src> <dst>                 copy (local↔s3, s3↔s3); wildcards, --fast
   mv   <src> <dst>                 move (copy then delete source)
   rm   <target>...                 remove objects (wildcard/prefix, --include/--exclude)
@@ -63,7 +64,8 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   mb   <s3://bucket>               make bucket
   rb   <s3://bucket>               remove bucket
   sync <src> <dst>                 sync (--delete, --size-only, --include/--exclude,
-                                   --exit-on-error, --max-delete N)
+                                   --include-from/--exclude-from, --exit-on-error,
+                                   --max-delete N)
   du   [s3://bucket/prefix/*]      summarize size/count (--exclude, --all-versions)
   pipe <s3://bucket/key>           upload stdin (--sse, --sse-kms-key-id, multipart)
   head <s3://bucket[/key]>         print object metadata / check bucket
@@ -71,6 +73,7 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   select [-e SQL] <s3://bucket/[key|*]>            run an S3 Select query
   run  [file]                      run newline-delimited commands from file/stdin
   bucket-version [--set S] <s3://bucket>           get/set versioning (Enabled/Suspended)
+  completion <bash|zsh|fish|powershell|elvish>     print a shell completion script
 ```
 
 Large-object knobs (`--part-size`, `--concurrency`) and version flags

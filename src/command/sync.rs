@@ -63,6 +63,16 @@ pub struct SyncArgs {
     #[arg(long)]
     pub include: Vec<String>,
 
+    /// Read additional `--exclude` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub exclude_from: Vec<String>,
+
+    /// Read additional `--include` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub include_from: Vec<String>,
+
     /// Storage class for copied destination objects.
     #[arg(long)]
     pub storage_class: Option<String>,
@@ -119,8 +129,11 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
     let metadata = args.metadata();
     let strategy = SyncStrategy::new(args.size_only);
 
-    // Compile include/exclude filters into regexes once.
-    let filters = Filters::new(&args.include, &args.exclude)?;
+    // Compile include/exclude filters into regexes once. Inline patterns are
+    // combined with any read from `--include-from`/`--exclude-from` files.
+    let includes = patterns_with_files(&args.include, &args.include_from)?;
+    let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
+    let filters = Filters::new(&includes, &excludes)?;
 
     // Determine whether the source expands to multiple objects ("batch"), which
     // governs how relative keys are derived (mirrors Go's `isBatch`).
@@ -297,8 +310,14 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
     // One-line run summary of successful operations, emitted to stderr so it
     // never interleaves with the per-object result lines on stdout. Suppressed
     // in JSON mode to keep machine-readable output limited to the per-op objects.
+    // When the source and destination already matched, say so explicitly rather
+    // than printing a silent "0 objects" line (upstream s5cmd #796).
     if !crate::output::is_json() {
-        eprintln!("# synced {copied} objects, deleted {deleted}");
+        if copied == 0 && deleted == 0 {
+            eprintln!("# nothing to sync; source and destination are already in sync");
+        } else {
+            eprintln!("# synced {copied} objects, deleted {deleted}");
+        }
     }
 
     if had_error {
@@ -379,6 +398,24 @@ impl Filters {
         }
         false
     }
+}
+
+/// Returns the inline patterns followed by any read from the given files (one
+/// pattern per line; blank lines and lines starting with `#` are ignored).
+fn patterns_with_files(inline: &[String], files: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out = inline.to_vec();
+    for f in files {
+        let content = std::fs::read_to_string(f)
+            .map_err(|e| anyhow::anyhow!("reading pattern file {f}: {e}"))?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            out.push(line.to_string());
+        }
+    }
+    Ok(out)
 }
 
 /// Compiles wildcard glob strings into anchored regexes.

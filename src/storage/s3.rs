@@ -763,6 +763,11 @@ impl S3 {
                 } else {
                     Some(src.delimiter.clone())
                 })
+                .set_start_after(if src.start_after.is_empty() {
+                    None
+                } else {
+                    Some(src.start_after.clone())
+                })
                 .set_request_payer(this.request_payer())
                 .into_paginator()
                 .send();

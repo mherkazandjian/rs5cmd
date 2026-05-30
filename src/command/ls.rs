@@ -40,6 +40,16 @@ pub struct LsArgs {
     /// Print a summary footer with the total object count and size.
     #[arg(long)]
     pub summarize: bool,
+
+    /// Print only each object's full s3:// path (one per line), suppressing the
+    /// date/size/etag columns. Convenient for piping into `xargs`/`run`.
+    #[arg(long)]
+    pub show_fullpath: bool,
+
+    /// Start listing after this key (S3 `StartAfter`); useful to resume a
+    /// listing or page through a large bucket.
+    #[arg(long)]
+    pub start_after: Option<String>,
 }
 
 pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
@@ -58,6 +68,7 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
         crate::storage::url::UrlOptions {
             all_versions: args.all_versions,
             version_id: args.version_id.clone(),
+            start_after: args.start_after.clone(),
             ..Default::default()
         },
     )
@@ -85,6 +96,11 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
         }
         if crate::output::is_json() {
             crate::output::json_line(object_json(&obj));
+        } else if args.show_fullpath {
+            // Only the absolute s3:// path, one per line (no columns).
+            if let Some(u) = &obj.url {
+                println!("{}", u.absolute());
+            }
         } else {
             println!("{}", format_object(&obj, &args));
         }
@@ -283,6 +299,8 @@ mod tests {
             all_versions: true,
             version_id: None,
             summarize: false,
+            show_fullpath: false,
+            start_after: None,
         }
     }
 

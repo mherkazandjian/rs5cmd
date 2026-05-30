@@ -120,6 +120,15 @@ pub enum Command {
     Run(run::RunArgs),
     /// Get or set a bucket's versioning status.
     BucketVersion(bucket_version::BucketVersionArgs),
+    /// Generate a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completion(CompletionArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CompletionArgs {
+    /// Shell to generate the completion script for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 /// Runs the parsed CLI.
@@ -141,5 +150,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Select(args) => select::run(&cli.global, args).await,
         Command::Run(args) => run::run(&cli.global, args).await,
         Command::BucketVersion(args) => bucket_version::run(&cli.global, args).await,
+        Command::Completion(args) => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(args.shell, &mut cmd, "rs5cmd", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }
