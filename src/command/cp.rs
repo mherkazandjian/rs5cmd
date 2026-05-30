@@ -50,6 +50,13 @@ pub struct CpArgs {
     #[arg(long)]
     pub version_id: Option<String>,
 
+    /// Force transfer of glacier objects whether they are restored or not.
+    /// `cp` transfers every listed object regardless of storage class, so this
+    /// flag is accepted for compatibility (and parity with `sync`'s
+    /// `--force-glacier-transfer`); it does not change `cp`'s behavior (#812).
+    #[arg(long)]
+    pub force_glacier_transfer: bool,
+
     /// Preserve file modification time: store the local mtime as object
     /// metadata on upload, and restore it onto the file on download.
     #[arg(long)]

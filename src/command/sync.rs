@@ -99,6 +99,13 @@ pub struct SyncArgs {
     #[arg(long)]
     pub exit_on_error: bool,
 
+    /// Transfer GLACIER / DEEP_ARCHIVE objects instead of silently skipping
+    /// them. By default sync skips glacier-tier source objects (they cannot be
+    /// read until restored); with this flag they are queued for transfer like
+    /// any other object, matching `cp`'s `--force-glacier-transfer` (#812).
+    #[arg(long)]
+    pub force_glacier_transfer: bool,
+
     /// Safety cap on `--delete`: abort the whole sync (before copying or
     /// deleting anything) if more than N destination objects would be deleted.
     /// Guards against a misconfigured source silently wiping the destination
@@ -120,6 +127,15 @@ pub struct SyncArgs {
 fn is_fatal(e: &anyhow::Error) -> bool {
     let msg = format!("{e:#}").to_ascii_lowercase();
     msg.contains("accessdenied") || msg.contains("nosuchbucket")
+}
+
+/// Whether a source object should be skipped because it is on a glacier tier.
+/// Sync skips glacier-tier objects by default (they cannot be read until
+/// restored), but `--force-glacier-transfer` overrides that so they are
+/// transferred like any other object (#812). When the flag is set, nothing is
+/// skipped on storage-class grounds.
+fn skip_glacier(sc: &crate::storage::StorageClass, force_glacier_transfer: bool) -> bool {
+    !force_glacier_transfer && sc.is_glacier()
 }
 
 impl SyncArgs {
@@ -153,8 +169,16 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
 
     // Build the keyed source and destination maps.
     let source_objects =
-        collect_source_objects(&src, &opts, args.follow_symlinks, is_batch, &filters, args.checksum)
-            .await?;
+        collect_source_objects(
+            &src,
+            &opts,
+            args.follow_symlinks,
+            is_batch,
+            &filters,
+            args.checksum,
+            args.force_glacier_transfer,
+        )
+        .await?;
     let dest_objects = collect_dest_objects(&dst, &opts, &filters).await?;
 
     // Partition into copy / common / delete groups.
@@ -470,6 +494,7 @@ async fn collect_source_objects(
     is_batch: bool,
     filters: &Filters,
     checksum: bool,
+    force_glacier_transfer: bool,
 ) -> anyhow::Result<HashMap<String, Object>> {
     let client = new_client(src, opts).await?;
     let mut map: HashMap<String, Object> = HashMap::new();
@@ -511,7 +536,7 @@ async fn collect_source_objects(
         if obj.typ.is_dir() {
             continue;
         }
-        if obj.storage_class.is_glacier() {
+        if skip_glacier(&obj.storage_class, force_glacier_transfer) {
             continue;
         }
         let Some(obj_url) = obj.url.clone() else { continue };
@@ -732,6 +757,33 @@ mod tests {
         // Unrelated errors are not fatal.
         assert!(!is_fatal(&anyhow::anyhow!("connection reset")));
         assert!(!is_fatal(&anyhow::anyhow!("NoSuchKey: not found")));
+    }
+
+    #[test]
+    fn glacier_skipped_by_default() {
+        // Without --force-glacier-transfer, a GLACIER object is skipped.
+        let sc = crate::storage::StorageClass("GLACIER".to_string());
+        assert!(skip_glacier(&sc, false));
+    }
+
+    #[test]
+    fn glacier_not_skipped_when_forced() {
+        // #812: --force-glacier-transfer overrides the skip so glacier objects
+        // are transferred, mirroring cp's behavior.
+        let sc = crate::storage::StorageClass("GLACIER".to_string());
+        assert!(!skip_glacier(&sc, true));
+    }
+
+    #[test]
+    fn non_glacier_never_skipped() {
+        // STANDARD (and the empty default) are never skipped, with or without
+        // the flag.
+        let std = crate::storage::StorageClass("STANDARD".to_string());
+        assert!(!skip_glacier(&std, false));
+        assert!(!skip_glacier(&std, true));
+        let empty = crate::storage::StorageClass::default();
+        assert!(!skip_glacier(&empty, false));
+        assert!(!skip_glacier(&empty, true));
     }
 
     #[test]
