@@ -28,6 +28,16 @@ Implemented (each with MinIO e2e tests):
 | #534 ✅ | `--preserve-timestamps` (mtime ↔ object metadata) | `cp.rs`, `sync.rs`, `storage/s3.rs` |
 | #671 ✅ | `--client-copy` (remote→remote via download+upload) | `cp.rs`, `storage/s3.rs` |
 | #799 ✅ | `sync --checksum` (compare MD5/ETag) | `sync_strategy.rs`, `sync.rs` |
+| #823 ✅ | `--proxy`/`-x` SOCKS5 + HTTP-CONNECT proxy (env fallback) | `storage/s3.rs`, `command/mod.rs` |
+
+The proxy work adds a custom `tower` connector (SOCKS5 via `tokio-socks`,
+HTTP `CONNECT` hand-rolled) wrapped by hyper-rustls and adapted to the SDK's
+`http_client` hook, generalizing the former no-verify-only client builder. A
+`socks5` + `test-proxy` docker-compose pair routes the `proxy_socks5_transfer`
+e2e test through a real SOCKS5 proxy (`docker compose run --rm test-proxy`); it
+self-skips in the plain `test` service. **Limitation:** proxy applies only to
+the default transport, not the io_uring `--fast` path (monoio-transports has its
+own connector).
 
 Checked and found **already handled or not applicable** (no code change):
 

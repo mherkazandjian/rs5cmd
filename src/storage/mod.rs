@@ -144,6 +144,10 @@ pub struct Options {
     pub request_payer: Option<String>,
     pub profile: Option<String>,
     pub region: Option<String>,
+    /// Proxy URL (`socks5://`, `socks5h://`, `http://`, `https://`) for the
+    /// default SDK transport. `None` falls back to the standard `ALL_PROXY` /
+    /// `HTTPS_PROXY` / `HTTP_PROXY` environment variables.
+    pub proxy: Option<String>,
     /// Force S3 addressing style: `Some("path")` or `Some("virtual")`. When
     /// `None`, path-style is used for custom endpoints (MinIO etc.) and the SDK
     /// default (virtual-host) for real AWS — matching prior behavior.
@@ -181,6 +185,7 @@ impl Default for Options {
             request_payer: None,
             profile: None,
             region: None,
+            proxy: None,
             addressing_style: None,
             part_size: DEFAULT_PART_SIZE,
             concurrency: DEFAULT_CONCURRENCY,

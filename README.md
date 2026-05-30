@@ -34,6 +34,10 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 - **Addressing style** is selectable with `--addressing-style path|virtual` for
   S3-compatible providers (defaults: path-style for custom endpoints,
   virtual-host for AWS).
+- **Proxy** support via `--proxy`/`-x` (or the `ALL_PROXY`/`HTTPS_PROXY`/
+  `HTTP_PROXY` env vars): SOCKS5 (`socks5://`, `socks5h://`) and HTTP `CONNECT`
+  (`http://`, `https://`), with optional `user:pass@`. Applies to the default
+  transport (not the `--fast` io_uring path).
 - **Listing** (`ls`) with `-H/--humanize`, `--storage-class`, `--etag`,
   `--summarize` (totals footer), and JSON output. **`du`** size/count summaries
   (`--exclude`, `--all-versions`, group-by-storage-class).
@@ -61,7 +65,7 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 ```
 rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
        [--no-sign-request] [--no-verify-ssl] [--use-list-objects-v1]
-       [--addressing-style path|virtual]
+       [--addressing-style path|virtual] [--proxy URL | -x URL]
        [--retry-count N] [--dry-run] [--numworkers N] <command>
 
   ls   [s3://bucket[/prefix]] [--summarize] [--show-fullpath] [--start-after KEY]

@@ -102,6 +102,43 @@ services:
       minio:
         condition: service_healthy
 
+  # SOCKS5 proxy used to exercise --proxy. It shares the compose network, so it
+  # can reach `minio` by DNS; the test client routes S3 traffic through it.
+  socks5:
+    image: serjs/go-socks5-proxy:latest
+    environment:
+      # This image requires auth credentials or it exits on startup; setting
+      # them also exercises the proxy-auth path in the client.
+      PROXY_USER: proxyuser
+      PROXY_PASSWORD: proxypass
+    expose:
+      - "1080"
+
+  # Proxy test runner: same as `test` but routes every S3 request through the
+  # SOCKS5 proxy (RS5CMD_TEST_SOCKS5), so the proxy_socks5_transfer e2e test runs
+  # (it self-skips in the plain `test` service, where that var is unset).
+  test-proxy:
+    build: .
+    image: rs5cmd-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9000
+      RS5CMD_TEST_SOCKS5: socks5://proxyuser:proxypass@socks5:1080
+      RUST_LOG: info
+    command: cargo test --all -- --nocapture
+    depends_on:
+      minio:
+        condition: service_healthy
+      socks5:
+        condition: service_started
+
   # Head-to-head benchmark runner: Go s5cmd vs rs5cmd against MinIO.
   # Needs io_uring (for the rs5cmd --fast path), so it runs with a hardened
   # seccomp profile = Docker default + the three io_uring syscalls allowlisted.

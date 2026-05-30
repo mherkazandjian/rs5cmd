@@ -112,6 +112,14 @@ fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
         argv.push("--profile".to_string());
         argv.push(profile.clone());
     }
+    if let Some(style) = &global.addressing_style {
+        argv.push("--addressing-style".to_string());
+        argv.push(style.clone());
+    }
+    if let Some(proxy) = &global.proxy {
+        argv.push("--proxy".to_string());
+        argv.push(proxy.clone());
+    }
     if global.no_sign_request {
         argv.push("--no-sign-request".to_string());
     }
@@ -158,6 +166,7 @@ mod tests {
             region: None,
             profile: None,
             addressing_style: None,
+            proxy: None,
             numworkers: 256,
             retry_count: 10,
         }

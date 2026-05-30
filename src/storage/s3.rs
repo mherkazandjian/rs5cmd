@@ -59,17 +59,22 @@ fn is_range_not_satisfiable<E: std::fmt::Debug>(e: &E) -> bool {
         || m.contains("requested range not satisfiable")
 }
 
-/// Builds an HTTP client for the AWS SDK whose TLS layer skips certificate
-/// verification (and hostname checking) — used only when `--no-verify-ssl`
-/// is set, for self-signed HTTPS endpoints.
-///
-/// The bundled `aws-smithy-http-client` exposes no "insecure"/no-verify hook
-/// (its `TlsContext` only lets you ADD trust, and its `Connector` cannot be
-/// built from a custom rustls `ClientConfig` through any public API), so we
-/// assemble our own hyper + hyper-rustls connector with a dangerous
-/// `ServerCertVerifier` and adapt it to the smithy `HttpClient` trait that
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Builds a custom HTTP client for the AWS SDK when we need behavior the
+/// bundled connector can't express: `--no-verify-ssl` (skip TLS verification
+/// for self-signed endpoints) and/or `--proxy` (route through a SOCKS5 or HTTP
+/// proxy). We assemble a hyper + hyper-rustls connector — optionally wrapping a
+/// `ProxyConnector` — and adapt it to the smithy `HttpClient` trait that
 /// `aws_sdk_s3::config::Builder::http_client` accepts.
-fn build_no_verify_http_client() -> NoVerifyHttpClient {
+fn build_sdk_http_client(
+    no_verify: bool,
+    proxy: Option<ProxyConfig>,
+) -> aws_smithy_runtime_api::client::http::SharedHttpClient {
+    use aws_smithy_runtime_api::client::http::SharedHttpClient;
+    use hyper_rustls::HttpsConnectorBuilder;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
     use std::sync::Arc;
 
     // Process-wide default crypto provider (idempotent; the fast path may also
@@ -77,56 +82,86 @@ fn build_no_verify_http_client() -> NoVerifyHttpClient {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-    let tls_config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .expect("rustls safe default protocol versions")
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(danger::NoVerify(provider)))
-        .with_no_client_auth();
+    let tls = if no_verify {
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("rustls safe default protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(danger::NoVerify(provider)))
+            .with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("rustls safe default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
 
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-
-    let client: HyperLegacyClient =
-        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-            .build(https);
-
-    NoVerifyHttpClient {
-        connector: NoVerifyConnector(std::sync::Arc::new(client)),
+    match proxy {
+        None => {
+            let https = HttpsConnectorBuilder::new()
+                .with_tls_config(tls)
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .build();
+            let client: Client<_, aws_smithy_types::body::SdkBody> =
+                Client::builder(TokioExecutor::new()).build(https);
+            SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) })
+        }
+        Some(p) => {
+            let https = HttpsConnectorBuilder::new()
+                .with_tls_config(tls)
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .wrap_connector(ProxyConnector { proxy: p });
+            let client: Client<_, aws_smithy_types::body::SdkBody> =
+                Client::builder(TokioExecutor::new()).build(https);
+            SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) })
+        }
     }
 }
 
-type HyperLegacyClient = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    aws_smithy_types::body::SdkBody,
->;
-
-/// A smithy `HttpClient` that hands out a single shared no-verify connector.
+/// A smithy `HttpClient` backed by a hyper-util legacy `Client` over connector
+/// `C` (generic so it serves both the proxy and non-proxy connector types).
 #[derive(Debug, Clone)]
-pub(crate) struct NoVerifyHttpClient {
-    connector: NoVerifyConnector,
+struct SdkHyperClient<C: Clone> {
+    client: std::sync::Arc<
+        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
+    >,
 }
 
-impl aws_smithy_runtime_api::client::http::HttpClient for NoVerifyHttpClient {
+impl<C> aws_smithy_runtime_api::client::http::HttpClient for SdkHyperClient<C>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
     fn http_connector(
         &self,
         _settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
         _components: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
     ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector {
-        aws_smithy_runtime_api::client::http::SharedHttpConnector::new(self.connector.clone())
+        aws_smithy_runtime_api::client::http::SharedHttpConnector::new(SdkHyperConnector {
+            client: self.client.clone(),
+        })
     }
 }
 
 /// Adapts a hyper 1.x legacy `Client` to the smithy `HttpConnector` trait,
 /// mirroring `aws-smithy-http-client`'s internal `Adapter`.
 #[derive(Debug, Clone)]
-struct NoVerifyConnector(std::sync::Arc<HyperLegacyClient>);
+struct SdkHyperConnector<C: Clone> {
+    client: std::sync::Arc<
+        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
+    >,
+}
 
-impl aws_smithy_runtime_api::client::http::HttpConnector for NoVerifyConnector {
+impl<C> aws_smithy_runtime_api::client::http::HttpConnector for SdkHyperConnector<C>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
     fn call(
         &self,
         request: aws_smithy_runtime_api::client::orchestrator::HttpRequest,
@@ -140,7 +175,7 @@ impl aws_smithy_runtime_api::client::http::HttpConnector for NoVerifyConnector {
             Ok(req) => req,
             Err(err) => return HttpConnectorFuture::ready(Err(ConnectorError::user(err.into()))),
         };
-        let client = self.0.clone();
+        let client = self.client.clone();
         HttpConnectorFuture::new(async move {
             let response = client
                 .request(request)
@@ -151,6 +186,226 @@ impl aws_smithy_runtime_api::client::http::HttpConnector for NoVerifyConnector {
             HttpResponse::try_from(http::Response::from_parts(parts, body))
                 .map_err(|err| ConnectorError::other(err.into(), None))
         })
+    }
+}
+
+/// Proxy configuration parsed from a `scheme://[user:pass@]host:port` URL,
+/// where scheme is `socks5`/`socks5h` (SOCKS5) or `http`/`https` (HTTP CONNECT).
+#[derive(Debug, Clone)]
+pub(crate) struct ProxyConfig {
+    socks5: bool,
+    host: String,
+    port: u16,
+    auth: Option<(String, String)>,
+}
+
+impl ProxyConfig {
+    fn parse(s: &str) -> anyhow::Result<ProxyConfig> {
+        let u = url::Url::parse(s)
+            .map_err(|e| anyhow::anyhow!("invalid proxy URL {s:?}: {e}"))?;
+        let socks5 = match u.scheme().to_ascii_lowercase().as_str() {
+            "socks5" | "socks5h" => true,
+            "http" | "https" => false,
+            other => anyhow::bail!("unsupported proxy scheme {other:?} (use socks5/socks5h/http/https)"),
+        };
+        let host = u
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("proxy URL {s:?} has no host"))?
+            .to_string();
+        let port = u
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("proxy URL {s:?} has no port"))?;
+        let auth = if !u.username().is_empty() {
+            Some((
+                u.username().to_string(),
+                u.password().unwrap_or("").to_string(),
+            ))
+        } else {
+            None
+        };
+        Ok(ProxyConfig { socks5, host, port, auth })
+    }
+
+    fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// Resolves the effective proxy: explicit `--proxy` first, else the standard
+/// `ALL_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY` environment variables (any case).
+pub(crate) fn effective_proxy(opts: &Options) -> anyhow::Result<Option<ProxyConfig>> {
+    fn env_any(names: &[&str]) -> Option<String> {
+        names
+            .iter()
+            .find_map(|n| std::env::var(n).ok())
+            .filter(|s| !s.is_empty())
+    }
+    let raw = opts
+        .proxy
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| env_any(&["ALL_PROXY", "all_proxy"]))
+        .or_else(|| env_any(&["HTTPS_PROXY", "https_proxy"]))
+        .or_else(|| env_any(&["HTTP_PROXY", "http_proxy"]));
+    match raw {
+        Some(s) => Ok(Some(ProxyConfig::parse(&s)?)),
+        None => Ok(None),
+    }
+}
+
+/// A `tower` connector that establishes a raw TCP byte stream to the request's
+/// target host:port *through* a proxy. hyper-rustls then layers TLS on top for
+/// `https://` targets; `http://` targets use the stream directly. Supports
+/// SOCKS5 (remote DNS) and HTTP `CONNECT` tunneling.
+#[derive(Clone)]
+struct ProxyConnector {
+    proxy: ProxyConfig,
+}
+
+impl tower_service::Service<http::Uri> for ProxyConnector {
+    type Response = ProxyIo;
+    type Error = BoxError;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<ProxyIo, BoxError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), BoxError>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, dst: http::Uri) -> Self::Future {
+        let proxy = self.proxy.clone();
+        Box::pin(async move {
+            let host = dst
+                .host()
+                .ok_or_else(|| -> BoxError { "proxy: target URI has no host".into() })?
+                .to_string();
+            let port = dst
+                .port_u16()
+                .unwrap_or(if dst.scheme_str() == Some("https") { 443 } else { 80 });
+            let tcp = if proxy.socks5 {
+                connect_via_socks5(&proxy, &host, port).await?
+            } else {
+                connect_via_http(&proxy, &host, port).await?
+            };
+            Ok(ProxyIo { inner: hyper_util::rt::TokioIo::new(tcp) })
+        })
+    }
+}
+
+/// Connects to `host:port` through a SOCKS5 proxy (remote DNS), returning the
+/// tunneled TCP stream. The proxy address is resolved locally to a concrete
+/// `SocketAddr` first (tokio-socks's own proxy-name resolution returned
+/// spurious NODATA errors here); the *target* is passed as a domain so the
+/// proxy performs its DNS.
+async fn connect_via_socks5(
+    p: &ProxyConfig,
+    host: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, BoxError> {
+    use tokio_socks::tcp::Socks5Stream;
+    use tokio_socks::TargetAddr;
+
+    let proxy_sa = tokio::net::lookup_host(p.addr())
+        .await?
+        .next()
+        .ok_or_else(|| -> BoxError { format!("proxy {} did not resolve", p.addr()).into() })?;
+    let target = TargetAddr::Domain(host.into(), port);
+    let stream = match &p.auth {
+        Some((u, pw)) => {
+            Socks5Stream::connect_with_password(proxy_sa, target, u, pw).await?
+        }
+        None => Socks5Stream::connect(proxy_sa, target).await?,
+    };
+    Ok(stream.into_inner())
+}
+
+/// Connects to `host:port` through an HTTP proxy using a `CONNECT` tunnel,
+/// returning the established TCP stream.
+async fn connect_via_http(
+    p: &ProxyConfig,
+    host: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, BoxError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut tcp = tokio::net::TcpStream::connect(p.addr()).await?;
+    let mut req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if let Some((u, pw)) = &p.auth {
+        use base64::Engine;
+        let creds = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{pw}"));
+        req.push_str(&format!("Proxy-Authorization: Basic {creds}\r\n"));
+    }
+    req.push_str("\r\n");
+    tcp.write_all(req.as_bytes()).await?;
+
+    // Read the status line + headers up to the blank line.
+    let mut buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tcp.read(&mut byte).await?;
+        if n == 0 {
+            return Err("proxy closed connection during CONNECT".into());
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 8192 {
+            return Err("proxy CONNECT response headers too large".into());
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status = head.lines().next().unwrap_or("");
+    if !status.contains(" 200") {
+        return Err(format!("proxy CONNECT failed: {status}").into());
+    }
+    Ok(tcp)
+}
+
+/// The connection type produced by `ProxyConnector`: a TCP stream wrapped for
+/// hyper, carrying a `Connection` impl so hyper-util can pool it.
+struct ProxyIo {
+    inner: hyper_util::rt::TokioIo<tokio::net::TcpStream>,
+}
+
+impl hyper::rt::Read for ProxyIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for ProxyIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl hyper_util::client::legacy::connect::Connection for ProxyIo {
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        hyper_util::client::legacy::connect::Connected::new()
     }
 }
 
@@ -282,8 +537,12 @@ impl S3 {
         // connector with a dangerous `ServerCertVerifier` and hand it to the
         // SDK via `http_client`. NOTE: this also disables hostname checking —
         // that is the intended effect of the flag.
-        if opts.no_verify_ssl {
-            builder = builder.http_client(build_no_verify_http_client());
+        // A custom HTTP client is needed for `--no-verify-ssl` and/or `--proxy`
+        // (the bundled connector supports neither). When neither is requested we
+        // leave the SDK's default client in place.
+        let proxy_cfg = effective_proxy(opts)?;
+        if opts.no_verify_ssl || proxy_cfg.is_some() {
+            builder = builder.http_client(build_sdk_http_client(opts.no_verify_ssl, proxy_cfg));
         }
 
         Ok(S3 {

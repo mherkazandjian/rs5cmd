@@ -69,6 +69,12 @@ pub struct GlobalOpts {
     #[arg(long, global = true, value_parser = ["path", "virtual"])]
     pub addressing_style: Option<String>,
 
+    /// Route requests through a proxy: `socks5://`, `socks5h://`, `http://` or
+    /// `https://[user:pass@]host:port`. Falls back to the ALL_PROXY/HTTPS_PROXY/
+    /// HTTP_PROXY env vars. (Applies to the default path, not `--fast`.)
+    #[arg(long, short = 'x', global = true)]
+    pub proxy: Option<String>,
+
     /// Number of concurrent workers for batch operations.
     #[arg(long, global = true, default_value_t = 256)]
     pub numworkers: usize,
@@ -88,6 +94,7 @@ impl GlobalOpts {
             use_list_objects_v1: self.use_list_objects_v1,
             region: self.region.clone(),
             profile: self.profile.clone(),
+            proxy: self.proxy.clone(),
             addressing_style: self.addressing_style.clone(),
             max_retries: self.retry_count,
             ..Default::default()

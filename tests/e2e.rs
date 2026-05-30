@@ -688,6 +688,49 @@ fn move_local_to_s3_deletes_source() {
 }
 
 #[test]
+fn proxy_socks5_transfer() {
+    // Routes a full upload/list/download through a SOCKS5 proxy (--proxy). Only
+    // runs when RS5CMD_TEST_SOCKS5 is set (the `test-proxy` compose service);
+    // self-skips elsewhere. (s5cmd #823)
+    let proxy = match std::env::var("RS5CMD_TEST_SOCKS5") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("skipping: RS5CMD_TEST_SOCKS5 not set");
+            return;
+        }
+    };
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("p.txt");
+    std::fs::write(&f, b"through the proxy").unwrap();
+
+    rs5cmd().args(["--proxy", &proxy, "mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["--proxy", &proxy, "cp", f.to_str().unwrap(), &s3("/p.txt")])
+        .assert()
+        .success();
+    rs5cmd()
+        .args(["--proxy", &proxy, "ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("p.txt"));
+
+    let out = tmp.path().join("out.txt");
+    rs5cmd()
+        .args(["--proxy", &proxy, "cp", &s3("/p.txt"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), b"through the proxy");
+
+    rs5cmd().args(["--proxy", &proxy, "rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["--proxy", &proxy, "rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn ls_show_fullpath_and_start_after() {
     // --show-fullpath prints absolute s3:// paths only; --start-after resumes a
     // listing past a given key (exclusive). (s5cmd #599/#601, #850)
