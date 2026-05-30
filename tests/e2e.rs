@@ -687,6 +687,73 @@ fn move_local_to_s3_deletes_source() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+// `mv --remove-empty-dirs` should prune the source directories a local->remote
+// move empties, bounded at the move source root; without the flag they remain
+// (#846).
+#[test]
+fn mv_remove_empty_dirs_prunes_emptied_source_dirs() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Nested tree:  root/sub/inner/c.txt  — moving the file empties inner and
+    // sub, up to but not including root.
+    let root = tmp.path().join("root");
+    let inner = root.join("sub").join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    let file = inner.join("c.txt");
+    std::fs::write(&file, b"hello c").unwrap();
+
+    // Move everything under root into the bucket WITH pruning enabled.
+    let pattern = format!("{}/*", root.to_str().unwrap());
+    rs5cmd()
+        .args(["mv", "--remove-empty-dirs", &pattern, &s3("/on/")])
+        .assert()
+        .success();
+
+    assert!(!file.exists(), "moved file should be gone");
+    assert!(
+        !root.join("sub").join("inner").exists(),
+        "emptied inner dir should be pruned with --remove-empty-dirs"
+    );
+    assert!(
+        !root.join("sub").exists(),
+        "emptied sub dir should be pruned with --remove-empty-dirs"
+    );
+    // The move source root itself must never be removed.
+    assert!(root.exists(), "move source root must not be pruned");
+
+    // --- Control: identical shape, WITHOUT the flag — dirs must remain. ---
+    let root2 = tmp.path().join("root2");
+    let inner2 = root2.join("sub").join("inner");
+    std::fs::create_dir_all(&inner2).unwrap();
+    let file2 = inner2.join("d.txt");
+    std::fs::write(&file2, b"hello d").unwrap();
+
+    let pattern2 = format!("{}/*", root2.to_str().unwrap());
+    rs5cmd()
+        .args(["mv", &pattern2, &s3("/off/")])
+        .assert()
+        .success();
+
+    assert!(!file2.exists(), "moved file should be gone");
+    assert!(
+        root2.join("sub").join("inner").exists(),
+        "without --remove-empty-dirs the emptied dirs must remain"
+    );
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
 #[test]
 fn proxy_socks5_transfer() {
     // Routes a full upload/list/download through a SOCKS5 proxy (--proxy). Only

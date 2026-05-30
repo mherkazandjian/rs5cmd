@@ -60,6 +60,13 @@ pub struct CpArgs {
     /// copy is unavailable or disallowed.
     #[arg(long)]
     pub client_copy: bool,
+
+    /// On `mv` of local files to remote, after removing each moved source file
+    /// also remove any source directories it emptied, walking up toward (but
+    /// never past) the move source root. Non-empty or otherwise un-removable
+    /// directories are skipped silently. No effect on `cp`.
+    #[arg(long)]
+    pub remove_empty_dirs: bool,
 }
 
 impl CpArgs {
@@ -79,6 +86,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     opts.concurrency = args.concurrency.max(1);
     opts.preserve_timestamps = args.preserve_timestamps;
     opts.client_copy = args.client_copy;
+    opts.remove_empty_dirs = args.remove_empty_dirs;
     let src = Url::new(
         &args.src,
         crate::storage::url::UrlOptions {
@@ -278,6 +286,11 @@ async fn copy_one(
                 .await?;
             if is_move && !opts.dry_run {
                 std::fs::remove_file(src.absolute())?;
+                // Opt-in: prune source directories the move just emptied,
+                // walking up but never at/above the move source root (#846).
+                if opts.remove_empty_dirs {
+                    prune_empty_dirs(src);
+                }
             }
         }
         // local -> local: filesystem copy.
@@ -290,6 +303,64 @@ async fn copy_one(
         }
     }
     Ok(())
+}
+
+/// After a local→remote `mv` removed the source file `src`, attempt to remove
+/// the source directories it just emptied, walking up from the file's parent
+/// toward — but never reaching or passing — the move source root.
+///
+/// The move source root is derived from the file's relative path within the
+/// move: `src.relative()` is the path of the file relative to the move base
+/// (e.g. `sub/inner/c.txt` for `mv root/* …`, or `data/sub/3.txt` for
+/// `mv data …`), so stripping that many trailing components off the absolute
+/// file path yields the directory the relative layout is anchored at. We never
+/// remove that anchor directory or anything at/above it.
+///
+/// `std::fs::remove_dir` only succeeds on an empty directory, so a non-empty
+/// parent (or any other error) simply stops the climb. Pruning is best-effort
+/// and never fatal: a non-empty/unremovable dir is silently skipped.
+fn prune_empty_dirs(src: &Url) {
+    let abs = src.absolute();
+    let file_path = std::path::Path::new(&abs);
+
+    // Number of path components in the relative path (the file plus any dirs the
+    // move created beneath the anchor). With only one component there are no
+    // intermediate move-created dirs to prune (e.g. a bare single-file move), so
+    // there is nothing to do — and importantly nothing above the file's own
+    // parent may be touched.
+    let rel = src.relative();
+    let rel_components = std::path::Path::new(&rel)
+        .components()
+        .filter(|c| matches!(c, std::path::Component::Normal(_)))
+        .count();
+    if rel_components <= 1 {
+        return;
+    }
+
+    // The anchor (move source root) is the absolute path with `rel_components`
+    // trailing components removed. Everything strictly below it may be pruned;
+    // the anchor itself never is.
+    let mut anchor = file_path.to_path_buf();
+    for _ in 0..rel_components {
+        match anchor.parent() {
+            Some(p) => anchor = p.to_path_buf(),
+            None => return,
+        }
+    }
+
+    let mut cur = file_path.parent().map(|p| p.to_path_buf());
+    while let Some(dir) = cur {
+        // Stop at/above the anchor or anything outside it.
+        if dir == anchor || !dir.starts_with(&anchor) {
+            break;
+        }
+        // remove_dir fails on a non-empty directory; treat that (and any other
+        // error) as a non-fatal stop.
+        if std::fs::remove_dir(&dir).is_err() {
+            break;
+        }
+        cur = dir.parent().map(|p| p.to_path_buf());
+    }
 }
 
 use crate::storage::Storage as _;

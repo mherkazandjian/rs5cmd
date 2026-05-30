@@ -165,6 +165,10 @@ pub struct Options {
     /// (download then upload) instead of a server-side `CopyObject`. Useful
     /// when server-side copy is unavailable or disallowed.
     pub client_copy: bool,
+    /// On a local→remote `mv`, after removing each moved source file, also
+    /// prune now-empty source directories walking up toward (but never past)
+    /// the move source root. Non-empty/unremovable directories are skipped.
+    pub remove_empty_dirs: bool,
 }
 
 /// Default multipart part size (bytes). Mirrors a common 8 MiB default and is
@@ -191,6 +195,7 @@ impl Default for Options {
             concurrency: DEFAULT_CONCURRENCY,
             preserve_timestamps: false,
             client_copy: false,
+            remove_empty_dirs: false,
         }
     }
 }
