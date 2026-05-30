@@ -153,6 +153,10 @@ pub struct Options {
     pub part_size: u64,
     /// Number of parts transferred concurrently per object.
     pub concurrency: usize,
+    /// Preserve file modification time across transfers: on upload the local
+    /// mtime is stored as object metadata; on download it is restored onto the
+    /// written file.
+    pub preserve_timestamps: bool,
 }
 
 /// Default multipart part size (bytes). Mirrors a common 8 MiB default and is
@@ -176,9 +180,15 @@ impl Default for Options {
             addressing_style: None,
             part_size: DEFAULT_PART_SIZE,
             concurrency: DEFAULT_CONCURRENCY,
+            preserve_timestamps: false,
         }
     }
 }
+
+/// Object-metadata key (becomes `x-amz-meta-<key>`) used to carry the source
+/// file's modification time when `--preserve-timestamps` is set. The value is
+/// the mtime in `seconds.nanoseconds` since the Unix epoch.
+pub const MTIME_METADATA_KEY: &str = "file-mtime";
 
 /// Common interface for local filesystem and remote object storage. Listing
 /// operations return a channel receiver mirroring the Go `<-chan *Object`

@@ -99,6 +99,11 @@ pub struct SyncArgs {
     /// (rsync's `--max-delete`). Ignored unless `--delete` is also set.
     #[arg(long)]
     pub max_delete: Option<usize>,
+
+    /// Preserve file modification time across transfers (store local mtime as
+    /// object metadata on upload; restore it on download).
+    #[arg(long)]
+    pub preserve_timestamps: bool,
 }
 
 /// Returns true if an error is a fatal AWS error that should abort the whole
@@ -123,7 +128,8 @@ impl SyncArgs {
 }
 
 pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
-    let opts = global.storage_options();
+    let mut opts = global.storage_options();
+    opts.preserve_timestamps = args.preserve_timestamps;
     let src = Url::parse(&args.src).map_err(|e| anyhow::anyhow!(e))?;
     let dst = Url::parse(&args.dst).map_err(|e| anyhow::anyhow!(e))?;
     let metadata = args.metadata();

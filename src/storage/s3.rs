@@ -213,6 +213,7 @@ pub struct S3 {
     /// limit; overridable via `RS5CMD_MULTIPART_COPY_THRESHOLD` (bytes) so the
     /// multipart-copy path can be exercised in tests without a 5 GiB object.
     multipart_copy_threshold: u64,
+    preserve_timestamps: bool,
 }
 
 impl S3 {
@@ -293,6 +294,7 @@ impl S3 {
                 .ok()
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MULTIPART_COPY_THRESHOLD),
+            preserve_timestamps: opts.preserve_timestamps,
         })
     }
 
@@ -376,6 +378,15 @@ impl S3 {
         let total = parse_content_range_total(resp.content_range())
             .or_else(|| resp.content_length().map(|l| l.max(0) as u64))
             .unwrap_or(0);
+        // With --preserve-timestamps, capture the stored mtime metadata before
+        // the body is consumed, to restore it after the file is written.
+        let mtime_value = if self.preserve_timestamps {
+            resp.metadata()
+                .and_then(|m| m.get(crate::storage::MTIME_METADATA_KEY))
+                .cloned()
+        } else {
+            None
+        };
         let first = resp.body.collect().await?.into_bytes();
 
         let file = std::fs::OpenOptions::new()
@@ -390,11 +401,19 @@ impl S3 {
         }
 
         // Small object: the first part was the whole object.
-        if total <= part_size {
-            return Ok(());
+        if total > part_size {
+            // Large object: fetch parts 1..n concurrently into the file.
+            self.download_remaining_parts(src, file, total, part_size).await?;
         }
-        // Large object: fetch parts 1..n concurrently into the preallocated file.
-        self.download_remaining_parts(src, file, total, part_size).await
+
+        // Restore the preserved mtime, if any (best-effort: a malformed value or
+        // an unsupported filesystem must not fail the otherwise-complete copy).
+        if let Some(v) = mtime_value {
+            if let Err(e) = set_file_mtime_from_value(dst, &v) {
+                eprintln!("warning: could not restore mtime on {}: {e:#}", dst.display());
+            }
+        }
+        Ok(())
     }
 
     /// Single streaming GET to a file. Used as the zero-byte / range-error
@@ -469,6 +488,22 @@ impl S3 {
             return Ok(());
         }
         let size = std::fs::metadata(src)?.len();
+
+        // With --preserve-timestamps, carry the source file's mtime as object
+        // metadata so a later download can restore it.
+        let owned;
+        let metadata = if self.preserve_timestamps {
+            let mut m = metadata.clone();
+            if let Some(v) = file_mtime_value(src) {
+                m.user_defined
+                    .insert(crate::storage::MTIME_METADATA_KEY.to_string(), v);
+            }
+            owned = m;
+            &owned
+        } else {
+            metadata
+        };
+
         if size <= self.part_size {
             return self.upload_single(src, dst, metadata).await;
         }
@@ -534,6 +569,9 @@ impl S3 {
             if !acl.is_empty() {
                 create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
             }
+        }
+        for (k, v) in &metadata.user_defined {
+            create = create.metadata(k, v);
         }
         let created = create.send().await?;
         let upload_id = created
@@ -1434,6 +1472,25 @@ impl S3 {
         let out = req.send().await?;
         Ok(out.content_type().map(|s| s.to_string()))
     }
+}
+
+/// Formats a local file's modification time as `seconds.nanoseconds` since the
+/// Unix epoch, for storage as object metadata under `MTIME_METADATA_KEY`.
+fn file_mtime_value(src: &Path) -> Option<String> {
+    let mtime = std::fs::metadata(src).ok()?.modified().ok()?;
+    let dur = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}.{:09}", dur.as_secs(), dur.subsec_nanos()))
+}
+
+/// Restores a file's mtime from a `seconds[.nanoseconds]` metadata value.
+fn set_file_mtime_from_value(path: &Path, value: &str) -> anyhow::Result<()> {
+    let (secs, nanos) = match value.split_once('.') {
+        Some((s, n)) => (s.parse::<i64>()?, n.parse::<u32>().unwrap_or(0)),
+        None => (value.parse::<i64>()?, 0),
+    };
+    let ft = filetime::FileTime::from_unix_time(secs, nanos);
+    filetime::set_file_mtime(path, ft)?;
+    Ok(())
 }
 
 fn apply_put_metadata(

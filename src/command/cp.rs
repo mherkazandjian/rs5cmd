@@ -49,6 +49,11 @@ pub struct CpArgs {
     /// Copy the given source object version id (single-object remote source).
     #[arg(long)]
     pub version_id: Option<String>,
+
+    /// Preserve file modification time: store the local mtime as object
+    /// metadata on upload, and restore it onto the file on download.
+    #[arg(long)]
+    pub preserve_timestamps: bool,
 }
 
 impl CpArgs {
@@ -66,6 +71,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let mut opts = global.storage_options();
     opts.part_size = args.part_size.max(5).saturating_mul(1024 * 1024);
     opts.concurrency = args.concurrency.max(1);
+    opts.preserve_timestamps = args.preserve_timestamps;
     let src = Url::new(
         &args.src,
         crate::storage::url::UrlOptions {
