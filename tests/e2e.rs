@@ -1062,3 +1062,92 @@ fn list_key_with_xml_illegal_control_char() {
     rs5cmd().args(["rm", &dst]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn dir_marker_object_is_a_file_not_a_dir() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let endpoint = std::env::var("AWS_ENDPOINT_URL")
+        .or_else(|_| std::env::var("S3_ENDPOINT_URL"))
+        .unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Create a REAL object with key exactly "foo/" (console dir-marker). Use an
+    // explicit s3api PutObject so the marker carries an ETag/size/last_modified
+    // exactly like a console-created dir marker, bypassing rs5cmd's own
+    // client-side trailing-slash guards (pipe rejects a "/"-suffixed dest; cp
+    // would append the source basename).
+    let tmp = tempfile::tempdir().unwrap();
+    let body = tmp.path().join("body");
+    std::fs::write(&body, b"marker-body").unwrap();
+    let put = std::process::Command::new("aws")
+        .args([
+            "--endpoint-url",
+            &endpoint,
+            "s3api",
+            "put-object",
+            "--bucket",
+            &bucket,
+            "--key",
+            "foo/",
+            "--body",
+            body.to_str().unwrap(),
+        ])
+        .status();
+    match put {
+        Ok(s) if s.success() => {}
+        _ => {
+            eprintln!("skipping: aws cli unavailable to create dir-marker");
+            return;
+        }
+    }
+
+    // Also create a normal object under a genuine prefix (CommonPrefix check).
+    let real = tmp.path().join("real.txt");
+    std::fs::write(&real, b"hello").unwrap();
+    rs5cmd()
+        .args(["cp", real.to_str().unwrap(), &s3("/baz/real.txt")])
+        .assert()
+        .success();
+
+    // LOAD-BEARING: cat the exact marker key. cat routes through list() because
+    // foo/ is a prefix; pre-fix the marker was typed Dir and skipped
+    // ("no objects matched"); post-fix it is a File and its bytes are returned.
+    rs5cmd()
+        .args(["cat", &s3("/foo/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("marker-body"));
+
+    // ls of the exact key shows it as a real object row (not a DIR row).
+    rs5cmd()
+        .args(["ls", &s3("/foo/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("foo/"))
+        .stdout(predicate::str::contains("DIR").not());
+
+    // cp the marker to a local file: only works if classified File.
+    let out = tmp.path().join("marker.out");
+    rs5cmd()
+        .args(["cp", &s3("/foo/"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), b"marker-body");
+
+    // Regression guard: a genuine CommonPrefix still renders DIR under the
+    // default delimiter, proving the common_prefixes path was not broken.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("baz/"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}

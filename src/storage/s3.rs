@@ -1170,11 +1170,10 @@ impl S3 {
                             }
                             let mut newurl = src.clone();
                             newurl.path = key.to_string();
-                            let typ = if key.ends_with('/') {
-                                ObjectType::Dir
-                            } else {
-                                ObjectType::File
-                            };
+                            // A key returned in Contents is a real object, even a
+                            // console dir-marker ending in "/" (upstream #517). Only
+                            // CommonPrefixes (handled in the loop above) are dirs.
+                            let typ = ObjectType::File;
                             object_found = true;
                             let obj = Object {
                                 url: Some(newurl),
@@ -1279,11 +1278,9 @@ impl S3 {
                     }
                     let mut newurl = src.clone();
                     newurl.path = key.to_string();
-                    let typ = if key.ends_with('/') {
-                        ObjectType::Dir
-                    } else {
-                        ObjectType::File
-                    };
+                    // Real object from Contents -> File even with a trailing "/"
+                    // (upstream #517); only CommonPrefixes (above) are dirs.
+                    let typ = ObjectType::File;
                     object_found = true;
                     let obj = Object {
                         url: Some(newurl),
@@ -1399,7 +1396,9 @@ impl S3 {
                     let mut nu = src.clone();
                     nu.path = key.to_string();
                     nu.version_id = vid.to_string();
-                    let typ = if key.ends_with('/') { ObjectType::Dir } else { ObjectType::File };
+                    // Real object version from Versions -> File even with a trailing
+                    // "/" (upstream #517); only CommonPrefixes (above) are dirs.
+                    let typ = ObjectType::File;
                     object_found = true;
                     let obj = Object {
                         url: Some(nu),
