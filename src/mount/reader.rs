@@ -82,10 +82,15 @@ impl ChunkReader {
         if sequential {
             want_end = want_end.max(first + self.max_chunks as u64);
         }
-        // Never plan a window larger than the cache or past EOF.
+        // Cap the prefetch window to the cache/EOF, but ALWAYS cover the chunks
+        // this read actually needs (`[first..=last]`) — otherwise a read larger
+        // than the cache budget would leave tail chunks unfetched and fail with
+        // a "chunk missing" error. (`keep` protects these from eviction, so a
+        // read wider than `max_chunks` transiently exceeds the budget.)
         want_end = want_end
             .min(first + self.max_chunks as u64)
-            .min(self.n_chunks());
+            .min(self.n_chunks())
+            .max(last + 1);
 
         let missing: Vec<u64> = (first..want_end)
             .filter(|i| !self.chunks.contains_key(i))

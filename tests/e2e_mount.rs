@@ -133,3 +133,105 @@ fn mount_read_write_lifecycle() {
     let _ = rs5cmd().args(["rm", &s3("/*")]).ok();
     let _ = rs5cmd().args(["rb", &s3("")]).ok();
 }
+
+/// Spawns `rs5cmd mount` (with optional extra flags) and waits for it to appear.
+fn spawn_mount(bucket: &str, mnt: &Path, extra: &[&str]) -> MountGuard {
+    let mut args: Vec<String> = vec![
+        "mount".into(),
+        format!("s3://{bucket}"),
+        mnt.to_str().unwrap().into(),
+    ];
+    args.extend(extra.iter().map(|s| s.to_string()));
+    let child = rs5cmd().args(&args).spawn().unwrap();
+    let guard = MountGuard {
+        mnt: mnt.to_path_buf(),
+        child,
+    };
+    assert!(wait_for_mount(mnt), "mount point did not appear");
+    guard
+}
+
+/// Regression: a single read that spans more chunks than the cache budget
+/// (`buffer_size / chunk_size`) must return the full, correct bytes — it used to
+/// fail with EIO ("chunk missing after fetch").
+#[test]
+fn mount_read_spans_more_chunks_than_buffer() {
+    if !endpoint_configured() || !fuse_available() {
+        eprintln!("skipping mount e2e: no S3 endpoint or /dev/fuse");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mnt = tmp.path().join("mnt");
+    std::fs::create_dir(&mnt).unwrap();
+    // 4 KiB chunks with an 8 KiB buffer = a 2-chunk cache; a kernel read of up
+    // to 128 KiB spans ~32 chunks.
+    let guard = spawn_mount(
+        &bucket,
+        &mnt,
+        &["--vfs-read-chunk-size", "4096", "--buffer-size", "8192"],
+    );
+
+    let data: Vec<u8> = (0..(256 * 1024)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(mnt.join("d.bin"), &data).unwrap();
+    assert_eq!(
+        std::fs::read(mnt.join("d.bin")).unwrap(),
+        data,
+        "read spanning more chunks than the buffer must not fail or truncate"
+    );
+
+    drop(guard);
+    let _ = rs5cmd().args(["rm", &s3("/*")]).ok();
+    let _ = rs5cmd().args(["rb", &s3("")]).ok();
+}
+
+/// Regression: `mkdir` over an existing name returns EEXIST, and a directory
+/// rename moves the whole subtree (no orphaned keys).
+#[test]
+fn mount_namespace_ops() {
+    if !endpoint_configured() || !fuse_available() {
+        eprintln!("skipping mount e2e: no S3 endpoint or /dev/fuse");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    let tmp = tempfile::tempdir().unwrap();
+    let mnt = tmp.path().join("mnt");
+    std::fs::create_dir(&mnt).unwrap();
+    let guard = spawn_mount(&bucket, &mnt, &[]);
+
+    // mkdir, then mkdir again -> EEXIST.
+    std::fs::create_dir(mnt.join("d")).unwrap();
+    let again = std::fs::create_dir(mnt.join("d"));
+    assert_eq!(
+        again.unwrap_err().kind(),
+        std::io::ErrorKind::AlreadyExists,
+        "second mkdir should be EEXIST"
+    );
+
+    // Nested content, then a directory rename (copy whole subtree + delete).
+    std::fs::create_dir(mnt.join("d").join("sub")).unwrap();
+    std::fs::write(mnt.join("d").join("sub").join("f.txt"), b"deep").unwrap();
+    std::fs::rename(mnt.join("d"), mnt.join("renamed")).unwrap();
+
+    assert!(!mnt.join("d").exists(), "old directory should be gone");
+    assert_eq!(
+        std::fs::read(mnt.join("renamed").join("sub").join("f.txt")).unwrap(),
+        b"deep",
+        "nested file should survive the directory rename"
+    );
+    rs5cmd()
+        .args(["cat", &s3("/renamed/sub/f.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("deep"));
+
+    drop(guard);
+    let _ = rs5cmd().args(["rm", &s3("/*")]).ok();
+    let _ = rs5cmd().args(["rb", &s3("")]).ok();
+}

@@ -26,6 +26,11 @@ use super::writer::{open_cache_file, Writer};
 #[error("directory not empty")]
 pub struct DirNotEmpty;
 
+/// Error mapped to `EEXIST` (e.g. `mkdir` of an existing name).
+#[derive(Debug, thiserror::Error)]
+#[error("already exists")]
+pub struct AlreadyExists;
+
 /// A resolved attribute snapshot for an inode (binding-agnostic).
 #[derive(Clone, Copy, Debug)]
 pub struct Attr {
@@ -82,8 +87,9 @@ pub struct Vfs {
     attr_cache: Mutex<HashMap<u64, (Attr, Instant)>>,
     dir_cache: Mutex<HashMap<u64, (Vec<DirEntry>, Instant)>>,
     handles: Mutex<HashMap<u64, OpenFile>>,
-    /// Sizes of files with unflushed local writes; authoritative while open.
-    dirty_sizes: Mutex<HashMap<u64, u64>>,
+    /// Files with unflushed local writes: `ino -> (in-progress size, mtime)`.
+    /// Authoritative for getattr/lookup while the file is open.
+    dirty_sizes: Mutex<HashMap<u64, (u64, SystemTime)>>,
     next_fh: AtomicU64,
 }
 
@@ -126,12 +132,12 @@ impl Vfs {
         match node.kind {
             NodeKind::Dir => Ok(self.dir_attr(ino)),
             NodeKind::File => {
-                if let Some(size) = self.dirty_size(ino) {
+                if let Some((size, mtime)) = self.dirty_entry(ino) {
                     return Ok(Attr {
                         ino,
                         kind: NodeKind::File,
                         size,
-                        mtime: SystemTime::now(),
+                        mtime,
                     });
                 }
                 if let Some(a) = self.cached_attr(ino) {
@@ -168,12 +174,13 @@ impl Vfs {
             }
         }
 
-        // Fast path: a fresh directory listing is authoritative for this level.
+        // Fast path: serve a positive hit from a fresh directory listing. A miss
+        // is NOT treated as authoritative — the cached listing may be stale vs an
+        // out-of-band create — so fall through to a direct S3 probe below.
         if let Some(entries) = self.cached_dir(parent) {
-            return match entries.iter().find(|e| e.name == name) {
-                Some(e) => self.getattr(e.ino).await,
-                None => Err(ObjectNotFound(name.to_string()).into()),
-            };
+            if let Some(e) = entries.iter().find(|e| e.name == name) {
+                return self.getattr(e.ino).await;
+            }
         }
 
         // Slow path: probe S3 directly. Try a file first (one HeadObject)...
@@ -271,6 +278,18 @@ impl Vfs {
             }
         }
 
+        // Merge in files created/written through this mount that haven't been
+        // flushed to S3 yet, so a just-created open file shows up in `ls`.
+        for (cino, name) in self.dirty_children(ino) {
+            if seen.insert(name.clone()) {
+                entries.push(DirEntry {
+                    ino: cino,
+                    name,
+                    kind: NodeKind::File,
+                });
+            }
+        }
+
         for a in &attrs {
             self.store_attr(*a);
         }
@@ -359,14 +378,25 @@ impl Vfs {
             (open_cache_file(&cache_path, true)?, 0u64, true)
         } else {
             match self.s3.stat(&dst).await {
-                Ok(obj) => {
-                    self.s3.download(&dst, &cache_path).await?;
-                    (
-                        open_cache_file(&cache_path, false)?,
-                        obj.size.max(0) as u64,
-                        false,
-                    )
-                }
+                Ok(_) => match self.s3.download(&dst, &cache_path).await {
+                    Ok(()) => {
+                        // Trust the bytes actually written, not the (possibly
+                        // racing) stat size.
+                        let f = open_cache_file(&cache_path, false)?;
+                        let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+                        (f, len, false)
+                    }
+                    // The object may have vanished between stat and download;
+                    // start from an empty file rather than failing the open.
+                    Err(e) if is_not_found(&e) => {
+                        let _ = std::fs::remove_file(&cache_path);
+                        (open_cache_file(&cache_path, true)?, 0, true)
+                    }
+                    Err(e) => {
+                        let _ = std::fs::remove_file(&cache_path);
+                        return Err(e);
+                    }
+                },
                 Err(e) if is_not_found(&e) => (open_cache_file(&cache_path, true)?, 0, true),
                 Err(e) => return Err(e),
             }
@@ -464,7 +494,13 @@ impl Vfs {
         if let HandleKind::Write(w) = of.kind {
             let size = {
                 let mut g = w.lock().await;
-                g.flush().await?;
+                if let Err(e) = g.flush().await {
+                    // Upload failed: the cache file is retained by Writer::Drop
+                    // (still dirty) so the bytes aren't lost, and dirty state is
+                    // kept. Surface the error to the caller's close().
+                    tracing::error!("upload on release failed for inode {}: {e:#}", of.ino);
+                    return Err(e);
+                }
                 g.size()
             };
             self.clear_dirty_size(of.ino);
@@ -528,7 +564,18 @@ impl Vfs {
     /// Creates a directory (a zero-byte `prefix/` marker object).
     pub async fn mkdir(&self, parent: u64, name: &str) -> anyhow::Result<Attr> {
         let pnode = self.node(parent)?;
+        let file_key = format!("{}{}", pnode.key, name);
         let dir_key = format!("{}{}/", pnode.key, name);
+        // POSIX `mkdir` must fail with EEXIST if the name already exists, as a
+        // file or as a directory.
+        match self.s3.stat(&self.obj_url(&file_key)?).await {
+            Ok(_) => return Err(AlreadyExists.into()),
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => return Err(e),
+        }
+        if self.prefix_exists(&dir_key).await? {
+            return Err(AlreadyExists.into());
+        }
         self.put_empty_object(&dir_key).await?;
         let ino = self.intern(dir_key, NodeKind::Dir, parent);
         self.invalidate_dir(parent);
@@ -568,7 +615,7 @@ impl Vfs {
         let old_file = format!("{}{}", pnode.key, name);
         let new_file = format!("{}{}", npnode.key, newname);
 
-        // File rename.
+        // --- File rename (copy + delete) ---
         match self.s3.stat(&self.obj_url(&old_file)?).await {
             Ok(_) => {
                 self.s3
@@ -579,10 +626,26 @@ impl Vfs {
                     )
                     .await?;
                 self.s3.delete(&self.obj_url(&old_file)?).await?;
-                let ino = self.inodes.lock().unwrap().lookup_key(&old_file);
-                if let Some(ino) = ino {
-                    self.inodes.lock().unwrap().rekey(ino, new_file);
+
+                // Drop any inode the (now-overwritten) destination had, so it
+                // doesn't linger pointing at a clobbered object.
+                let stale_dest = self.inodes.lock().unwrap().lookup_key(&new_file);
+                if let Some(d) = stale_dest {
+                    self.invalidate_attr(d);
+                    self.inodes.lock().unwrap().forget(d);
+                }
+                // Rekey the source inode and re-point any open writer at the new
+                // key (else its in-flight write-back would upload to the old key
+                // on close, silently undoing the rename).
+                let src_ino = self.inodes.lock().unwrap().lookup_key(&old_file);
+                if let Some(ino) = src_ino {
+                    self.inodes.lock().unwrap().rekey(ino, new_file.clone());
                     self.invalidate_attr(ino);
+                    if let Some(w) = self.find_write_handle(ino, None) {
+                        if let Ok(url) = self.obj_url(&new_file) {
+                            w.lock().await.set_dst(url);
+                        }
+                    }
                 }
                 self.invalidate_dir(parent);
                 self.invalidate_dir(newparent);
@@ -592,7 +655,7 @@ impl Vfs {
             Err(e) => return Err(e),
         }
 
-        // Directory rename: copy+delete the whole subtree.
+        // --- Directory rename (copy the whole subtree, then delete it) ---
         let old_prefix = format!("{}{}/", pnode.key, name);
         let new_prefix = format!("{}{}/", npnode.key, newname);
         if !self.prefix_exists(&old_prefix).await? {
@@ -611,17 +674,28 @@ impl Vfs {
                 keys.push(u.path.clone());
             }
         }
+        // Copy ALL keys first, so a mid-way failure leaves the source intact
+        // (rather than a half-moved tree with deleted-but-not-copied data).
         for k in &keys {
             let suffix = k.strip_prefix(&old_prefix).unwrap_or(k);
             let nk = format!("{new_prefix}{suffix}");
             self.s3
                 .copy(&self.obj_url(k)?, &self.obj_url(&nk)?, &Metadata::default())
                 .await?;
+        }
+        // Then delete the originals.
+        for k in &keys {
             self.s3.delete(&self.obj_url(k)?).await?;
         }
-        let ino = self.inodes.lock().unwrap().lookup_key(&old_prefix);
-        if let Some(ino) = ino {
-            self.inodes.lock().unwrap().forget(ino);
+        // Rekey the WHOLE subtree of inodes (children kept their old keys);
+        // otherwise stale child inodes would read/write deleted keys.
+        let affected = self
+            .inodes
+            .lock()
+            .unwrap()
+            .rekey_prefix(&old_prefix, &new_prefix);
+        for ino in affected {
+            self.invalidate_attr(ino);
         }
         self.invalidate_dir(parent);
         self.invalidate_dir(newparent);
@@ -692,18 +766,13 @@ impl Vfs {
         let dst = self.obj_url(&node.key)?;
         let id = self.alloc_fh();
         let cache_path = self.cache_dir.join(format!("t{id}.tmp"));
-        match self.s3.stat(&dst).await {
-            Ok(_) => self.s3.download(&dst, &cache_path).await?,
-            Err(e) if is_not_found(&e) => std::fs::write(&cache_path, b"")?,
-            Err(e) => return Err(e),
-        }
-        let file = open_cache_file(&cache_path, false)?;
-        file.set_len(new_size)?;
-        file.sync_all()?;
-        self.s3
-            .upload(&cache_path, &dst, &Metadata::default())
-            .await?;
+        // Run the fallible body, then always remove the temp file (no leak on
+        // any error path).
+        let result = self
+            .truncate_object_inner(&dst, &cache_path, new_size)
+            .await;
         let _ = std::fs::remove_file(&cache_path);
+        result?;
         self.store_attr(Attr {
             ino,
             kind: NodeKind::File,
@@ -713,15 +782,31 @@ impl Vfs {
         Ok(())
     }
 
+    async fn truncate_object_inner(
+        &self,
+        dst: &Url,
+        cache_path: &std::path::Path,
+        new_size: u64,
+    ) -> anyhow::Result<()> {
+        match self.s3.stat(dst).await {
+            Ok(_) => self.s3.download(dst, cache_path).await?,
+            Err(e) if is_not_found(&e) => std::fs::write(cache_path, b"")?,
+            Err(e) => return Err(e),
+        }
+        let file = open_cache_file(cache_path, false)?;
+        file.set_len(new_size)?;
+        file.sync_all()?;
+        self.s3.upload(cache_path, dst, &Metadata::default()).await?;
+        Ok(())
+    }
+
     /// Uploads a zero-byte object at `key` (directory marker / touch).
     async fn put_empty_object(&self, key: &str) -> anyhow::Result<()> {
+        let url = self.obj_url(key)?;
         let id = self.alloc_fh();
         let tmp = self.cache_dir.join(format!("e{id}.tmp"));
         std::fs::write(&tmp, b"")?;
-        let res = self
-            .s3
-            .upload(&tmp, &self.obj_url(key)?, &Metadata::default())
-            .await;
+        let res = self.s3.upload(&tmp, &url, &Metadata::default()).await;
         let _ = std::fs::remove_file(&tmp);
         res
     }
@@ -822,15 +907,55 @@ impl Vfs {
     }
 
     fn set_dirty_size(&self, ino: u64, size: u64) {
-        self.dirty_sizes.lock().unwrap().insert(ino, size);
+        self.dirty_sizes
+            .lock()
+            .unwrap()
+            .insert(ino, (size, SystemTime::now()));
     }
 
     fn dirty_size(&self, ino: u64) -> Option<u64> {
+        self.dirty_sizes.lock().unwrap().get(&ino).map(|(s, _)| *s)
+    }
+
+    fn dirty_entry(&self, ino: u64) -> Option<(u64, SystemTime)> {
         self.dirty_sizes.lock().unwrap().get(&ino).copied()
     }
 
     fn clear_dirty_size(&self, ino: u64) {
         self.dirty_sizes.lock().unwrap().remove(&ino);
+    }
+
+    /// Open write-handle children of directory `ino` (created/dirtied but maybe
+    /// not yet in S3), returned as `(inode, leaf name)`.
+    fn dirty_children(&self, ino: u64) -> Vec<(u64, String)> {
+        let parent_key = match self.node(ino) {
+            Ok(n) => n.key,
+            Err(_) => return Vec::new(),
+        };
+        // Snapshot write-handle inodes first, then resolve keys — never hold the
+        // handles and inodes locks simultaneously.
+        let write_inos: Vec<u64> = {
+            let handles = self.handles.lock().unwrap();
+            handles
+                .values()
+                .filter(|of| matches!(of.kind, HandleKind::Write(_)))
+                .map(|of| of.ino)
+                .collect()
+        };
+        let inodes = self.inodes.lock().unwrap();
+        let mut out = Vec::new();
+        for cino in write_inos {
+            if let Some(node) = inodes.get(cino) {
+                if node.parent == ino && !node.kind.is_dir() {
+                    if let Some(name) = node.key.strip_prefix(&parent_key) {
+                        if !name.is_empty() && !name.contains('/') {
+                            out.push((cino, name.to_string()));
+                        }
+                    }
+                }
+            }
+        }
+        out
     }
 }
 

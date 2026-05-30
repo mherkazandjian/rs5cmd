@@ -49,9 +49,15 @@ impl Writer {
     /// Writes `data` at `offset`, returning the number of bytes written.
     pub fn write(&mut self, offset: u64, data: &[u8]) -> anyhow::Result<u32> {
         self.file.write_all_at(data, offset)?;
-        self.size = self.size.max(offset + data.len() as u64);
+        self.size = self.size.max(offset.saturating_add(data.len() as u64));
         self.dirty = true;
         Ok(data.len() as u32)
+    }
+
+    /// Re-points the writer at a new destination key (used by rename so an
+    /// in-flight write-back uploads to the new location, not the old one).
+    pub fn set_dst(&mut self, dst: Url) {
+        self.dst = dst;
     }
 
     /// Reads up to `size` bytes at `offset` from the cache file (for O_RDWR).
@@ -90,8 +96,17 @@ impl Writer {
 
 impl Drop for Writer {
     fn drop(&mut self) {
-        // Best-effort cleanup of the local cache file.
-        let _ = std::fs::remove_file(&self.path);
+        // Only remove the local cache file once its contents are safely in S3.
+        // If an upload failed (still dirty), KEEP the file so the bytes aren't
+        // lost silently, and log where they are for recovery.
+        if self.dirty {
+            tracing::error!(
+                "unflushed write-back data retained after upload failure: {}",
+                self.path.display()
+            );
+        } else {
+            let _ = std::fs::remove_file(&self.path);
+        }
     }
 }
 

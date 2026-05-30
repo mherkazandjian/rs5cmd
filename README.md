@@ -180,6 +180,24 @@ Building needs the `mount` feature; mounting needs libfuse3's `fusermount3`
 helper at runtime (the `fuse3` crate speaks the protocol itself, so no libfuse
 dev headers are required to build). macOS uses macFUSE.
 
+**Caveats** (S3 is not a POSIX filesystem):
+
+- *Eventually consistent.* Attributes and directory listings are cached
+  (`--attr-timeout`, `--dir-cache-time`) and the kernel caches too; changes made
+  out-of-band become visible after the TTL. Mutations through this mount
+  invalidate the relevant caches eagerly.
+- *Namespace ops aren't atomic.* `rename`/`mkdir`/`rmdir` are emulated over S3
+  and have inherent check-then-act races. A directory rename copies **then**
+  deletes every key under it (O(n)); if it fails midway the source data is
+  preserved (copy-before-delete) but the move may be left incomplete.
+- *Durability.* Written data is uploaded on `flush`/`close`. Data not yet
+  flushed when the mount is interrupted (Ctrl-C / SIGKILL) is lost. If the
+  upload on close fails, the local cache file is **retained** (its path is
+  logged) and `EIO` is returned, so the bytes aren't silently lost.
+- *Limits.* Object keys containing `*`/`?` or non-UTF-8 bytes aren't accessible
+  through the mount; POSIX permissions/ownership are synthesized (not stored);
+  backend errors other than not-found/exists/not-empty surface as `EIO`.
+
 ## Develop & test (Docker)
 
 ```bash

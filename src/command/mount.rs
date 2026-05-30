@@ -85,6 +85,11 @@ fn humantime_secs(s: &str) -> Result<std::time::Duration, String> {
         "h" => value * 3_600.0,
         other => return Err(format!("unknown duration unit: {other}")),
     };
+    // `Duration::from_secs_f64` panics on negative / non-finite values, so
+    // reject them here with a clean parse error instead.
+    if !secs.is_finite() || secs < 0.0 {
+        return Err(format!("invalid duration: {s}"));
+    }
     Ok(std::time::Duration::from_secs_f64(secs))
 }
 

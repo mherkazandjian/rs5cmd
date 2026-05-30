@@ -16,7 +16,7 @@ use futures::stream;
 use crate::storage::{NoObjectFound, ObjectNotFound};
 
 use super::inode::NodeKind;
-use super::vfs::{Attr, DirNotEmpty, Vfs};
+use super::vfs::{AlreadyExists, Attr, DirNotEmpty, Vfs};
 
 pub struct S3Fuse {
     vfs: Arc<Vfs>,
@@ -390,6 +390,8 @@ fn errno(e: &anyhow::Error) -> Errno {
         Errno::from(libc::ENOENT)
     } else if e.downcast_ref::<DirNotEmpty>().is_some() {
         Errno::from(libc::ENOTEMPTY)
+    } else if e.downcast_ref::<AlreadyExists>().is_some() {
+        Errno::from(libc::EEXIST)
     } else {
         tracing::warn!("mount op failed: {e:#}");
         Errno::from(libc::EIO)

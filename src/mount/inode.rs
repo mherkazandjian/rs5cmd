@@ -89,8 +89,7 @@ impl InodeTable {
         ino
     }
 
-    /// Re-points an inode at a new key (used by rename in later phases).
-    #[allow(dead_code)] // wired up by rename in Phase 3
+    /// Re-points an inode at a new key (used by file rename).
     pub fn rekey(&mut self, ino: u64, new_key: String) {
         if let Some(node) = self.nodes.get_mut(&ino) {
             let old = std::mem::replace(&mut node.key, new_key.clone());
@@ -99,8 +98,32 @@ impl InodeTable {
         }
     }
 
-    /// Drops an inode mapping (used by unlink/rmdir in later phases).
-    #[allow(dead_code)] // wired up by unlink/rmdir in Phase 3
+    /// Rekeys every inode whose key starts with `old_prefix`, replacing that
+    /// prefix with `new_prefix`. Returns the affected inode numbers so the
+    /// caller can invalidate their cached attributes. Used by directory rename
+    /// so children moved under a renamed directory keep valid keys (otherwise
+    /// stale child inodes would point at deleted keys).
+    pub fn rekey_prefix(&mut self, old_prefix: &str, new_prefix: &str) -> Vec<u64> {
+        let affected: Vec<(u64, String)> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.key.starts_with(old_prefix))
+            .map(|(&ino, n)| (ino, n.key.clone()))
+            .collect();
+        let mut ids = Vec::with_capacity(affected.len());
+        for (ino, old_key) in affected {
+            let new_key = format!("{new_prefix}{}", &old_key[old_prefix.len()..]);
+            if let Some(node) = self.nodes.get_mut(&ino) {
+                node.key = new_key.clone();
+            }
+            self.by_key.remove(&old_key);
+            self.by_key.insert(new_key, ino);
+            ids.push(ino);
+        }
+        ids
+    }
+
+    /// Drops an inode mapping (used by unlink/rmdir/rename).
     pub fn forget(&mut self, ino: u64) {
         if let Some(node) = self.nodes.remove(&ino) {
             self.by_key.remove(&node.key);
