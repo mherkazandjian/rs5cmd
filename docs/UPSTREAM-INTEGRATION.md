@@ -16,6 +16,27 @@ upstream issue (`#`) / PR (`PR#`) references.
 
 ---
 
+## Audit (2026-05-30): Tier 1 / easy bugs were checked and are NOT ported
+
+Before integrating anything, every "obvious and easy" Tier-1 bug (plus the easy
+formatting/stream items) was verified against the actual rs5cmd source. **None
+of them are reproduced in this port** — the Rust implementation already avoids
+each one, so no fix was warranted:
+
+| Upstream bug | rs5cmd status | Evidence |
+|--------------|---------------|----------|
+| #751 / #698 — silent drop on listing error → data loss | already safe | `collect_source_objects` returns `Err` on any listing error (`sync.rs:421-428`); `collect_dest_objects` propagates non-"not found" errors (`sync.rs:475-488`). No silent `continue`. |
+| #869 / #824 / #852 — sync exits 0 despite errors | already correct | `sync.rs:281-283`: `if had_error { bail!(…) }`, unconditional (not gated on `--exit-on-error`, which only controls early abort). |
+| #815 — `sync --delete` ignores `--exclude` | already correct | include/exclude filters applied to *both* source and dest listings (`sync.rs:437`, `:494`); the delete set is built from the already-filtered `dest_objects` (`sync.rs:153-159`). |
+| #838 — panic on missing source stat | already safe | `sync_strategy.rs:62-69` treats unknown timestamps as `UNIX_EPOCH` via `.unwrap_or(…)`; no `unwrap()` to panic. |
+| #804 / #860 — errors/logs on stdout | already correct | `op_error` → `eprintln!` (`output.rs:58-61`), run summary → stderr (`sync.rs:278`), tracing → stderr (`main.rs:14`). Payload/JSON only on stdout. |
+| #817 — `--humanize` missing byte suffix | already correct | `ls.rs:232-235` uses `humansize::BINARY` (renders `B`/`KiB`). |
+
+The remaining work below is therefore genuine new behavior (Tier 2/3) rather
+than ported-bug fixes.
+
+---
+
 ## Tier 1 — Correctness & data-safety
 
 The most valuable cluster. These are *bugs in the Go tool* that a fresh Rust
