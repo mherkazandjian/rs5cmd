@@ -7,6 +7,8 @@ mod cp;
 mod du;
 mod head;
 mod ls;
+#[cfg(feature = "mount")]
+pub(crate) mod mount;
 mod pipe;
 mod presign;
 mod rm;
@@ -126,6 +128,9 @@ pub enum Command {
     Pipe(pipe::PipeArgs),
     /// Print remote object metadata (or check a bucket exists).
     Head(head::HeadArgs),
+    /// Mount a remote S3 path as a local filesystem (FUSE, rclone-style).
+    #[cfg(feature = "mount")]
+    Mount(mount::MountArgs),
     /// Print a presigned URL for a remote object.
     Presign(presign::PresignArgs),
     /// Run SQL queries on objects (S3 Select).
@@ -160,6 +165,8 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Du(args) => du::run(&cli.global, args).await,
         Command::Pipe(args) => pipe::run(&cli.global, args).await,
         Command::Head(args) => head::run(&cli.global, args).await,
+        #[cfg(feature = "mount")]
+        Command::Mount(args) => mount::run(&cli.global, args).await,
         Command::Presign(args) => presign::run(&cli.global, args).await,
         Command::Select(args) => select::run(&cli.global, args).await,
         Command::Run(args) => run::run(&cli.global, args).await,

@@ -53,6 +53,13 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   `--put` URLs with a configurable `--expire`.
 - **`run`** executes newline-delimited commands from a file or stdin, propagating
   global flags, with bounded concurrency.
+- **`mount`** exposes an S3 bucket/prefix as a local **FUSE** filesystem
+  (rclone-style; Linux/macOS, `mount` feature). Reads stream through a per-handle
+  **chunked read-ahead** cache (`--vfs-read-chunk-size`, `--buffer-size`,
+  concurrent prefetch); writes buffer to a **write-back cache file** uploaded
+  (single PUT or multipart) on close. Supports `mkdir`/`rmdir`/`unlink`/`rename`/
+  truncate, attribute & directory caches (`--attr-timeout`/`--dir-cache-time`),
+  and `--read-only`.
 - **Cross-cutting**: `--json` structured output (one object per result line),
   `indicatif` progress bars (`cp`/`mv`/`sync`, auto-suppressed under `--json` /
   non-TTY), `--retry-count` with error-classified exponential backoff
@@ -87,6 +94,7 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   presign [--expire D] [--put] <s3://bucket/key>   presigned GET (or PUT) URL
   select [-e SQL] <s3://bucket/[key|*]>            run an S3 Select query
   run  [file]                      run newline-delimited commands from file/stdin
+  mount <s3://bucket[/prefix]> <dir>   mount as a local FUSE filesystem (mount feature)
   bucket-version [--set S] <s3://bucket>           get/set versioning (Enabled/Suspended)
   completion <bash|zsh|fish|powershell|elvish>     print a shell completion script
 ```
@@ -139,6 +147,39 @@ the default (SDK) path supplies a custom hyper-rustls connector via the SDK's
 `http_client` hook (its built-in TLS stack has no skip-verify option). Use only
 for trusted self-signed dev endpoints — it also disables hostname checking.
 
+## Mounting (FUSE) (`mount`, Linux/macOS, `mount` feature)
+
+`rs5cmd mount s3://bucket[/prefix] <dir>` exposes a bucket or prefix as a local
+filesystem via FUSE — an rclone-style mount with buffering, concurrency, chunked
+reads, and multipart writes. It is built on the async `fuse3` binding over the
+existing `storage::s3` backend; the VFS core (inode table, attr/dir caches,
+chunked reader, write-back cache) is kept independent of the FUSE binding.
+
+```bash
+# In the FUSE-capable compose service (provides /dev/fuse + CAP_SYS_ADMIN):
+docker compose run --rm test-mount \
+  bash -c 'cargo run --features mount -- mount s3://bucket /mnt/s3 & \
+           sleep 2; ls -l /mnt/s3; fusermount3 -u /mnt/s3'
+```
+
+- **Reads**: a per-open-handle chunked reader fetches large chunks
+  (`--vfs-read-chunk-size`, default 4 MiB), keeps a bounded LRU buffer
+  (`--buffer-size`, default 16 MiB), fetches missing chunks concurrently
+  (`--concurrency`), and prefetches ahead on sequential access.
+- **Writes**: each write-opened file is backed by a local **write-back cache
+  file**; data is uploaded via the existing single-PUT/multipart `upload` on
+  flush/close. Random writes, append, and truncate are supported.
+- **Namespace**: directories are synthesized from key prefixes; `mkdir`/`rmdir`
+  use a zero-byte `prefix/` marker, and `rename` is copy+delete (a directory
+  rename rewrites every key under it — O(n), non-atomic).
+- **Caching**: attribute and directory caches (`--attr-timeout`, default 1s;
+  `--dir-cache-time`, default 5m), invalidated on local mutations.
+- Other flags: `--read-only`, `--cache-dir`, `--allow-other`, `--uid`/`--gid`.
+
+Building needs the `mount` feature; mounting needs libfuse3's `fusermount3`
+helper at runtime (the `fuse3` crate speaks the protocol itself, so no libfuse
+dev headers are required to build). macOS uses macFUSE.
+
 ## Develop & test (Docker)
 
 ```bash
@@ -147,6 +188,8 @@ docker compose build dev                       # build the dev/build image
 docker compose run --rm test                   # full suite vs MinIO (cargo test --all)
 docker compose run --rm test-fast              # suite WITH --features fast (io_uring;
                                                #   hardened seccomp profile)
+docker compose run --rm test-mount             # suite WITH --features mount (FUSE;
+                                               #   needs /dev/fuse + CAP_SYS_ADMIN)
 
 docker compose run --rm dev bash               # interactive build shell
 docker compose run --rm --no-deps dev cargo build           # default build
@@ -194,10 +237,13 @@ src/
     presign select run
   fastpath/             io_uring fast path (Linux-only, `fast` feature)
     mod.rs client.rs sign.rs runtime.rs
+  mount/                FUSE mount (Linux/macOS, `mount` feature)
+    mod.rs fs.rs vfs.rs inode.rs reader.rs writer.rs
   bin/s3stub.rs         in-memory discard-S3 server for the client-ceiling benchmark
 tests/
   e2e.rs                end-to-end tests vs MinIO (default features)
   e2e_fast.rs           fast-path e2e (cfg(feature = "fast"))
+  e2e_mount.rs          FUSE mount e2e (cfg(feature = "mount"), Linux)
 bench/                  benchmark harness (Go s5cmd vs rs5cmd), Dockerfile, RESULTS.md
 ```
 

@@ -581,6 +581,33 @@ impl S3 {
         Ok(resp.body)
     }
 
+    /// Reads the byte range `[offset, offset+len)` of an object in a single
+    /// ranged GET, returning the bytes. Used by the FUSE mount's chunked reader.
+    /// A request that starts past EOF yields an empty vec rather than an error.
+    pub async fn read_range(&self, src: &Url, offset: u64, len: u64) -> anyhow::Result<Vec<u8>> {
+        if len == 0 {
+            return Ok(Vec::new());
+        }
+        let range = format!("bytes={}-{}", offset, offset + len - 1);
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .range(range)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) if is_range_not_satisfiable(&e) => return Ok(Vec::new()),
+            Err(e) => return Err(e.into()),
+        };
+        let data = resp.body.collect().await?.into_bytes().to_vec();
+        Ok(data)
+    }
+
     /// Returns the object's size via HeadObject.
     async fn head_size(&self, src: &Url) -> anyhow::Result<u64> {
         let mut req = self

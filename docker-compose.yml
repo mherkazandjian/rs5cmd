@@ -139,6 +139,37 @@ services:
       socks5:
         condition: service_started
 
+  # FUSE mount test/dev runner (the `mount` feature). Needs the FUSE device,
+  # CAP_SYS_ADMIN to perform the mount, and an unconfined apparmor profile so
+  # the mount syscall isn't blocked on apparmor hosts. Override the command to
+  # mount interactively, e.g.:
+  #   docker compose run --rm test-mount \
+  #     bash -c 'cargo run --features mount -- mount s3://bucket /tmp/mnt'
+  test-mount:
+    build: .
+    image: rs5cmd-dev
+    working_dir: /workspace
+    devices:
+      - /dev/fuse:/dev/fuse
+    cap_add:
+      - SYS_ADMIN
+    security_opt:
+      - apparmor:unconfined
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9000
+      RUST_LOG: info
+    command: cargo test --features mount -- --nocapture
+    depends_on:
+      minio:
+        condition: service_healthy
+
   # Head-to-head benchmark runner: Go s5cmd vs rs5cmd against MinIO.
   # Needs io_uring (for the rs5cmd --fast path), so it runs with a hardened
   # seccomp profile = Docker default + the three io_uring syscalls allowlisted.

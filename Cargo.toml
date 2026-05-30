@@ -77,8 +77,26 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # compiles on non-Linux / without io_uring.
 [features]
 fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:bytes", "dep:sha2", "dep:hex", "dep:core_affinity"]
+# FUSE mount (`rs5cmd mount`): rclone-style local mount of a remote S3 path.
+# Linux mounts via libfuse3's `fusermount3` helper at runtime — the `fuse3`
+# crate speaks the FUSE protocol in pure Rust, so no libfuse dev headers are
+# needed to BUILD; macOS uses macFUSE. Opt-in so the default build stays free of
+# FUSE deps, mirroring the `fast` precedent.
+mount = ["dep:fuse3", "dep:libc", "dep:bytes"]
 # Builds the s3stub benchmark target (uses only tokio).
 bench-stub = []
+
+[dependencies.fuse3]
+version = "0.8"
+optional = true
+default-features = false
+# `tokio-runtime` integrates with the existing tokio runtime; `unprivileged`
+# enables rootless mounting via the setuid `fusermount3` helper (rclone-style).
+features = ["tokio-runtime", "unprivileged"]
+
+[dependencies.libc]
+version = "0.2"
+optional = true
 
 [dependencies.monoio]
 version = "0.2"
