@@ -1,0 +1,25 @@
+use std::process::ExitCode;
+
+use clap::Parser;
+
+use rs5cmd::command::{self, Cli};
+
+#[tokio::main]
+async fn main() -> ExitCode {
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("warn")),
+        )
+        .with_writer(std::io::stderr)
+        .init();
+
+    let cli = Cli::parse();
+    match command::run(cli).await {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            ExitCode::FAILURE
+        }
+    }
+}

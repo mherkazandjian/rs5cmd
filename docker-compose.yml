@@ -1,0 +1,136 @@
+# Dev + test orchestration for rs5cmd.
+#
+#   docker compose run --rm dev          # interactive shell in the build env
+#   docker compose run --rm dev cargo build
+#   docker compose run --rm test         # build + run the full test suite against MinIO
+#
+# MinIO provides an S3-compatible endpoint so e2e tests run with no real AWS.
+services:
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # TLS-enabled MinIO (self-signed cert) for verifying the fast path over HTTPS.
+  minio-tls:
+    image: minio/minio:latest
+    command: server /data --certs-dir /certs --address ":9000"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    volumes:
+      - ./bench/certs:/certs:ro
+    ports:
+      - "9002:9000"
+
+  # Interactive / build container.
+  dev:
+    build: .
+    image: rs5cmd-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      # Point the AWS SDK at MinIO for any commands run inside the container.
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9000
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # One-shot test runner.
+  test:
+    build: .
+    image: rs5cmd-dev
+    working_dir: /workspace
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9000
+      RUST_LOG: info
+    command: cargo test --all -- --nocapture
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # Fast-path test runner: runs the suite with the `fast` feature so the
+  # io_uring fast-path tests execute. Needs the hardened io_uring seccomp
+  # profile (Docker default + the 3 io_uring syscalls) and a high fd limit,
+  # exactly like the bench service. The default `test` service stays locked
+  # down; this is the opt-in way to exercise the fast path.
+  test-fast:
+    build: .
+    image: rs5cmd-dev
+    working_dir: /workspace
+    security_opt:
+      - seccomp:./seccomp-iouring.json
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9000
+      RUST_LOG: info
+    command: cargo test --features fast -- --nocapture
+    depends_on:
+      minio:
+        condition: service_healthy
+
+  # Head-to-head benchmark runner: Go s5cmd vs rs5cmd against MinIO.
+  # Needs io_uring (for the rs5cmd --fast path), so it runs with a hardened
+  # seccomp profile = Docker default + the three io_uring syscalls allowlisted.
+  bench:
+    build:
+      context: ..
+      dockerfile: rs5cmd/bench/Dockerfile
+    image: rs5cmd-bench
+    working_dir: /workspace
+    security_opt:
+      - seccomp:./seccomp-iouring.json
+    # High-concurrency transfers open many fds (sockets + files + io_uring rings).
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    volumes:
+      - .:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+    environment:
+      AWS_ACCESS_KEY_ID: minioadmin
+      AWS_SECRET_ACCESS_KEY: minioadmin
+      AWS_REGION: us-east-1
+      AWS_ENDPOINT_URL: http://minio:9000
+      S3_ENDPOINT_URL: http://minio:9000
+    depends_on:
+      minio:
+        condition: service_healthy
+    command: bash bench/run.sh
+
+volumes:
+  cargo-registry:

@@ -1,0 +1,638 @@
+//! `sync` — synchronize a source (local or S3) to a destination (local or S3).
+//!
+//! Ported from s5cmd's `command/sync.go` and `command/sync_strategy.go`.
+//!
+//! The algorithm mirrors the Go implementation:
+//!   1. Build the set of source objects, keyed by their relative path.
+//!   2. List the destination (recursively) and build the set of dest objects,
+//!      keyed by their relative path.
+//!   3. Partition into three groups:
+//!        - only in source            -> copy
+//!        - in both (common)          -> copy iff the sync strategy says so
+//!        - only in destination       -> delete iff `--delete`
+//!   4. Execute copies through the same direction logic as `cp`, and deletes
+//!      through the storage `delete`, using a concurrency-limited worker pool.
+
+// `sync_strategy.rs` is a sibling file. Because we may not edit `command/mod.rs`
+// to declare it, we attach it here via a `#[path]` module.
+#[path = "sync_strategy.rs"]
+mod sync_strategy;
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use clap::Args;
+use regex::Regex;
+
+use self::sync_strategy::SyncStrategy;
+use super::GlobalOpts;
+use crate::storage::s3::S3;
+use crate::storage::url::Url;
+use crate::storage::{new_client, Metadata, Object, Options};
+
+#[derive(Args, Debug)]
+pub struct SyncArgs {
+    /// Source (local path or s3:// URL), may contain wildcards or be a dir/prefix.
+    pub src: String,
+    /// Destination (local path or s3:// URL).
+    pub dst: String,
+
+    /// Delete objects in the destination that are not present in the source.
+    #[arg(long)]
+    pub delete: bool,
+
+    /// Use object size as the only criterion when deciding to sync.
+    #[arg(long)]
+    pub size_only: bool,
+
+    /// (Accepted for compatibility) compare exact timestamps. The default
+    /// strategy already compares modification times, so this is a no-op here.
+    #[arg(long)]
+    pub exact_timestamps: bool,
+
+    /// Follow symbolic links when walking local directories.
+    #[arg(long, default_value_t = true)]
+    pub follow_symlinks: bool,
+
+    /// Exclude objects whose relative path matches the given glob (repeatable).
+    #[arg(long)]
+    pub exclude: Vec<String>,
+
+    /// Only include objects whose relative path matches the given glob (repeatable).
+    #[arg(long)]
+    pub include: Vec<String>,
+
+    /// Storage class for copied destination objects.
+    #[arg(long)]
+    pub storage_class: Option<String>,
+
+    /// Canned ACL for copied destination objects.
+    #[arg(long)]
+    pub acl: Option<String>,
+
+    /// Content-Type for copied destination objects.
+    #[arg(long)]
+    pub content_type: Option<String>,
+
+    /// Stop the sync as soon as any copy or delete fails. When set, no further
+    /// work is spawned after the first failure, in-flight tasks are drained, and
+    /// the run returns an error immediately (a failed copy phase will not proceed
+    /// to deletes). When unset (default), every operation is attempted and the
+    /// run fails at the end if any operation failed.
+    #[arg(long)]
+    pub exit_on_error: bool,
+}
+
+/// Returns true if an error is a fatal AWS error that should abort the whole
+/// sync immediately rather than being aggregated. We treat `AccessDenied` and
+/// `NoSuchBucket` (case-insensitive, matched against the full Display chain) as
+/// fatal: when one transfer hits these, every other transfer to the same target
+/// will fail identically, so there is no value in continuing.
+fn is_fatal(e: &anyhow::Error) -> bool {
+    let msg = format!("{e:#}").to_ascii_lowercase();
+    msg.contains("accessdenied") || msg.contains("nosuchbucket")
+}
+
+impl SyncArgs {
+    fn metadata(&self) -> Metadata {
+        Metadata {
+            storage_class: self.storage_class.clone(),
+            acl: self.acl.clone(),
+            content_type: self.content_type.clone(),
+            ..Default::default()
+        }
+    }
+}
+
+pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
+    let opts = global.storage_options();
+    let src = Url::parse(&args.src).map_err(|e| anyhow::anyhow!(e))?;
+    let dst = Url::parse(&args.dst).map_err(|e| anyhow::anyhow!(e))?;
+    let metadata = args.metadata();
+    let strategy = SyncStrategy::new(args.size_only);
+
+    // Compile include/exclude filters into regexes once.
+    let filters = Filters::new(&args.include, &args.exclude)?;
+
+    // Determine whether the source expands to multiple objects ("batch"), which
+    // governs how relative keys are derived (mirrors Go's `isBatch`).
+    let is_batch = is_source_batch(&src, &opts).await?;
+
+    // Build the keyed source and destination maps.
+    let source_objects =
+        collect_source_objects(&src, &opts, args.follow_symlinks, is_batch, &filters).await?;
+    let dest_objects = collect_dest_objects(&dst, &opts, &filters).await?;
+
+    // Partition into copy / common / delete groups.
+    let mut to_copy: Vec<(Url, Url)> = Vec::new();
+    let mut to_delete: Vec<Url> = Vec::new();
+
+    let mut dest_objects = dest_objects;
+    for (key, src_obj) in &source_objects {
+        let Some(src_url) = src_obj.url.clone() else {
+            continue;
+        };
+        match dest_objects.remove(key) {
+            // Common object: copy only if the strategy says it changed.
+            Some(dst_obj) => {
+                if strategy.should_sync(src_obj, &dst_obj) {
+                    let dst_url = generate_destination_url(&src_url, &dst, is_batch);
+                    to_copy.push((src_url, dst_url));
+                }
+            }
+            // Only in source: always copy.
+            None => {
+                let dst_url = generate_destination_url(&src_url, &dst, is_batch);
+                to_copy.push((src_url, dst_url));
+            }
+        }
+    }
+
+    // Whatever is left in `dest_objects` is only in the destination.
+    if args.delete {
+        for (_, dst_obj) in dest_objects {
+            if let Some(u) = dst_obj.url {
+                to_delete.push(u);
+            }
+        }
+    }
+
+    // Build the S3 client once; share across all transfers/deletes.
+    let s3: Option<Arc<S3>> = if src.is_remote() || dst.is_remote() {
+        let anchor = if src.is_remote() { &src } else { &dst };
+        Some(Arc::new(S3::new(anchor, &opts).await?))
+    } else {
+        None
+    };
+
+    let opts = Arc::new(opts);
+    let metadata = Arc::new(metadata);
+    let workers = global.numworkers.max(1);
+    let mut had_error = false;
+    // Counts of successful operations across both phases, used for the final
+    // run summary. Under `--dry-run` these reflect the operations that *would*
+    // have been performed (the storage layer no-ops but still reports success).
+    let mut copied: u64 = 0;
+    let mut deleted: u64 = 0;
+    let exit_on_error = args.exit_on_error;
+
+    // Execute copies via tokio::spawn (per-request CPU spreads across all cores),
+    // with the in-flight JoinSet bounded to `workers` to cap running tasks and
+    // buffered completed results.
+    // Count-of-copies progress bar (no-op in JSON mode / non-TTY stderr).
+    let pb = crate::progress::Progress::new(to_copy.len() as u64, "sync");
+    let mut set = tokio::task::JoinSet::new();
+    // Set once a fatal AWS error (AccessDenied / NoSuchBucket) is observed. A
+    // fatal error triggers the same fast-fail path as `--exit-on-error`
+    // regardless of the flag: stop spawning, drain in-flight tasks, then bail.
+    let mut fatal_seen = false;
+    for (s, d) in to_copy.into_iter() {
+        while set.len() >= workers {
+            let (s, d, r) = set.join_next().await.unwrap().expect("sync copy task panicked");
+            fatal_seen |= report("cp", &s, &d, r, &mut had_error, &mut copied);
+            pb.inc(1);
+            // With --exit-on-error (or on any fatal error), stop pulling new
+            // work the moment a copy fails. We `break` out of the spawn loop
+            // (without spawning the remaining copies); the in-flight tasks are
+            // drained below.
+            if (exit_on_error && had_error) || fatal_seen {
+                break;
+            }
+        }
+        // Don't spawn further work once a failure has been seen in exit-on-error
+        // mode, or once any fatal error has been seen (covers failures observed
+        // during draining).
+        if (exit_on_error && had_error) || fatal_seen {
+            break;
+        }
+        let opts = Arc::clone(&opts);
+        let metadata = Arc::clone(&metadata);
+        let s3 = s3.clone();
+        set.spawn(async move {
+            let r = copy_one(&s, &d, s3.as_deref(), &opts, &metadata).await;
+            (s, d, r)
+        });
+    }
+    // Drain all in-flight copy tasks so none are leaked (dropping the JoinSet
+    // would abort them; we instead let them finish and report each result).
+    while let Some(joined) = set.join_next().await {
+        let (s, d, r) = joined.expect("sync copy task panicked");
+        fatal_seen |= report("cp", &s, &d, r, &mut had_error, &mut copied);
+        pb.inc(1);
+    }
+    pb.finish();
+
+    // A fatal error aborts the whole sync immediately, with a clear message.
+    if fatal_seen {
+        anyhow::bail!("aborting sync: fatal error (access denied or missing bucket); see errors above");
+    }
+
+    // In exit-on-error mode a failed copy phase must not proceed to deletes:
+    // bail before the delete phase starts.
+    if exit_on_error && had_error {
+        anyhow::bail!("one or more sync operations failed");
+    }
+
+    // Execute deletes the same way, with their own count progress bar.
+    let dpb = crate::progress::Progress::new(to_delete.len() as u64, "sync-rm");
+    let mut dset = tokio::task::JoinSet::new();
+    for u in to_delete.into_iter() {
+        while dset.len() >= workers {
+            let (u, r) = dset.join_next().await.unwrap().expect("sync delete task panicked");
+            fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
+            dpb.inc(1);
+            // Same fast-fail as the copy phase: stop on --exit-on-error or on
+            // any fatal error, draining the remaining in-flight deletes.
+            if (exit_on_error && had_error) || fatal_seen {
+                break;
+            }
+        }
+        if (exit_on_error && had_error) || fatal_seen {
+            break;
+        }
+        let opts = Arc::clone(&opts);
+        let s3 = s3.clone();
+        dset.spawn(async move {
+            let r = delete_one(&u, s3.as_deref(), &opts).await;
+            (u, r)
+        });
+    }
+    // Drain all in-flight delete tasks so none are leaked.
+    while let Some(joined) = dset.join_next().await {
+        let (u, r) = joined.expect("sync delete task panicked");
+        fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
+        dpb.inc(1);
+    }
+    dpb.finish();
+
+    // A fatal error during the delete phase aborts immediately as well.
+    if fatal_seen {
+        anyhow::bail!("aborting sync: fatal error (access denied or missing bucket); see errors above");
+    }
+
+    // One-line run summary of successful operations, emitted to stderr so it
+    // never interleaves with the per-object result lines on stdout. Suppressed
+    // in JSON mode to keep machine-readable output limited to the per-op objects.
+    if !crate::output::is_json() {
+        eprintln!("# synced {copied} objects, deleted {deleted}");
+    }
+
+    if had_error {
+        anyhow::bail!("one or more sync operations failed");
+    }
+    Ok(())
+}
+
+/// Reports a copy result, bumping `had_error`/`ok` accordingly. `ok` counts
+/// successful copies for the final run summary (a dry-run "success" is the
+/// operation the storage layer would have performed). Returns true if the
+/// result was a fatal AWS error (see `is_fatal`), so the caller can fast-fail.
+fn report(
+    op: &str,
+    s: &Url,
+    d: &Url,
+    r: anyhow::Result<()>,
+    had_error: &mut bool,
+    ok: &mut u64,
+) -> bool {
+    match r {
+        Ok(()) => {
+            *ok += 1;
+            crate::output::op_success(op, &s.to_string(), Some(&d.to_string()));
+            false
+        }
+        Err(e) => {
+            *had_error = true;
+            let fatal = is_fatal(&e);
+            crate::output::op_error(op, &s.to_string(), Some(&d.to_string()), &format!("{e:#}"));
+            fatal
+        }
+    }
+}
+
+/// Reports a delete result, bumping `had_error`/`ok` accordingly. `ok` counts
+/// successful deletes for the final run summary. Returns true if the result was
+/// a fatal AWS error (see `is_fatal`), so the caller can fast-fail.
+fn report_rm(u: &Url, r: anyhow::Result<()>, had_error: &mut bool, ok: &mut u64) -> bool {
+    match r {
+        Ok(()) => {
+            *ok += 1;
+            crate::output::op_success("rm", &u.to_string(), None);
+            false
+        }
+        Err(e) => {
+            *had_error = true;
+            let fatal = is_fatal(&e);
+            crate::output::op_error("rm", &u.to_string(), None, &format!("{e:#}"));
+            fatal
+        }
+    }
+}
+
+/// Compiled include/exclude glob filters, matched against relative paths.
+struct Filters {
+    includes: Vec<Regex>,
+    excludes: Vec<Regex>,
+}
+
+impl Filters {
+    fn new(includes: &[String], excludes: &[String]) -> anyhow::Result<Filters> {
+        Ok(Filters {
+            includes: compile_globs(includes)?,
+            excludes: compile_globs(excludes)?,
+        })
+    }
+
+    /// Returns true if an object with the given relative key should be skipped.
+    fn should_skip(&self, key: &str) -> bool {
+        // Excluded patterns win.
+        if self.excludes.iter().any(|re| re.is_match(key)) {
+            return true;
+        }
+        // If includes are present, the key must match at least one.
+        if !self.includes.is_empty() && !self.includes.iter().any(|re| re.is_match(key)) {
+            return true;
+        }
+        false
+    }
+}
+
+/// Compiles wildcard glob strings into anchored regexes.
+fn compile_globs(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
+    let mut out = Vec::with_capacity(patterns.len());
+    for p in patterns {
+        let mut re = crate::strutil::wildcard_to_regexp(p);
+        re = crate::strutil::match_from_start_to_end(&re);
+        re = crate::strutil::add_newline_flag(&re);
+        out.push(Regex::new(&re)?);
+    }
+    Ok(out)
+}
+
+/// Determines whether the source expands to multiple objects. Mirrors the Go
+/// `isBatch` computation: wildcards and remote prefixes/buckets are batch; a
+/// local directory is batch; a single file is not.
+async fn is_source_batch(src: &Url, opts: &Options) -> anyhow::Result<bool> {
+    if src.is_wildcard() {
+        return Ok(true);
+    }
+    if src.is_remote() {
+        return Ok(src.is_bucket() || src.is_prefix());
+    }
+    // Local: a directory expands.
+    let client = new_client(src, opts).await?;
+    match client.stat(src).await {
+        Ok(obj) => Ok(obj.typ.is_dir()),
+        Err(_) => Ok(false),
+    }
+}
+
+/// Lists the source and returns its objects keyed by relative path. For a
+/// non-batch source the key is the object's base name (matching Go).
+async fn collect_source_objects(
+    src: &Url,
+    opts: &Options,
+    follow_symlinks: bool,
+    is_batch: bool,
+    filters: &Filters,
+) -> anyhow::Result<HashMap<String, Object>> {
+    let client = new_client(src, opts).await?;
+    let mut map: HashMap<String, Object> = HashMap::new();
+
+    if !is_batch {
+        // Single object: stat it directly.
+        let obj = client.stat(src).await?;
+        if !obj.typ.is_dir() {
+            let key = src.base();
+            if !filters.should_skip(&key) {
+                let mut obj = obj;
+                if obj.url.is_none() {
+                    obj.url = Some(src.clone());
+                }
+                map.insert(key, obj);
+            }
+        }
+        return Ok(map);
+    }
+
+    let mut rx = client.list(src, follow_symlinks);
+    while let Some(obj) = rx.recv().await {
+        if let Some(err) = obj.err {
+            // A fatal listing error (AccessDenied / NoSuchBucket) aborts the
+            // sync; annotate it with the source for a clearer message.
+            if is_fatal(&err) {
+                return Err(anyhow::anyhow!("cannot list source {src}: {err:#}"));
+            }
+            return Err(err);
+        }
+        if obj.typ.is_dir() {
+            continue;
+        }
+        if obj.storage_class.is_glacier() {
+            continue;
+        }
+        let Some(obj_url) = &obj.url else { continue };
+        let key = to_slash(&obj_url.relative());
+        if filters.should_skip(&key) {
+            continue;
+        }
+        map.insert(key, obj);
+    }
+    Ok(map)
+}
+
+/// Lists the destination recursively and returns its objects keyed by relative
+/// path. Mirrors Go's approach of appending `/*` to force a recursive listing.
+async fn collect_dest_objects(
+    dst: &Url,
+    opts: &Options,
+    filters: &Filters,
+) -> anyhow::Result<HashMap<String, Object>> {
+    // Build the recursive listing URL: dst (with a trailing slash) + "*".
+    let dst_abs = dst.absolute();
+    let listing_path = if dst_abs.ends_with('/') {
+        format!("{dst_abs}*")
+    } else {
+        format!("{dst_abs}/*")
+    };
+
+    let listing_url = match Url::parse(&listing_path) {
+        Ok(u) => u,
+        // If the destination cannot be turned into a listing URL (e.g. it does
+        // not exist yet), treat it as empty.
+        Err(_) => return Ok(HashMap::new()),
+    };
+
+    let client = match new_client(&listing_url, opts).await {
+        Ok(c) => c,
+        Err(_) => return Ok(HashMap::new()),
+    };
+
+    let mut map: HashMap<String, Object> = HashMap::new();
+    let mut rx = client.list(&listing_url, false);
+    while let Some(obj) = rx.recv().await {
+        if let Some(err) = &obj.err {
+            // A non-existent destination simply has no objects to compare.
+            let msg = err.to_string();
+            if msg.contains("no object found") || msg.contains("not found") {
+                continue;
+            }
+            // Propagate other listing errors. Fatal AWS errors (AccessDenied /
+            // NoSuchBucket) get a clearer message naming the destination.
+            let lower = msg.to_ascii_lowercase();
+            if lower.contains("accessdenied") || lower.contains("nosuchbucket") {
+                return Err(anyhow::anyhow!("cannot list destination {dst}: {msg}"));
+            }
+            return Err(anyhow::anyhow!(msg));
+        }
+        if obj.typ.is_dir() {
+            continue;
+        }
+        let Some(obj_url) = &obj.url else { continue };
+        let key = to_slash(&obj_url.relative());
+        if filters.should_skip(&key) {
+            continue;
+        }
+        map.insert(key, obj);
+    }
+    Ok(map)
+}
+
+/// Generates the destination URL for a given source object, as if it lived in
+/// the destination. Mirrors Go's `generateDestinationURL`.
+fn generate_destination_url(src_url: &Url, dst: &Url, is_batch: bool) -> Url {
+    let objname = if is_batch {
+        src_url.relative()
+    } else {
+        src_url.base()
+    };
+
+    if dst.is_remote() {
+        if dst.is_prefix() || dst.is_bucket() {
+            return dst.join(&objname);
+        }
+        return dst.clone();
+    }
+    dst.join(&objname)
+}
+
+/// Copies a single source object to a single destination, choosing the transfer
+/// direction from the remote/local kinds (duplicated from `cp.rs`, since that
+/// file must not be edited).
+async fn copy_one(
+    src: &Url,
+    dst: &Url,
+    s3: Option<&S3>,
+    opts: &Options,
+    metadata: &Metadata,
+) -> anyhow::Result<()> {
+    match (src.is_remote(), dst.is_remote()) {
+        // remote -> remote: server-side copy.
+        (true, true) => {
+            s3.expect("remote copy requires S3 client").copy(src, dst, metadata).await?;
+        }
+        // remote -> local: download.
+        (true, false) => {
+            s3.expect("download requires S3 client")
+                .download(src, &PathBuf::from(dst.absolute()))
+                .await?;
+        }
+        // local -> remote: upload.
+        (false, true) => {
+            s3.expect("upload requires S3 client")
+                .upload(&PathBuf::from(src.absolute()), dst, metadata)
+                .await?;
+        }
+        // local -> local: filesystem copy.
+        (false, false) => {
+            let fs = new_client(src, opts).await?;
+            fs.copy(src, dst, metadata).await?;
+        }
+    }
+    Ok(())
+}
+
+/// Deletes a single object (local or remote), using the shared S3 client when remote.
+async fn delete_one(u: &Url, s3: Option<&S3>, opts: &Options) -> anyhow::Result<()> {
+    if u.is_remote() {
+        s3.expect("remote delete requires S3 client").delete(u).await
+    } else {
+        new_client(u, opts).await?.delete(u).await
+    }
+}
+
+/// Converts OS path separators to forward slashes for stable map keys, matching
+/// Go's `filepath.ToSlash`.
+fn to_slash(s: &str) -> String {
+    if std::path::MAIN_SEPARATOR == '/' {
+        s.to_string()
+    } else {
+        s.replace(std::path::MAIN_SEPARATOR, "/")
+    }
+}
+
+// Bring the Storage trait into scope so trait methods can be called on the
+// concrete `S3` type within `copy_one`.
+use crate::storage::Storage as _;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dest_url_batch_remote_prefix() {
+        let src = Url::parse("/tmp/data/sub/a.txt").unwrap();
+        let mut src = src;
+        // Simulate a relative path as produced by listing a directory source.
+        let base = Url::parse("/tmp/data").unwrap();
+        src.set_relative(&base);
+        let dst = Url::parse("s3://bucket/prefix/").unwrap();
+        let out = generate_destination_url(&src, &dst, true);
+        assert_eq!(out.absolute(), "s3://bucket/prefix/data/sub/a.txt");
+    }
+
+    #[test]
+    fn dest_url_non_batch_uses_base() {
+        let src = Url::parse("/tmp/data/a.txt").unwrap();
+        let dst = Url::parse("s3://bucket/prefix/").unwrap();
+        let out = generate_destination_url(&src, &dst, false);
+        assert_eq!(out.absolute(), "s3://bucket/prefix/a.txt");
+    }
+
+    #[test]
+    fn dest_url_remote_exact_object_clones() {
+        let src = Url::parse("s3://b/x/a.txt").unwrap();
+        let dst = Url::parse("s3://bucket/dir/file.txt").unwrap();
+        // dst is neither prefix nor bucket -> exact destination clone.
+        let out = generate_destination_url(&src, &dst, false);
+        assert_eq!(out.absolute(), "s3://bucket/dir/file.txt");
+    }
+
+    #[test]
+    fn is_fatal_matches_known_aws_errors() {
+        // Matched case-insensitively against the full Display chain.
+        assert!(is_fatal(&anyhow::anyhow!("AccessDenied: forbidden")));
+        assert!(is_fatal(&anyhow::anyhow!("accessdenied")));
+        assert!(is_fatal(&anyhow::anyhow!("NoSuchBucket: missing")));
+        assert!(is_fatal(&anyhow::anyhow!("nosuchbucket")));
+        // Fatal cause surfaced through a wrapping context.
+        let wrapped = anyhow::anyhow!("AccessDenied").context("uploading object");
+        assert!(is_fatal(&wrapped));
+
+        // Unrelated errors are not fatal.
+        assert!(!is_fatal(&anyhow::anyhow!("connection reset")));
+        assert!(!is_fatal(&anyhow::anyhow!("NoSuchKey: not found")));
+    }
+
+    #[test]
+    fn filters_exclude_and_include() {
+        let f = Filters::new(&[], &["*.txt".to_string()]).unwrap();
+        assert!(f.should_skip("a.txt"));
+        assert!(!f.should_skip("a.csv"));
+
+        let f = Filters::new(&["*.csv".to_string()], &[]).unwrap();
+        assert!(!f.should_skip("a.csv"));
+        assert!(f.should_skip("a.txt"));
+    }
+}

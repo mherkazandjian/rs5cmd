@@ -1,0 +1,114 @@
+[package]
+name = "rs5cmd"
+version = "0.1.0"
+edition = "2021"
+description = "A Rust port of s5cmd — a very fast S3 and local filesystem execution tool"
+license = "MIT"
+
+[[bin]]
+name = "rs5cmd"
+path = "src/main.rs"
+
+# Benchmark-only in-memory S3 stub (raw tokio, no extra deps).
+[[bin]]
+name = "s3stub"
+path = "src/bin/s3stub.rs"
+required-features = ["bench-stub"]
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "cargo", "env"] }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+async-trait = "0.1"
+
+# AWS S3
+aws-config = { version = "1", features = ["behavior-version-latest"] }
+aws-sdk-s3 = "1"
+aws-smithy-runtime-api = "1"
+aws-smithy-types = "1"
+aws-credential-types = "1"
+
+# Custom no-verify HTTP client for the default SDK path (`--no-verify-ssl`):
+# we build a hyper + hyper-rustls connector with a dangerous cert verifier and
+# adapt it to the smithy `HttpClient` trait. These are non-optional so the
+# default build can express no-verify. `rustls`/`http` are also used by `fast`.
+# `ring` provider matches the fast path's crypto backend.
+rustls = { version = "0.23", features = ["ring"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "native-tokio"] }
+hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+http = "1"
+
+# Error handling
+thiserror = "1"
+anyhow = "1"
+
+# Serialization / output
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Utilities
+regex = "1"
+glob = "0.3"
+walkdir = "2"
+indicatif = "0.17"
+shell-words = "1"
+humansize = "2"
+url = "2"
+bytesize = "1"
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# --- io_uring fast path (Linux-only, opt-in) ---
+# Gated behind the `fast` feature so the default build is unaffected and still
+# compiles on non-Linux / without io_uring.
+[features]
+fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:bytes", "dep:sha2", "dep:hex", "dep:core_affinity"]
+# Builds the s3stub benchmark target (uses only tokio).
+bench-stub = []
+
+[dependencies.monoio]
+version = "0.2"
+optional = true
+
+[dependencies.monoio-transports]
+version = "0.5"
+optional = true
+
+[dependencies.monoio-http]
+version = "0.3"
+optional = true
+
+[dependencies.monoio-rustls]
+version = "0.4"
+optional = true
+
+[dependencies.aws-sigv4]
+version = "1"
+optional = true
+features = ["sign-http"]
+
+[dependencies.bytes]
+version = "1"
+optional = true
+
+[dependencies.sha2]
+version = "0.10"
+optional = true
+
+[dependencies.hex]
+version = "0.4"
+optional = true
+
+[dependencies.core_affinity]
+version = "0.8"
+optional = true
+
+[dev-dependencies]
+tempfile = "3"
+assert_cmd = "2"
+predicates = "3"
