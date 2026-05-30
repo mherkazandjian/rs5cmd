@@ -50,6 +50,13 @@ pub struct CpArgs {
     #[arg(long)]
     pub version_id: Option<String>,
 
+    /// Copy every version of a single remote source key (routes the source
+    /// through the ListObjectVersions path, like `ls`/`cat`). Each version is
+    /// written to a distinct destination by appending its version id, so the
+    /// versions do not collide (#762).
+    #[arg(long)]
+    pub all_versions: bool,
+
     /// Force transfer of glacier objects whether they are restored or not.
     /// `cp` transfers every listed object regardless of storage class, so this
     /// flag is accepted for compatibility (and parity with `sync`'s
@@ -98,6 +105,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         &args.src,
         crate::storage::url::UrlOptions {
             version_id: args.version_id.clone(),
+            all_versions: args.all_versions,
             ..Default::default()
         },
     )
@@ -196,6 +204,15 @@ async fn expand_sources(
 ) -> anyhow::Result<Vec<(Url, Url)>> {
     let client = new_client(src, opts).await?;
 
+    // `--all-versions` against a single remote key: route the source through the
+    // ListObjectVersions path (the same listing `ls`/`cat` use when versioned)
+    // and copy every version, giving each its own destination so they do not
+    // collide (#762). `src.all_versions` makes `list()` dispatch to the version
+    // lister, where every emitted object carries its `version_id`.
+    if src.is_remote() && src.all_versions && !src.is_wildcard() {
+        return expand_all_versions(client.as_ref(), src, dst, follow_symlinks).await;
+    }
+
     let is_multi = if src.is_wildcard() {
         true
     } else if src.is_remote() {
@@ -232,6 +249,73 @@ async fn expand_sources(
         pairs.push((obj_url, dst_url));
     }
     Ok(pairs)
+}
+
+/// Expands a single remote `--all-versions` source into one (source, dest) pair
+/// per object version. Each source URL carries its own version id (so the GET
+/// fetches that exact version), and each destination has the version id appended
+/// to its base name so the versions are written side by side instead of
+/// overwriting one another (#762).
+///
+/// Delete markers (versioned tombstones) and common prefixes are skipped — they
+/// have no body to copy. A per-entry listing error is reported and skipped so a
+/// single bad entry does not abort the whole copy (mirrors the default path).
+async fn expand_all_versions(
+    client: &dyn crate::storage::Storage,
+    src: &Url,
+    dst: &Url,
+    follow_symlinks: bool,
+) -> anyhow::Result<Vec<(Url, Url)>> {
+    // Is the destination a directory (a place to drop multiple files) rather
+    // than a single named target? When directory-like, versions land under it as
+    // `<base>_<versionid>`; otherwise the single dst path itself is suffixed.
+    let dst_is_dir = if dst.is_remote() {
+        dst.is_bucket() || dst.absolute().ends_with('/')
+    } else {
+        dst.absolute().ends_with('/')
+            || std::fs::metadata(dst.absolute())
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+    };
+
+    let mut rx = client.list(src, follow_symlinks);
+    let mut pairs = Vec::new();
+    while let Some(obj) = rx.recv().await {
+        if let Some(err) = obj.err {
+            eprintln!("{err:#}");
+            continue;
+        }
+        // Delete markers carry a version id but no body; skip them.
+        if obj.is_delete_marker || obj.typ.is_dir() {
+            continue;
+        }
+        let Some(obj_url) = obj.url else { continue };
+        // A version with no id cannot be disambiguated; skip defensively.
+        if obj_url.version_id.is_empty() {
+            continue;
+        }
+        let dst_url = versioned_dest(&obj_url, dst, dst_is_dir);
+        pairs.push((obj_url, dst_url));
+    }
+    Ok(pairs)
+}
+
+/// Builds the per-version destination for `--all-versions`, appending the source
+/// object's version id to the base name so distinct versions never collide. When
+/// `dst_is_dir` the file lands under `dst` as `<base>_<versionid>`; otherwise the
+/// version id is appended directly to the single named destination
+/// (`<dst>_<versionid>`).
+fn versioned_dest(src: &Url, dst: &Url, dst_is_dir: bool) -> Url {
+    let vid = &src.version_id;
+    if dst_is_dir {
+        dst.join(&format!("{}_{}", src.base(), vid))
+    } else {
+        // Append directly to the destination path (NOT a path-join, which would
+        // insert a separator) so the suffix stays part of the file name.
+        let mut out = dst.clone();
+        out.path = format!("{}_{}", out.path, vid);
+        out
+    }
 }
 
 /// Resolves the destination for a single-object copy. If dst is directory-like,
