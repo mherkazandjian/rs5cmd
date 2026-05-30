@@ -320,7 +320,10 @@ fn parse_batch(prefix: &str, key: &str) -> String {
 
 /// Parses keys for non-wildcard operations.
 fn parse_non_batch(prefix: &str, key: &str) -> String {
-    if key == prefix || !key.starts_with(prefix) {
+    // Relativize a key that exactly equals the prefix the same way as its
+    // siblings (drop the upstream `key == prefix` special case that returned
+    // the absolute key, giving inconsistent ls output — upstream #755).
+    if !key.starts_with(prefix) {
         return key.to_string();
     }
     let parsed_key = key.strip_suffix(S3_SEPARATOR).unwrap_or(key);
@@ -552,6 +555,25 @@ mod tests {
         assert!(u.matches("a/b/test2/c/example_file.tsv"));
         assert_eq!(u.relative(), "test2/c/example_file.tsv");
         assert!(!u.matches("a/b/nope/x.csv"));
+    }
+
+    #[test]
+    fn parse_non_batch_relativizes_key_equal_to_prefix() {
+        // An object whose key equals the prefix must relativize like its
+        // siblings (to its basename), not be returned as the full un-relativized
+        // key (upstream #755). The prefix "a/b" is NOT slash-terminated — that
+        // is the case that reproduces the bug.
+        let mut equal = Url::parse("s3://bucket/a/b").unwrap();
+        assert!(equal.matches("a/b"));
+        assert_eq!(equal.relative(), "b");
+        // Regression guard: must NOT be the old absolute/un-relativized value.
+        assert_ne!(equal.relative(), "a/b");
+
+        // A sibling under the same prefix relativizes to its basename, and the
+        // equal-prefix object now matches that consistent style.
+        let mut sibling = Url::parse("s3://bucket/a/b").unwrap();
+        assert!(sibling.matches("a/b/file1"));
+        assert_eq!(sibling.relative(), "file1");
     }
 
     #[test]

@@ -1151,3 +1151,59 @@ fn dir_marker_object_is_a_file_not_a_dir() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn ls_prefix_with_object_equal_to_prefix() {
+    // ls of a prefix that ALSO exists as a real object key (key == prefix) must
+    // print that object relativized to its basename, never the full
+    // un-relativized key (upstream #755). With the default delimiter, `ls` of the
+    // non-slash-terminated prefix "a/b" returns the exact-match object "a/b",
+    // which must render as the relativized basename "b" (pre-fix it rendered as
+    // the absolute key "a/b"). The sibling/children relativization is covered by
+    // the url.rs unit test parse_non_batch_relativizes_key_equal_to_prefix.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    // Object whose key EXACTLY equals the listing prefix "a/b" ...
+    rs5cmd().args(["cp", f.to_str().unwrap(), &s3("/a/b")]).assert().success();
+    // ... plus two siblings nested under that same prefix, so "a/b" is a real
+    // prefix as well as a real object key.
+    rs5cmd().args(["cp", f.to_str().unwrap(), &s3("/a/b/file1")]).assert().success();
+    rs5cmd().args(["cp", f.to_str().unwrap(), &s3("/a/b/file2")]).assert().success();
+
+    // ls the prefix "a/b" (no trailing slash — the reproducing case). The
+    // exact-match object is relativized to its basename "b".
+    let out = rs5cmd().args(["ls", &s3("/a/b")]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        stdout.lines().any(|l| l.ends_with("  b")),
+        "exact-match object should list relativized as basename \"b\"; got: {stdout:?}"
+    );
+    // Regression guard for #755: the row must NOT carry the un-relativized key
+    // "a/b", and nothing in this listing is an absolute s3:// path.
+    assert!(
+        !stdout.contains(" a/b\n") && !stdout.contains(" a/b "),
+        "exact-match object must not list as the un-relativized \"a/b\"; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("s3://"),
+        "no entry should be an absolute s3:// path; got: {stdout:?}"
+    );
+
+    // Cleanup: delete each key explicitly, then the bucket. (A non-recursive
+    // root wildcard `rm /*` only removes the top-level "a/b" object and leaves
+    // the nested children, which would make `rb` fail with BucketNotEmpty.)
+    rs5cmd().args(["rm", &s3("/a/b/file1")]).assert().success();
+    rs5cmd().args(["rm", &s3("/a/b/file2")]).assert().success();
+    rs5cmd().args(["rm", &s3("/a/b")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
