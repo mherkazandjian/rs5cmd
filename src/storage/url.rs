@@ -29,6 +29,8 @@ pub struct Url {
     pub prefix: String,
     pub version_id: String,
     pub all_versions: bool,
+    /// When set, listing starts after this key (S3 `StartAfter` / V1 `Marker`).
+    pub start_after: String,
 
     relative_path: String,
     filter: String,
@@ -42,6 +44,8 @@ pub struct UrlOptions {
     pub raw: bool,
     pub version_id: Option<String>,
     pub all_versions: bool,
+    /// Start listing after this key (maps to S3 `StartAfter` / V1 `Marker`).
+    pub start_after: Option<String>,
 }
 
 impl Url {
@@ -58,6 +62,7 @@ impl Url {
                     prefix: String::new(),
                     version_id: opts.version_id.clone().unwrap_or_default(),
                     all_versions: opts.all_versions,
+                    start_after: opts.start_after.clone().unwrap_or_default(),
                     relative_path: String::new(),
                     filter: String::new(),
                     filter_regex: None,
@@ -92,6 +97,7 @@ impl Url {
                     prefix: String::new(),
                     version_id: opts.version_id.clone().unwrap_or_default(),
                     all_versions: opts.all_versions,
+                    start_after: opts.start_after.clone().unwrap_or_default(),
                     relative_path: String::new(),
                     filter: String::new(),
                     filter_regex: None,

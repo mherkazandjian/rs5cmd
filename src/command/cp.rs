@@ -49,6 +49,17 @@ pub struct CpArgs {
     /// Copy the given source object version id (single-object remote source).
     #[arg(long)]
     pub version_id: Option<String>,
+
+    /// Preserve file modification time: store the local mtime as object
+    /// metadata on upload, and restore it onto the file on download.
+    #[arg(long)]
+    pub preserve_timestamps: bool,
+
+    /// For remote→remote copies, stream through the client (download then
+    /// upload) instead of a server-side CopyObject. Useful when server-side
+    /// copy is unavailable or disallowed.
+    #[arg(long)]
+    pub client_copy: bool,
 }
 
 impl CpArgs {
@@ -66,6 +77,8 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let mut opts = global.storage_options();
     opts.part_size = args.part_size.max(5).saturating_mul(1024 * 1024);
     opts.concurrency = args.concurrency.max(1);
+    opts.preserve_timestamps = args.preserve_timestamps;
+    opts.client_copy = args.client_copy;
     let src = Url::new(
         &args.src,
         crate::storage::url::UrlOptions {
@@ -234,10 +247,15 @@ async fn copy_one(
     is_move: bool,
 ) -> anyhow::Result<()> {
     match (src.is_remote(), dst.is_remote()) {
-        // remote -> remote: server-side copy.
+        // remote -> remote: server-side copy, or client-side (download+upload)
+        // streaming when --client-copy is set.
         (true, true) => {
             let s3 = s3.expect("remote copy requires an S3 client");
-            s3.copy(src, dst, metadata).await?;
+            if opts.client_copy {
+                s3.client_copy(src, dst, metadata).await?;
+            } else {
+                s3.copy(src, dst, metadata).await?;
+            }
             if is_move {
                 s3.delete(src).await?;
             }

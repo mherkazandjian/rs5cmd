@@ -163,6 +163,139 @@ fn sync_size_only_is_idempotent_and_deletes() {
 }
 
 #[test]
+fn sync_max_delete_aborts_without_touching_anything() {
+    // --max-delete must abort the whole sync (no copies, no deletes) when the
+    // delete set exceeds the cap, and leave the destination intact.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    // An empty source directory against a destination with 3 objects: a plain
+    // `--delete` would remove all 3. `--max-delete 2` must refuse.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("empty");
+    std::fs::create_dir(&dir).unwrap();
+
+    let seed = tmp.path().join("seed.txt");
+    std::fs::write(&seed, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for name in ["one.txt", "two.txt", "three.txt"] {
+        rs5cmd()
+            .args(["cp", seed.to_str().unwrap(), &s3(&format!("/m/{name}"))])
+            .assert()
+            .success();
+    }
+
+    // Over the cap (3 > 2): aborts with a non-zero exit and deletes nothing.
+    rs5cmd()
+        .args([
+            "sync",
+            "--delete",
+            "--max-delete",
+            "2",
+            &format!("{}/", dir.to_str().unwrap()),
+            &s3("/m/"),
+        ])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("max-delete"));
+
+    // All three objects must still be present (nothing was deleted).
+    rs5cmd()
+        .args(["ls", &s3("/m/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one.txt"))
+        .stdout(predicate::str::contains("two.txt"))
+        .stdout(predicate::str::contains("three.txt"));
+
+    // At the cap (3 <= 3): proceeds and deletes all three. The sync's own
+    // output reports the three deletions (we assert on that rather than a
+    // follow-up `ls`, since `ls` on the now-empty prefix exits non-zero with
+    // "no object found").
+    rs5cmd()
+        .args([
+            "sync",
+            "--delete",
+            "--max-delete",
+            "3",
+            &format!("{}/", dir.to_str().unwrap()),
+            &s3("/m/"),
+        ])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("one.txt"))
+        .stdout(predicate::str::contains("two.txt"))
+        .stdout(predicate::str::contains("three.txt"))
+        .stdout(predicate::str::contains("rm "));
+
+    // The prefix is now empty: `ls` finds nothing.
+    rs5cmd()
+        .args(["ls", &s3("/m/")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no object found"));
+
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn s3_to_s3_multipart_copy_for_large_source() {
+    // Server-side copy must fall back to multipart UploadPartCopy for sources
+    // over the 5 GiB CopyObject limit (s5cmd PR#856). We can't make a 5 GiB
+    // object on MinIO cheaply, so RS5CMD_MULTIPART_COPY_THRESHOLD=1 forces the
+    // multipart path, and --part-size 5 makes the ~11 MiB source copy in three
+    // ranged parts. The copy must be byte-identical to the source.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    // ~11 MiB with a position-dependent pattern so a mis-ordered or mis-ranged
+    // part would corrupt the result and fail the byte comparison.
+    let n = 11 * 1024 * 1024 + 123;
+    let mut data = vec![0u8; n];
+    for (i, b) in data.iter_mut().enumerate() {
+        *b = (i % 251) as u8;
+    }
+    let local = tmp.path().join("big.bin");
+    std::fs::write(&local, &data).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", local.to_str().unwrap(), &s3("/big.bin")])
+        .assert()
+        .success();
+
+    // Force the multipart-copy path with 5 MiB parts (=> 3 UploadPartCopy parts).
+    rs5cmd()
+        .env("RS5CMD_MULTIPART_COPY_THRESHOLD", "1")
+        .args(["cp", "--part-size", "5", &s3("/big.bin"), &s3("/big-copy.bin")])
+        .assert()
+        .success();
+
+    // Download the copy and verify it is byte-identical to the source.
+    let out = tmp.path().join("out.bin");
+    rs5cmd()
+        .args(["cp", &s3("/big-copy.bin"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), data);
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn du_counts_objects_with_wildcard() {
     if !endpoint_configured() {
         eprintln!("skipping: no S3 endpoint configured");
@@ -551,5 +684,333 @@ fn move_local_to_s3_deletes_source() {
     // Remote object is gone: ls of the now-empty prefix errors "no object found".
     rs5cmd().args(["ls", &s3("/m.txt")]).assert().failure();
 
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn proxy_socks5_transfer() {
+    // Routes a full upload/list/download through a SOCKS5 proxy (--proxy). Only
+    // runs when RS5CMD_TEST_SOCKS5 is set (the `test-proxy` compose service);
+    // self-skips elsewhere. (s5cmd #823)
+    let proxy = match std::env::var("RS5CMD_TEST_SOCKS5") {
+        Ok(p) if !p.is_empty() => p,
+        _ => {
+            eprintln!("skipping: RS5CMD_TEST_SOCKS5 not set");
+            return;
+        }
+    };
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("p.txt");
+    std::fs::write(&f, b"through the proxy").unwrap();
+
+    rs5cmd().args(["--proxy", &proxy, "mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["--proxy", &proxy, "cp", f.to_str().unwrap(), &s3("/p.txt")])
+        .assert()
+        .success();
+    rs5cmd()
+        .args(["--proxy", &proxy, "ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("p.txt"));
+
+    let out = tmp.path().join("out.txt");
+    rs5cmd()
+        .args(["--proxy", &proxy, "cp", &s3("/p.txt"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), b"through the proxy");
+
+    rs5cmd().args(["--proxy", &proxy, "rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["--proxy", &proxy, "rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn ls_show_fullpath_and_start_after() {
+    // --show-fullpath prints absolute s3:// paths only; --start-after resumes a
+    // listing past a given key (exclusive). (s5cmd #599/#601, #850)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["a.txt", "b.txt", "c.txt"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/{k}"))])
+            .assert()
+            .success();
+    }
+
+    rs5cmd()
+        .args(["ls", "--show-fullpath", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(s3("/a.txt")))
+        .stdout(predicate::str::contains(s3("/c.txt")));
+
+    rs5cmd()
+        .args(["ls", "--start-after", "b.txt", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("c.txt"))
+        .stdout(predicate::str::contains("a.txt").not())
+        .stdout(predicate::str::contains("b.txt").not());
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn sync_exclude_from_file() {
+    // --exclude-from reads globs from a file; matching objects are not copied.
+    // (s5cmd #868)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("keep.txt"), b"k").unwrap();
+    std::fs::write(dir.join("drop.log"), b"d").unwrap();
+    let patterns = tmp.path().join("excludes.txt");
+    std::fs::write(&patterns, b"# logs\n\n*.log\n").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args([
+            "sync",
+            "--exclude-from",
+            patterns.to_str().unwrap(),
+            &format!("{}/", dir.to_str().unwrap()),
+            &s3("/m/"),
+        ])
+        .assert()
+        .success();
+
+    rs5cmd()
+        .args(["ls", &s3("/m/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("keep.txt"))
+        .stdout(predicate::str::contains("drop.log").not());
+
+    rs5cmd().args(["rm", &s3("/m/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn completion_script_generates() {
+    // `completion <shell>` emits a script naming the binary; no endpoint needed.
+    rs5cmd()
+        .args(["completion", "bash"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rs5cmd"));
+}
+
+#[test]
+fn addressing_style_path_works() {
+    // --addressing-style path is accepted and path-style requests succeed
+    // against MinIO (its default). (s5cmd #795)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("a.txt");
+    std::fs::write(&f, b"hi").unwrap();
+
+    rs5cmd().args(["--addressing-style", "path", "mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["--addressing-style", "path", "cp", f.to_str().unwrap(), &s3("/a.txt")])
+        .assert()
+        .success();
+    rs5cmd()
+        .args(["--addressing-style", "path", "ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_skips_non_regular_files() {
+    // A directory containing a FIFO must upload the regular files and skip the
+    // FIFO instead of hanging/erroring. (s5cmd PR#776)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("real.txt"), b"data").unwrap();
+
+    let fifo = dir.join("pipe.fifo");
+    let ok = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if !ok {
+        eprintln!("skipping: mkfifo unavailable");
+        return;
+    }
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", &format!("{}/", dir.to_str().unwrap()), &s3("/u/")])
+        .assert()
+        .success();
+
+    rs5cmd()
+        .args(["ls", &s3("/u/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("real.txt"))
+        .stdout(predicate::str::contains("pipe.fifo").not());
+
+    rs5cmd().args(["rm", &s3("/u/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_preserve_timestamps_roundtrip() {
+    // --preserve-timestamps stores the local mtime as object metadata on upload
+    // and restores it on download. (s5cmd #534)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("ts.txt");
+    std::fs::write(&src, b"timestamped").unwrap();
+
+    if !std::process::Command::new("touch")
+        .args(["-d", "2020-06-15T12:00:00Z"])
+        .arg(&src)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skipping: touch -d unavailable");
+        return;
+    }
+    let src_mtime = std::fs::metadata(&src).unwrap().modified().unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", "--preserve-timestamps", src.to_str().unwrap(), &s3("/ts.txt")])
+        .assert()
+        .success();
+
+    let out = tmp.path().join("out.txt");
+    rs5cmd()
+        .args(["cp", "--preserve-timestamps", &s3("/ts.txt"), out.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let out_mtime = std::fs::metadata(&out).unwrap().modified().unwrap();
+    let diff = src_mtime
+        .duration_since(out_mtime)
+        .or_else(|_| out_mtime.duration_since(src_mtime))
+        .unwrap();
+    assert!(
+        diff.as_secs() <= 2,
+        "preserved mtime should match source within 2s, diff={}s",
+        diff.as_secs()
+    );
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_client_copy_remote_to_remote() {
+    // --client-copy performs a remote→remote copy by streaming through the
+    // client (download+upload) instead of server-side CopyObject. (s5cmd #671)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("orig.bin");
+    let data: Vec<u8> = (0..5000u32).map(|i| (i % 256) as u8).collect();
+    std::fs::write(&src, &data).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", src.to_str().unwrap(), &s3("/orig.bin")])
+        .assert()
+        .success();
+    rs5cmd()
+        .args(["cp", "--client-copy", &s3("/orig.bin"), &s3("/copy.bin")])
+        .assert()
+        .success();
+
+    let out = tmp.path().join("out.bin");
+    rs5cmd()
+        .args(["cp", &s3("/copy.bin"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), data);
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn sync_checksum_detects_same_size_content_change() {
+    // --checksum compares content (MD5/ETag), so it re-copies a file whose
+    // content changed but size did not — which --size-only would miss.
+    // (s5cmd #799)
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("a.txt"), b"AAAA").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["sync", "--checksum", dir.to_str().unwrap(), &s3("/m/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cp "));
+    rs5cmd()
+        .args(["sync", "--checksum", dir.to_str().unwrap(), &s3("/m/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cp ").not());
+
+    std::fs::write(dir.join("a.txt"), b"BBBB").unwrap();
+    rs5cmd()
+        .args(["sync", "--checksum", dir.to_str().unwrap(), &s3("/m/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cp "));
+
+    rs5cmd().args(["rm", &s3("/m/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }

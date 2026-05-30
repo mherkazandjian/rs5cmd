@@ -18,6 +18,7 @@ required-features = ["bench-stub"]
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive", "cargo", "env"] }
+clap_complete = "4"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
@@ -40,6 +41,7 @@ aws-credential-types = "1"
 rustls = { version = "0.23", features = ["ring"] }
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "native-tokio"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
+hyper = "1"
 http = "1"
 
 # Error handling
@@ -59,6 +61,13 @@ shell-words = "1"
 humansize = "2"
 url = "2"
 bytesize = "1"
+filetime = "0.2"
+md-5 = "0.10"
+# Proxy support (--proxy/-x) for the default SDK path.
+tokio-socks = "0.5"
+tower-service = "0.3"
+base64 = "0.22"
+webpki-roots = "0.26"
 time = { version = "0.3", features = ["formatting", "macros"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

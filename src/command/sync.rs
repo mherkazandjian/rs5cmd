@@ -46,6 +46,12 @@ pub struct SyncArgs {
     #[arg(long)]
     pub size_only: bool,
 
+    /// Compare content checksums (S3 ETag / MD5) instead of size+modtime. For a
+    /// local source the file's MD5 is computed; objects whose ETag is a
+    /// multipart composite (contains `-`) can't be compared and are re-copied.
+    #[arg(long)]
+    pub checksum: bool,
+
     /// (Accepted for compatibility) compare exact timestamps. The default
     /// strategy already compares modification times, so this is a no-op here.
     #[arg(long)]
@@ -62,6 +68,16 @@ pub struct SyncArgs {
     /// Only include objects whose relative path matches the given glob (repeatable).
     #[arg(long)]
     pub include: Vec<String>,
+
+    /// Read additional `--exclude` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub exclude_from: Vec<String>,
+
+    /// Read additional `--include` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub include_from: Vec<String>,
 
     /// Storage class for copied destination objects.
     #[arg(long)]
@@ -82,6 +98,18 @@ pub struct SyncArgs {
     /// run fails at the end if any operation failed.
     #[arg(long)]
     pub exit_on_error: bool,
+
+    /// Safety cap on `--delete`: abort the whole sync (before copying or
+    /// deleting anything) if more than N destination objects would be deleted.
+    /// Guards against a misconfigured source silently wiping the destination
+    /// (rsync's `--max-delete`). Ignored unless `--delete` is also set.
+    #[arg(long)]
+    pub max_delete: Option<usize>,
+
+    /// Preserve file modification time across transfers (store local mtime as
+    /// object metadata on upload; restore it on download).
+    #[arg(long)]
+    pub preserve_timestamps: bool,
 }
 
 /// Returns true if an error is a fatal AWS error that should abort the whole
@@ -106,14 +134,18 @@ impl SyncArgs {
 }
 
 pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
-    let opts = global.storage_options();
+    let mut opts = global.storage_options();
+    opts.preserve_timestamps = args.preserve_timestamps;
     let src = Url::parse(&args.src).map_err(|e| anyhow::anyhow!(e))?;
     let dst = Url::parse(&args.dst).map_err(|e| anyhow::anyhow!(e))?;
     let metadata = args.metadata();
-    let strategy = SyncStrategy::new(args.size_only);
+    let strategy = SyncStrategy::new(args.size_only, args.checksum);
 
-    // Compile include/exclude filters into regexes once.
-    let filters = Filters::new(&args.include, &args.exclude)?;
+    // Compile include/exclude filters into regexes once. Inline patterns are
+    // combined with any read from `--include-from`/`--exclude-from` files.
+    let includes = patterns_with_files(&args.include, &args.include_from)?;
+    let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
+    let filters = Filters::new(&includes, &excludes)?;
 
     // Determine whether the source expands to multiple objects ("batch"), which
     // governs how relative keys are derived (mirrors Go's `isBatch`).
@@ -121,7 +153,8 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
 
     // Build the keyed source and destination maps.
     let source_objects =
-        collect_source_objects(&src, &opts, args.follow_symlinks, is_batch, &filters).await?;
+        collect_source_objects(&src, &opts, args.follow_symlinks, is_batch, &filters, args.checksum)
+            .await?;
     let dest_objects = collect_dest_objects(&dst, &opts, &filters).await?;
 
     // Partition into copy / common / delete groups.
@@ -155,6 +188,22 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
             if let Some(u) = dst_obj.url {
                 to_delete.push(u);
             }
+        }
+    }
+
+    // `--max-delete` safety cap: if the delete set is larger than the allowed
+    // maximum, abort *before* performing any copy or delete. A source that
+    // expanded to far fewer objects than expected (wrong path, failed mount,
+    // etc.) would otherwise delete the bulk of the destination; failing fast
+    // here makes that mistake recoverable rather than destructive.
+    if let Some(max) = args.max_delete {
+        if to_delete.len() > max {
+            anyhow::bail!(
+                "aborting sync: --delete would remove {} objects, exceeding --max-delete {} \
+                 (nothing was copied or deleted)",
+                to_delete.len(),
+                max
+            );
         }
     }
 
@@ -274,8 +323,14 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
     // One-line run summary of successful operations, emitted to stderr so it
     // never interleaves with the per-object result lines on stdout. Suppressed
     // in JSON mode to keep machine-readable output limited to the per-op objects.
+    // When the source and destination already matched, say so explicitly rather
+    // than printing a silent "0 objects" line (upstream s5cmd #796).
     if !crate::output::is_json() {
-        eprintln!("# synced {copied} objects, deleted {deleted}");
+        if copied == 0 && deleted == 0 {
+            eprintln!("# nothing to sync; source and destination are already in sync");
+        } else {
+            eprintln!("# synced {copied} objects, deleted {deleted}");
+        }
     }
 
     if had_error {
@@ -358,6 +413,24 @@ impl Filters {
     }
 }
 
+/// Returns the inline patterns followed by any read from the given files (one
+/// pattern per line; blank lines and lines starting with `#` are ignored).
+fn patterns_with_files(inline: &[String], files: &[String]) -> anyhow::Result<Vec<String>> {
+    let mut out = inline.to_vec();
+    for f in files {
+        let content = std::fs::read_to_string(f)
+            .map_err(|e| anyhow::anyhow!("reading pattern file {f}: {e}"))?;
+        for line in content.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            out.push(line.to_string());
+        }
+    }
+    Ok(out)
+}
+
 /// Compiles wildcard glob strings into anchored regexes.
 fn compile_globs(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
     let mut out = Vec::with_capacity(patterns.len());
@@ -396,6 +469,7 @@ async fn collect_source_objects(
     follow_symlinks: bool,
     is_batch: bool,
     filters: &Filters,
+    checksum: bool,
 ) -> anyhow::Result<HashMap<String, Object>> {
     let client = new_client(src, opts).await?;
     let mut map: HashMap<String, Object> = HashMap::new();
@@ -410,6 +484,13 @@ async fn collect_source_objects(
                 if obj.url.is_none() {
                     obj.url = Some(src.clone());
                 }
+                // For checksum mode, a local source has no ETag from stat; fill
+                // it with the file's MD5 so the strategy can compare.
+                if checksum && !src.is_remote() {
+                    if let Some(h) = local_md5_hex(&src.absolute()) {
+                        obj.etag = h;
+                    }
+                }
                 map.insert(key, obj);
             }
         }
@@ -418,6 +499,7 @@ async fn collect_source_objects(
 
     let mut rx = client.list(src, follow_symlinks);
     while let Some(obj) = rx.recv().await {
+        let mut obj = obj;
         if let Some(err) = obj.err {
             // A fatal listing error (AccessDenied / NoSuchBucket) aborts the
             // sync; annotate it with the source for a clearer message.
@@ -432,14 +514,41 @@ async fn collect_source_objects(
         if obj.storage_class.is_glacier() {
             continue;
         }
-        let Some(obj_url) = &obj.url else { continue };
+        let Some(obj_url) = obj.url.clone() else { continue };
         let key = to_slash(&obj_url.relative());
         if filters.should_skip(&key) {
             continue;
         }
+        // For checksum mode, compute the MD5 of each local source file (remote
+        // sources already carry an ETag from the listing).
+        if checksum && !obj_url.is_remote() {
+            if let Some(h) = local_md5_hex(&obj_url.absolute()) {
+                obj.etag = h;
+            }
+        }
         map.insert(key, obj);
     }
     Ok(map)
+}
+
+/// Computes the lowercase hex MD5 of a local file, streaming it in chunks so
+/// large files don't have to be held in memory. Returns `None` on any IO error
+/// (the caller then treats the checksum as missing and re-copies to be safe).
+fn local_md5_hex(path: &str) -> Option<String> {
+    use md5::{Digest, Md5};
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let mut hasher = Md5::new();
+    let mut buf = [0u8; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(format!("{:x}", hasher.finalize()))
 }
 
 /// Lists the destination recursively and returns its objects keyed by relative

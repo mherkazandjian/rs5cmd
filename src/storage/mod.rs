@@ -144,11 +144,27 @@ pub struct Options {
     pub request_payer: Option<String>,
     pub profile: Option<String>,
     pub region: Option<String>,
+    /// Proxy URL (`socks5://`, `socks5h://`, `http://`, `https://`) for the
+    /// default SDK transport. `None` falls back to the standard `ALL_PROXY` /
+    /// `HTTPS_PROXY` / `HTTP_PROXY` environment variables.
+    pub proxy: Option<String>,
+    /// Force S3 addressing style: `Some("path")` or `Some("virtual")`. When
+    /// `None`, path-style is used for custom endpoints (MinIO etc.) and the SDK
+    /// default (virtual-host) for real AWS — matching prior behavior.
+    pub addressing_style: Option<String>,
     /// Multipart part size in bytes. Objects larger than this are transferred
     /// in parallel parts; smaller ones use a single PUT/GET.
     pub part_size: u64,
     /// Number of parts transferred concurrently per object.
     pub concurrency: usize,
+    /// Preserve file modification time across transfers: on upload the local
+    /// mtime is stored as object metadata; on download it is restored onto the
+    /// written file.
+    pub preserve_timestamps: bool,
+    /// Perform remote→remote copies by streaming through the client
+    /// (download then upload) instead of a server-side `CopyObject`. Useful
+    /// when server-side copy is unavailable or disallowed.
+    pub client_copy: bool,
 }
 
 /// Default multipart part size (bytes). Mirrors a common 8 MiB default and is
@@ -169,11 +185,20 @@ impl Default for Options {
             request_payer: None,
             profile: None,
             region: None,
+            proxy: None,
+            addressing_style: None,
             part_size: DEFAULT_PART_SIZE,
             concurrency: DEFAULT_CONCURRENCY,
+            preserve_timestamps: false,
+            client_copy: false,
         }
     }
 }
+
+/// Object-metadata key (becomes `x-amz-meta-<key>`) used to carry the source
+/// file's modification time when `--preserve-timestamps` is set. The value is
+/// the mtime in `seconds.nanoseconds` since the Unix epoch.
+pub const MTIME_METADATA_KEY: &str = "file-mtime";
 
 /// Common interface for local filesystem and remote object storage. Listing
 /// operations return a channel receiver mirroring the Go `<-chan *Object`

@@ -63,6 +63,18 @@ pub struct GlobalOpts {
     #[arg(long, global = true)]
     pub profile: Option<String>,
 
+    /// S3 addressing style: `path` (e.g. host/bucket/key) or `virtual`
+    /// (bucket.host/key). Defaults to path-style for custom endpoints and
+    /// virtual-host for real AWS.
+    #[arg(long, global = true, value_parser = ["path", "virtual"])]
+    pub addressing_style: Option<String>,
+
+    /// Route requests through a proxy: `socks5://`, `socks5h://`, `http://` or
+    /// `https://[user:pass@]host:port`. Falls back to the ALL_PROXY/HTTPS_PROXY/
+    /// HTTP_PROXY env vars. (Applies to the default path, not `--fast`.)
+    #[arg(long, short = 'x', global = true)]
+    pub proxy: Option<String>,
+
     /// Number of concurrent workers for batch operations.
     #[arg(long, global = true, default_value_t = 256)]
     pub numworkers: usize,
@@ -82,6 +94,8 @@ impl GlobalOpts {
             use_list_objects_v1: self.use_list_objects_v1,
             region: self.region.clone(),
             profile: self.profile.clone(),
+            proxy: self.proxy.clone(),
+            addressing_style: self.addressing_style.clone(),
             max_retries: self.retry_count,
             ..Default::default()
         }
@@ -120,6 +134,15 @@ pub enum Command {
     Run(run::RunArgs),
     /// Get or set a bucket's versioning status.
     BucketVersion(bucket_version::BucketVersionArgs),
+    /// Generate a shell completion script (bash, zsh, fish, powershell, elvish).
+    Completion(CompletionArgs),
+}
+
+#[derive(Args, Debug)]
+pub struct CompletionArgs {
+    /// Shell to generate the completion script for.
+    #[arg(value_enum)]
+    pub shell: clap_complete::Shell,
 }
 
 /// Runs the parsed CLI.
@@ -141,5 +164,11 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Select(args) => select::run(&cli.global, args).await,
         Command::Run(args) => run::run(&cli.global, args).await,
         Command::BucketVersion(args) => bucket_version::run(&cli.global, args).await,
+        Command::Completion(args) => {
+            use clap::CommandFactory;
+            let mut cmd = Cli::command();
+            clap_complete::generate(args.shell, &mut cmd, "rs5cmd", &mut std::io::stdout());
+            Ok(())
+        }
     }
 }

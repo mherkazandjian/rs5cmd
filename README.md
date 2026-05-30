@@ -7,7 +7,7 @@ Go s5cmd on small-object throughput and CPU efficiency.
 Development and testing are fully containerized (no Rust toolchain needed on the
 host); the suite runs against a MinIO S3-compatible server via docker-compose.
 
-- **14 commands**: `ls cp mv rm cat mb rb sync du pipe head presign select run bucket-version`
+- **15 commands**: `ls cp mv rm cat mb rb sync du pipe head presign select run bucket-version completion`
 - **Two transfer engines**: a portable `tokio` + `aws-sdk-s3` path (default), and
   an opt-in `--fast` io_uring path (Linux, `fast` feature) for many small objects.
 - **Tested end-to-end** against MinIO: 92 tests on the default build, 99 with the
@@ -19,9 +19,25 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   copy) — with wildcard, prefix, and recursive expansion over a concurrency-limited
   worker pool. Large objects use concurrent **multipart upload** and **ranged
   parallel download** (`--part-size <MiB>`, `--concurrency <N>`); small objects use
-  a single PUT/GET. `mv` deletes the source only after a successful transfer.
-- **`sync`** with size-only and size+modtime strategies, `--delete`,
-  `--include`/`--exclude` globs, and `--exit-on-error`.
+  a single PUT/GET. Server-side S3→S3 copies of objects over the 5 GiB
+  `CopyObject` limit transparently fall back to **multipart `UploadPartCopy`**;
+  `--client-copy` streams a remote→remote copy through the client instead.
+  `--preserve-timestamps` carries the file mtime across as object metadata.
+  Non-regular files (sockets/FIFOs/devices) are skipped rather than erroring.
+  `mv` deletes the source only after a successful transfer.
+- **`sync`** with size-only, size+modtime, and content-**`--checksum`** (MD5/
+  ETag) strategies, `--delete`, `--include`/`--exclude` globs (plus
+  `--include-from`/`--exclude-from` files), `--exit-on-error`, and a
+  `--max-delete N` safety cap that aborts before touching anything if
+  `--delete` would remove more than N objects (guards against a misconfigured
+  source wiping the dest).
+- **Addressing style** is selectable with `--addressing-style path|virtual` for
+  S3-compatible providers (defaults: path-style for custom endpoints,
+  virtual-host for AWS).
+- **Proxy** support via `--proxy`/`-x` (or the `ALL_PROXY`/`HTTPS_PROXY`/
+  `HTTP_PROXY` env vars): SOCKS5 (`socks5://`, `socks5h://`) and HTTP `CONNECT`
+  (`http://`, `https://`), with optional `user:pass@`. Applies to the default
+  transport (not the `--fast` io_uring path).
 - **Listing** (`ls`) with `-H/--humanize`, `--storage-class`, `--etag`,
   `--summarize` (totals footer), and JSON output. **`du`** size/count summaries
   (`--exclude`, `--all-versions`, group-by-storage-class).
@@ -49,17 +65,22 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 ```
 rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
        [--no-sign-request] [--no-verify-ssl] [--use-list-objects-v1]
+       [--addressing-style path|virtual] [--proxy URL | -x URL]
        [--retry-count N] [--dry-run] [--numworkers N] <command>
 
-  ls   [s3://bucket[/prefix]] [--summarize]  list buckets or objects
-  cp   <src> <dst>                 copy (local↔s3, s3↔s3); wildcards, --fast
+  ls   [s3://bucket[/prefix]] [--summarize] [--show-fullpath] [--start-after KEY]
+                                   list buckets or objects
+  cp   <src> <dst>                 copy (local↔s3, s3↔s3); wildcards, --fast,
+                                   --preserve-timestamps, --client-copy
   mv   <src> <dst>                 move (copy then delete source)
   rm   <target>...                 remove objects (wildcard/prefix, --include/--exclude)
   cat  <s3://bucket/[key|*]>       stream object(s) to stdout (wildcard concatenates)
   mb   <s3://bucket>               make bucket
   rb   <s3://bucket>               remove bucket
-  sync <src> <dst>                 sync (--delete, --size-only, --include/--exclude,
-                                   --exit-on-error)
+  sync <src> <dst>                 sync (--delete, --size-only, --checksum,
+                                   --include/--exclude, --include-from/--exclude-from,
+                                   --exit-on-error, --max-delete N,
+                                   --preserve-timestamps)
   du   [s3://bucket/prefix/*]      summarize size/count (--exclude, --all-versions)
   pipe <s3://bucket/key>           upload stdin (--sse, --sse-kms-key-id, multipart)
   head <s3://bucket[/key]>         print object metadata / check bucket
@@ -67,6 +88,7 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   select [-e SQL] <s3://bucket/[key|*]>            run an S3 Select query
   run  [file]                      run newline-delimited commands from file/stdin
   bucket-version [--set S] <s3://bucket>           get/set versioning (Enabled/Suspended)
+  completion <bash|zsh|fish|powershell|elvish>     print a shell completion script
 ```
 
 Large-object knobs (`--part-size`, `--concurrency`) and version flags

@@ -21,17 +21,60 @@ use super::{
 /// Max keys per DeleteObjects request (S3 API limit).
 const DELETE_CHUNK_SIZE: usize = 1000;
 
-/// Builds an HTTP client for the AWS SDK whose TLS layer skips certificate
-/// verification (and hostname checking) — used only when `--no-verify-ssl`
-/// is set, for self-signed HTTPS endpoints.
-///
-/// The bundled `aws-smithy-http-client` exposes no "insecure"/no-verify hook
-/// (its `TlsContext` only lets you ADD trust, and its `Connector` cannot be
-/// built from a custom rustls `ClientConfig` through any public API), so we
-/// assemble our own hyper + hyper-rustls connector with a dangerous
-/// `ServerCertVerifier` and adapt it to the smithy `HttpClient` trait that
+/// Process-wide counter for unique `--client-copy` temp file names.
+static CLIENT_COPY_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Hard S3 limit on the source size of a single `CopyObject`: 5 GiB. Sources
+/// larger than this must be copied server-side with multipart `UploadPartCopy`.
+const DEFAULT_MULTIPART_COPY_THRESHOLD: u64 = 5 * 1024 * 1024 * 1024;
+
+/// Max parts in a multipart upload/copy (S3 API limit). Used to grow the copy
+/// part size for very large sources so the part count stays within bounds.
+const MAX_MULTIPART_PARTS: u64 = 10_000;
+
+/// Returns true if a `CopyObject` error indicates the source exceeds the 5 GiB
+/// single-copy limit, so we should retry via multipart copy. Matches the S3
+/// message ("larger than the maximum allowable size for a copy source") and the
+/// `EntityTooLarge` code, case-insensitively against the full Display chain.
+fn is_copy_source_too_large(e: &anyhow::Error) -> bool {
+    let m = format!("{e:#}").to_ascii_lowercase();
+    m.contains("larger than the maximum allowable size") || m.contains("entitytoolarge")
+}
+
+/// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
+/// header value (the part after the final `/`).
+fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
+    cr?.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+/// True if a GetObject error indicates the requested range was not satisfiable
+/// (HTTP 416) — e.g. a zero-byte object probed with a `bytes=0-N` range. Matched
+/// against the Debug chain; misclassification is harmless because the caller
+/// falls back to a plain (correct) GET on a match.
+fn is_range_not_satisfiable<E: std::fmt::Debug>(e: &E) -> bool {
+    let m = format!("{e:?}").to_ascii_lowercase();
+    m.contains("rangenotsatisfiable")
+        || m.contains("invalidrange")
+        || m.contains("range not satisfiable")
+        || m.contains("requested range not satisfiable")
+}
+
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// Builds a custom HTTP client for the AWS SDK when we need behavior the
+/// bundled connector can't express: `--no-verify-ssl` (skip TLS verification
+/// for self-signed endpoints) and/or `--proxy` (route through a SOCKS5 or HTTP
+/// proxy). We assemble a hyper + hyper-rustls connector — optionally wrapping a
+/// `ProxyConnector` — and adapt it to the smithy `HttpClient` trait that
 /// `aws_sdk_s3::config::Builder::http_client` accepts.
-fn build_no_verify_http_client() -> NoVerifyHttpClient {
+fn build_sdk_http_client(
+    no_verify: bool,
+    proxy: Option<ProxyConfig>,
+) -> aws_smithy_runtime_api::client::http::SharedHttpClient {
+    use aws_smithy_runtime_api::client::http::SharedHttpClient;
+    use hyper_rustls::HttpsConnectorBuilder;
+    use hyper_util::client::legacy::Client;
+    use hyper_util::rt::TokioExecutor;
     use std::sync::Arc;
 
     // Process-wide default crypto provider (idempotent; the fast path may also
@@ -39,56 +82,86 @@ fn build_no_verify_http_client() -> NoVerifyHttpClient {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
-    let tls_config = rustls::ClientConfig::builder_with_provider(provider.clone())
-        .with_safe_default_protocol_versions()
-        .expect("rustls safe default protocol versions")
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(danger::NoVerify(provider)))
-        .with_no_client_auth();
+    let tls = if no_verify {
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("rustls safe default protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(danger::NoVerify(provider)))
+            .with_no_client_auth()
+    } else {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("rustls safe default protocol versions")
+            .with_root_certificates(roots)
+            .with_no_client_auth()
+    };
 
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_tls_config(tls_config)
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-
-    let client: HyperLegacyClient =
-        hyper_util::client::legacy::Client::builder(hyper_util::rt::TokioExecutor::new())
-            .build(https);
-
-    NoVerifyHttpClient {
-        connector: NoVerifyConnector(std::sync::Arc::new(client)),
+    match proxy {
+        None => {
+            let https = HttpsConnectorBuilder::new()
+                .with_tls_config(tls)
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .build();
+            let client: Client<_, aws_smithy_types::body::SdkBody> =
+                Client::builder(TokioExecutor::new()).build(https);
+            SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) })
+        }
+        Some(p) => {
+            let https = HttpsConnectorBuilder::new()
+                .with_tls_config(tls)
+                .https_or_http()
+                .enable_http1()
+                .enable_http2()
+                .wrap_connector(ProxyConnector { proxy: p });
+            let client: Client<_, aws_smithy_types::body::SdkBody> =
+                Client::builder(TokioExecutor::new()).build(https);
+            SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) })
+        }
     }
 }
 
-type HyperLegacyClient = hyper_util::client::legacy::Client<
-    hyper_rustls::HttpsConnector<hyper_util::client::legacy::connect::HttpConnector>,
-    aws_smithy_types::body::SdkBody,
->;
-
-/// A smithy `HttpClient` that hands out a single shared no-verify connector.
+/// A smithy `HttpClient` backed by a hyper-util legacy `Client` over connector
+/// `C` (generic so it serves both the proxy and non-proxy connector types).
 #[derive(Debug, Clone)]
-pub(crate) struct NoVerifyHttpClient {
-    connector: NoVerifyConnector,
+struct SdkHyperClient<C: Clone> {
+    client: std::sync::Arc<
+        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
+    >,
 }
 
-impl aws_smithy_runtime_api::client::http::HttpClient for NoVerifyHttpClient {
+impl<C> aws_smithy_runtime_api::client::http::HttpClient for SdkHyperClient<C>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
     fn http_connector(
         &self,
         _settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
         _components: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
     ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector {
-        aws_smithy_runtime_api::client::http::SharedHttpConnector::new(self.connector.clone())
+        aws_smithy_runtime_api::client::http::SharedHttpConnector::new(SdkHyperConnector {
+            client: self.client.clone(),
+        })
     }
 }
 
 /// Adapts a hyper 1.x legacy `Client` to the smithy `HttpConnector` trait,
 /// mirroring `aws-smithy-http-client`'s internal `Adapter`.
 #[derive(Debug, Clone)]
-struct NoVerifyConnector(std::sync::Arc<HyperLegacyClient>);
+struct SdkHyperConnector<C: Clone> {
+    client: std::sync::Arc<
+        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
+    >,
+}
 
-impl aws_smithy_runtime_api::client::http::HttpConnector for NoVerifyConnector {
+impl<C> aws_smithy_runtime_api::client::http::HttpConnector for SdkHyperConnector<C>
+where
+    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+{
     fn call(
         &self,
         request: aws_smithy_runtime_api::client::orchestrator::HttpRequest,
@@ -102,7 +175,7 @@ impl aws_smithy_runtime_api::client::http::HttpConnector for NoVerifyConnector {
             Ok(req) => req,
             Err(err) => return HttpConnectorFuture::ready(Err(ConnectorError::user(err.into()))),
         };
-        let client = self.0.clone();
+        let client = self.client.clone();
         HttpConnectorFuture::new(async move {
             let response = client
                 .request(request)
@@ -113,6 +186,226 @@ impl aws_smithy_runtime_api::client::http::HttpConnector for NoVerifyConnector {
             HttpResponse::try_from(http::Response::from_parts(parts, body))
                 .map_err(|err| ConnectorError::other(err.into(), None))
         })
+    }
+}
+
+/// Proxy configuration parsed from a `scheme://[user:pass@]host:port` URL,
+/// where scheme is `socks5`/`socks5h` (SOCKS5) or `http`/`https` (HTTP CONNECT).
+#[derive(Debug, Clone)]
+pub(crate) struct ProxyConfig {
+    socks5: bool,
+    host: String,
+    port: u16,
+    auth: Option<(String, String)>,
+}
+
+impl ProxyConfig {
+    fn parse(s: &str) -> anyhow::Result<ProxyConfig> {
+        let u = url::Url::parse(s)
+            .map_err(|e| anyhow::anyhow!("invalid proxy URL {s:?}: {e}"))?;
+        let socks5 = match u.scheme().to_ascii_lowercase().as_str() {
+            "socks5" | "socks5h" => true,
+            "http" | "https" => false,
+            other => anyhow::bail!("unsupported proxy scheme {other:?} (use socks5/socks5h/http/https)"),
+        };
+        let host = u
+            .host_str()
+            .ok_or_else(|| anyhow::anyhow!("proxy URL {s:?} has no host"))?
+            .to_string();
+        let port = u
+            .port_or_known_default()
+            .ok_or_else(|| anyhow::anyhow!("proxy URL {s:?} has no port"))?;
+        let auth = if !u.username().is_empty() {
+            Some((
+                u.username().to_string(),
+                u.password().unwrap_or("").to_string(),
+            ))
+        } else {
+            None
+        };
+        Ok(ProxyConfig { socks5, host, port, auth })
+    }
+
+    fn addr(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+}
+
+/// Resolves the effective proxy: explicit `--proxy` first, else the standard
+/// `ALL_PROXY` → `HTTPS_PROXY` → `HTTP_PROXY` environment variables (any case).
+pub(crate) fn effective_proxy(opts: &Options) -> anyhow::Result<Option<ProxyConfig>> {
+    fn env_any(names: &[&str]) -> Option<String> {
+        names
+            .iter()
+            .find_map(|n| std::env::var(n).ok())
+            .filter(|s| !s.is_empty())
+    }
+    let raw = opts
+        .proxy
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| env_any(&["ALL_PROXY", "all_proxy"]))
+        .or_else(|| env_any(&["HTTPS_PROXY", "https_proxy"]))
+        .or_else(|| env_any(&["HTTP_PROXY", "http_proxy"]));
+    match raw {
+        Some(s) => Ok(Some(ProxyConfig::parse(&s)?)),
+        None => Ok(None),
+    }
+}
+
+/// A `tower` connector that establishes a raw TCP byte stream to the request's
+/// target host:port *through* a proxy. hyper-rustls then layers TLS on top for
+/// `https://` targets; `http://` targets use the stream directly. Supports
+/// SOCKS5 (remote DNS) and HTTP `CONNECT` tunneling.
+#[derive(Clone)]
+struct ProxyConnector {
+    proxy: ProxyConfig,
+}
+
+impl tower_service::Service<http::Uri> for ProxyConnector {
+    type Response = ProxyIo;
+    type Error = BoxError;
+    type Future =
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<ProxyIo, BoxError>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), BoxError>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, dst: http::Uri) -> Self::Future {
+        let proxy = self.proxy.clone();
+        Box::pin(async move {
+            let host = dst
+                .host()
+                .ok_or_else(|| -> BoxError { "proxy: target URI has no host".into() })?
+                .to_string();
+            let port = dst
+                .port_u16()
+                .unwrap_or(if dst.scheme_str() == Some("https") { 443 } else { 80 });
+            let tcp = if proxy.socks5 {
+                connect_via_socks5(&proxy, &host, port).await?
+            } else {
+                connect_via_http(&proxy, &host, port).await?
+            };
+            Ok(ProxyIo { inner: hyper_util::rt::TokioIo::new(tcp) })
+        })
+    }
+}
+
+/// Connects to `host:port` through a SOCKS5 proxy (remote DNS), returning the
+/// tunneled TCP stream. The proxy address is resolved locally to a concrete
+/// `SocketAddr` first (tokio-socks's own proxy-name resolution returned
+/// spurious NODATA errors here); the *target* is passed as a domain so the
+/// proxy performs its DNS.
+async fn connect_via_socks5(
+    p: &ProxyConfig,
+    host: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, BoxError> {
+    use tokio_socks::tcp::Socks5Stream;
+    use tokio_socks::TargetAddr;
+
+    let proxy_sa = tokio::net::lookup_host(p.addr())
+        .await?
+        .next()
+        .ok_or_else(|| -> BoxError { format!("proxy {} did not resolve", p.addr()).into() })?;
+    let target = TargetAddr::Domain(host.into(), port);
+    let stream = match &p.auth {
+        Some((u, pw)) => {
+            Socks5Stream::connect_with_password(proxy_sa, target, u, pw).await?
+        }
+        None => Socks5Stream::connect(proxy_sa, target).await?,
+    };
+    Ok(stream.into_inner())
+}
+
+/// Connects to `host:port` through an HTTP proxy using a `CONNECT` tunnel,
+/// returning the established TCP stream.
+async fn connect_via_http(
+    p: &ProxyConfig,
+    host: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, BoxError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut tcp = tokio::net::TcpStream::connect(p.addr()).await?;
+    let mut req = format!("CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n");
+    if let Some((u, pw)) = &p.auth {
+        use base64::Engine;
+        let creds = base64::engine::general_purpose::STANDARD.encode(format!("{u}:{pw}"));
+        req.push_str(&format!("Proxy-Authorization: Basic {creds}\r\n"));
+    }
+    req.push_str("\r\n");
+    tcp.write_all(req.as_bytes()).await?;
+
+    // Read the status line + headers up to the blank line.
+    let mut buf = Vec::with_capacity(256);
+    let mut byte = [0u8; 1];
+    loop {
+        let n = tcp.read(&mut byte).await?;
+        if n == 0 {
+            return Err("proxy closed connection during CONNECT".into());
+        }
+        buf.push(byte[0]);
+        if buf.ends_with(b"\r\n\r\n") {
+            break;
+        }
+        if buf.len() > 8192 {
+            return Err("proxy CONNECT response headers too large".into());
+        }
+    }
+    let head = String::from_utf8_lossy(&buf);
+    let status = head.lines().next().unwrap_or("");
+    if !status.contains(" 200") {
+        return Err(format!("proxy CONNECT failed: {status}").into());
+    }
+    Ok(tcp)
+}
+
+/// The connection type produced by `ProxyConnector`: a TCP stream wrapped for
+/// hyper, carrying a `Connection` impl so hyper-util can pool it.
+struct ProxyIo {
+    inner: hyper_util::rt::TokioIo<tokio::net::TcpStream>,
+}
+
+impl hyper::rt::Read for ProxyIo {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl hyper::rt::Write for ProxyIo {
+    fn poll_write(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+    fn poll_flush(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_flush(cx)
+    }
+    fn poll_shutdown(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
+}
+
+impl hyper_util::client::legacy::connect::Connection for ProxyIo {
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        hyper_util::client::legacy::connect::Connected::new()
     }
 }
 
@@ -173,6 +466,12 @@ pub struct S3 {
     pub(crate) request_payer_str: Option<String>,
     part_size: u64,
     concurrency: usize,
+    /// Source-size threshold above which server-side copy switches from a single
+    /// `CopyObject` to multipart `UploadPartCopy`. Defaults to the 5 GiB S3
+    /// limit; overridable via `RS5CMD_MULTIPART_COPY_THRESHOLD` (bytes) so the
+    /// multipart-copy path can be exercised in tests without a 5 GiB object.
+    multipart_copy_threshold: u64,
+    preserve_timestamps: bool,
 }
 
 impl S3 {
@@ -211,7 +510,20 @@ impl S3 {
             .or_else(|| std::env::var("S3_ENDPOINT_URL").ok());
 
         if let Some(ep) = endpoint {
-            builder = builder.endpoint_url(ep).force_path_style(true);
+            builder = builder.endpoint_url(ep);
+            // Default to path-style for custom endpoints (MinIO and most
+            // S3-compatible servers only support path-style), unless the user
+            // forces an addressing style explicitly.
+            let force_path = match opts.addressing_style.as_deref() {
+                Some("virtual") => false,
+                Some("path") => true,
+                _ => true,
+            };
+            builder = builder.force_path_style(force_path);
+        } else if let Some(style) = opts.addressing_style.as_deref() {
+            // No custom endpoint (real AWS): honor an explicit override; the SDK
+            // default is virtual-host style.
+            builder = builder.force_path_style(style == "path");
         }
         // Default region fallback so requests against MinIO don't fail config.
         if shared.region().is_none() && opts.region.is_none() {
@@ -225,8 +537,12 @@ impl S3 {
         // connector with a dangerous `ServerCertVerifier` and hand it to the
         // SDK via `http_client`. NOTE: this also disables hostname checking —
         // that is the intended effect of the flag.
-        if opts.no_verify_ssl {
-            builder = builder.http_client(build_no_verify_http_client());
+        // A custom HTTP client is needed for `--no-verify-ssl` and/or `--proxy`
+        // (the bundled connector supports neither). When neither is requested we
+        // leave the SDK's default client in place.
+        let proxy_cfg = effective_proxy(opts)?;
+        if opts.no_verify_ssl || proxy_cfg.is_some() {
+            builder = builder.http_client(build_sdk_http_client(opts.no_verify_ssl, proxy_cfg));
         }
 
         Ok(S3 {
@@ -236,6 +552,11 @@ impl S3 {
             request_payer_str: opts.request_payer.clone(),
             part_size: opts.part_size.max(5 * 1024 * 1024),
             concurrency: opts.concurrency.max(1),
+            multipart_copy_threshold: std::env::var("RS5CMD_MULTIPART_COPY_THRESHOLD")
+                .ok()
+                .and_then(|s| s.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_MULTIPART_COPY_THRESHOLD),
+            preserve_timestamps: opts.preserve_timestamps,
         })
     }
 
@@ -275,8 +596,15 @@ impl S3 {
         Ok(out.content_length().unwrap_or(0).max(0) as u64)
     }
 
-    /// Downloads the remote object to a local path. Objects larger than the
-    /// configured part size are fetched as concurrent byte ranges.
+    /// Downloads the remote object to a local path.
+    ///
+    /// The first part is fetched with a ranged GET (`bytes=0-part_size-1`) whose
+    /// `Content-Range` header reports the object's total size, so the
+    /// single-vs-ranged decision is made from that one response — there is no
+    /// separate HeadObject round-trip (saving a request per download; cf.
+    /// upstream s5cmd #793). Small objects (<= part size) are therefore one
+    /// request total; larger objects fetch the remaining parts as concurrent
+    /// byte ranges, reusing the already-downloaded first part.
     pub async fn download(&self, src: &Url, dst: &Path) -> anyhow::Result<()> {
         if self.dry_run {
             return Ok(());
@@ -286,14 +614,72 @@ impl S3 {
                 tokio::fs::create_dir_all(parent).await?;
             }
         }
-        let size = self.head_size(src).await?;
-        if size <= self.part_size {
-            return self.download_single(src, dst).await;
+
+        let part_size = self.part_size;
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .range(format!("bytes=0-{}", part_size - 1))
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
         }
-        self.download_ranged(src, dst, size).await
+        let resp = match req.send().await {
+            Ok(r) => r,
+            // A zero-byte object makes the ranged request unsatisfiable (HTTP
+            // 416); fall back to a plain GET, which returns the whole (possibly
+            // empty) body and creates the file correctly.
+            Err(e) if is_range_not_satisfiable(&e) => {
+                return self.download_single(src, dst).await;
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let total = parse_content_range_total(resp.content_range())
+            .or_else(|| resp.content_length().map(|l| l.max(0) as u64))
+            .unwrap_or(0);
+        // With --preserve-timestamps, capture the stored mtime metadata before
+        // the body is consumed, to restore it after the file is written.
+        let mtime_value = if self.preserve_timestamps {
+            resp.metadata()
+                .and_then(|m| m.get(crate::storage::MTIME_METADATA_KEY))
+                .cloned()
+        } else {
+            None
+        };
+        let first = resp.body.collect().await?.into_bytes();
+
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .open(dst)?;
+        file.set_len(total)?;
+        {
+            use std::os::unix::fs::FileExt;
+            file.write_all_at(&first, 0)?;
+        }
+
+        // Small object: the first part was the whole object.
+        if total > part_size {
+            // Large object: fetch parts 1..n concurrently into the file.
+            self.download_remaining_parts(src, file, total, part_size).await?;
+        }
+
+        // Restore the preserved mtime, if any (best-effort: a malformed value or
+        // an unsupported filesystem must not fail the otherwise-complete copy).
+        if let Some(v) = mtime_value {
+            if let Err(e) = set_file_mtime_from_value(dst, &v) {
+                eprintln!("warning: could not restore mtime on {}: {e:#}", dst.display());
+            }
+        }
+        Ok(())
     }
 
-    /// Single streaming GET to a file.
+    /// Single streaming GET to a file. Used as the zero-byte / range-error
+    /// fallback for `download`.
     async fn download_single(&self, src: &Url, dst: &Path) -> anyhow::Result<()> {
         let mut body = self.read(src).await?;
         let mut file = tokio::fs::File::create(dst).await?;
@@ -305,22 +691,21 @@ impl S3 {
         Ok(())
     }
 
-    /// Concurrent ranged GETs written at their offsets into a preallocated file.
-    async fn download_ranged(&self, src: &Url, dst: &Path, size: u64) -> anyhow::Result<()> {
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(dst)?;
-        file.set_len(size)?;
+    /// Fetches parts `1..n` (part 0 is already written) as concurrent ranged
+    /// GETs written at their offsets into the preallocated file.
+    async fn download_remaining_parts(
+        &self,
+        src: &Url,
+        file: std::fs::File,
+        total: u64,
+        part_size: u64,
+    ) -> anyhow::Result<()> {
         let file = std::sync::Arc::new(file);
+        let n_parts = total.div_ceil(part_size);
 
-        let part_size = self.part_size;
-        let n_parts = size.div_ceil(part_size);
-
-        let tasks = (0..n_parts).map(|i| {
+        let tasks = (1..n_parts).map(|i| {
             let offset = i * part_size;
-            let len = part_size.min(size - offset);
+            let len = part_size.min(total - offset);
             let client = self.client.clone();
             let bucket = src.bucket.clone();
             let key = src.path.clone();
@@ -365,6 +750,22 @@ impl S3 {
             return Ok(());
         }
         let size = std::fs::metadata(src)?.len();
+
+        // With --preserve-timestamps, carry the source file's mtime as object
+        // metadata so a later download can restore it.
+        let owned;
+        let metadata = if self.preserve_timestamps {
+            let mut m = metadata.clone();
+            if let Some(v) = file_mtime_value(src) {
+                m.user_defined
+                    .insert(crate::storage::MTIME_METADATA_KEY.to_string(), v);
+            }
+            owned = m;
+            &owned
+        } else {
+            metadata
+        };
+
         if size <= self.part_size {
             return self.upload_single(src, dst, metadata).await;
         }
@@ -430,6 +831,9 @@ impl S3 {
             if !acl.is_empty() {
                 create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
             }
+        }
+        for (k, v) in &metadata.user_defined {
+            create = create.metadata(k, v);
         }
         let created = create.send().await?;
         let upload_id = created
@@ -671,6 +1075,11 @@ impl S3 {
                     None
                 } else {
                     Some(src.delimiter.clone())
+                })
+                .set_start_after(if src.start_after.is_empty() {
+                    None
+                } else {
+                    Some(src.start_after.clone())
                 })
                 .set_request_payer(this.request_payer())
                 .into_paginator()
@@ -1082,17 +1491,56 @@ impl Storage for S3 {
         if self.dry_run {
             return Ok(());
         }
-        let mut copy_source = src.escaped_path();
-        if !src.version_id.is_empty() {
-            copy_source = format!("{copy_source}?versionId={}", src.version_id);
+
+        // When the threshold has been lowered (only happens via the test
+        // override env var), decide by source size up front so the multipart
+        // path can be exercised without a literal 5 GiB object. In production
+        // the threshold is the 5 GiB S3 limit, so this branch is skipped and we
+        // pay no extra HeadObject — we rely on the error-driven fallback below.
+        if self.multipart_copy_threshold < DEFAULT_MULTIPART_COPY_THRESHOLD {
+            let size = self.head_size(src).await?;
+            if size > self.multipart_copy_threshold {
+                return self.copy_multipart(src, dst, metadata, size).await;
+            }
         }
 
+        // Common path: a single server-side CopyObject. If S3 rejects it because
+        // the source exceeds the 5 GiB single-copy limit, fall back to multipart
+        // copy (s5cmd upstream PR#856).
+        match self.copy_object_single(src, dst, metadata).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_copy_source_too_large(&e) => {
+                let size = self.head_size(src).await?;
+                self.copy_multipart(src, dst, metadata, size).await
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
+
+impl S3 {
+    /// Builds the `x-amz-copy-source` value (`bucket/key[?versionId=...]`).
+    fn copy_source_header(src: &Url) -> String {
+        let mut s = src.escaped_path();
+        if !src.version_id.is_empty() {
+            s = format!("{s}?versionId={}", src.version_id);
+        }
+        s
+    }
+
+    /// A single server-side `CopyObject` (the original copy implementation).
+    async fn copy_object_single(
+        &self,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
         let mut req = self
             .client
             .copy_object()
             .bucket(&dst.bucket)
             .key(&dst.path)
-            .copy_source(copy_source)
+            .copy_source(Self::copy_source_header(src))
             .set_request_payer(self.request_payer());
 
         if let Some(sc) = &metadata.storage_class {
@@ -1128,6 +1576,218 @@ impl Storage for S3 {
         req.send().await?;
         Ok(())
     }
+
+    /// Server-side copy of a large object via multipart `UploadPartCopy`. Used
+    /// for sources over the 5 GiB single-`CopyObject` limit. The new object's
+    /// metadata is set on `CreateMultipartUpload`; when no content-type override
+    /// is supplied, the source's content-type is carried over (a HeadObject),
+    /// since a multipart copy cannot use a COPY metadata-directive.
+    async fn copy_multipart(
+        &self,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+        size: u64,
+    ) -> anyhow::Result<()> {
+        let copy_source = Self::copy_source_header(src);
+
+        // Resolve the content-type to stamp on the new object.
+        let content_type = match &metadata.content_type {
+            Some(ct) if !ct.is_empty() => Some(ct.clone()),
+            _ => self.head_content_type(src).await.ok().flatten(),
+        };
+
+        let mut create = self
+            .client
+            .create_multipart_upload()
+            .bucket(&dst.bucket)
+            .key(&dst.path)
+            .set_request_payer(self.request_payer());
+        if let Some(ct) = content_type {
+            create = create.content_type(ct);
+        }
+        if let Some(sc) = &metadata.storage_class {
+            if !sc.is_empty() {
+                create = create.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
+            }
+        }
+        if let Some(acl) = &metadata.acl {
+            if !acl.is_empty() {
+                create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
+            }
+        }
+        if let Some(cc) = &metadata.cache_control {
+            if !cc.is_empty() {
+                create = create.cache_control(cc);
+            }
+        }
+        let created = create.send().await?;
+        let upload_id = created
+            .upload_id()
+            .ok_or_else(|| anyhow::anyhow!("CreateMultipartUpload returned no upload id"))?
+            .to_string();
+
+        match self.copy_parts(&copy_source, dst, &upload_id, size).await {
+            Ok(parts) => {
+                let completed = CompletedMultipartUpload::builder()
+                    .set_parts(Some(parts))
+                    .build();
+                self.client
+                    .complete_multipart_upload()
+                    .bucket(&dst.bucket)
+                    .key(&dst.path)
+                    .upload_id(&upload_id)
+                    .multipart_upload(completed)
+                    .set_request_payer(self.request_payer())
+                    .send()
+                    .await?;
+                Ok(())
+            }
+            Err(e) => {
+                // Best-effort abort so we don't leak an incomplete upload.
+                let _ = self
+                    .client
+                    .abort_multipart_upload()
+                    .bucket(&dst.bucket)
+                    .key(&dst.path)
+                    .upload_id(&upload_id)
+                    .set_request_payer(self.request_payer())
+                    .send()
+                    .await;
+                Err(e)
+            }
+        }
+    }
+
+    /// Copies the source object in byte-range parts via `UploadPartCopy`,
+    /// returning the completed parts in ascending part-number order.
+    async fn copy_parts(
+        &self,
+        copy_source: &str,
+        dst: &Url,
+        upload_id: &str,
+        size: u64,
+    ) -> anyhow::Result<Vec<CompletedPart>> {
+        // Grow the part size if needed so the part count stays within the S3
+        // 10,000-part limit (a 5 TB object with the default 50 MiB part size
+        // would otherwise need 100k parts).
+        let mut part_size = self.part_size;
+        let min_part = size.div_ceil(MAX_MULTIPART_PARTS);
+        if part_size < min_part {
+            part_size = min_part.div_ceil(1024 * 1024) * 1024 * 1024;
+        }
+        let n_parts = size.div_ceil(part_size) as i32;
+
+        let tasks = (0..n_parts).map(|i| {
+            let part_number = i + 1;
+            let offset = i as u64 * part_size;
+            let len = part_size.min(size - offset);
+            let range = format!("bytes={}-{}", offset, offset + len - 1);
+            let client = self.client.clone();
+            let bucket = dst.bucket.clone();
+            let key = dst.path.clone();
+            let upload_id = upload_id.to_string();
+            let copy_source = copy_source.to_string();
+            let rp = self.request_payer();
+            async move {
+                let resp = client
+                    .upload_part_copy()
+                    .bucket(bucket)
+                    .key(key)
+                    .upload_id(upload_id)
+                    .part_number(part_number)
+                    .copy_source(copy_source)
+                    .copy_source_range(range)
+                    .set_request_payer(rp)
+                    .send()
+                    .await?;
+                anyhow::Ok(
+                    CompletedPart::builder()
+                        .part_number(part_number)
+                        .set_e_tag(resp.copy_part_result().and_then(|r| r.e_tag().map(String::from)))
+                        .build(),
+                )
+            }
+        });
+
+        let mut parts: Vec<CompletedPart> = stream::iter(tasks)
+            .buffer_unordered(self.concurrency)
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<anyhow::Result<Vec<_>>>()?;
+        parts.sort_by_key(|p| p.part_number().unwrap_or(0));
+        Ok(parts)
+    }
+
+    /// Copies a remote object to another remote key by streaming through the
+    /// client: download to a temp file, then upload. Used for `--client-copy`,
+    /// when a server-side `CopyObject` is unavailable or disallowed. The
+    /// source's content-type is carried over unless `metadata` overrides it.
+    pub async fn client_copy(
+        &self,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
+        if self.dry_run {
+            return Ok(());
+        }
+        // Unique temp path (no Date/rand needed): pid + a process-wide counter.
+        let n = CLIENT_COPY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("rs5cmd-cc-{}-{}", std::process::id(), n));
+
+        self.download(src, &tmp).await?;
+
+        // Preserve the source content-type unless the caller set one.
+        let owned;
+        let upload_meta = if metadata.content_type.as_deref().unwrap_or("").is_empty() {
+            let mut m = metadata.clone();
+            m.content_type = self.head_content_type(src).await.ok().flatten();
+            owned = m;
+            &owned
+        } else {
+            metadata
+        };
+
+        let r = self.upload(&tmp, dst, upload_meta).await;
+        let _ = std::fs::remove_file(&tmp);
+        r
+    }
+
+    /// Returns the source object's content-type via HeadObject, if any.
+    async fn head_content_type(&self, src: &Url) -> anyhow::Result<Option<String>> {
+        let mut req = self
+            .client
+            .head_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let out = req.send().await?;
+        Ok(out.content_type().map(|s| s.to_string()))
+    }
+}
+
+/// Formats a local file's modification time as `seconds.nanoseconds` since the
+/// Unix epoch, for storage as object metadata under `MTIME_METADATA_KEY`.
+fn file_mtime_value(src: &Path) -> Option<String> {
+    let mtime = std::fs::metadata(src).ok()?.modified().ok()?;
+    let dur = mtime.duration_since(std::time::UNIX_EPOCH).ok()?;
+    Some(format!("{}.{:09}", dur.as_secs(), dur.subsec_nanos()))
+}
+
+/// Restores a file's mtime from a `seconds[.nanoseconds]` metadata value.
+fn set_file_mtime_from_value(path: &Path, value: &str) -> anyhow::Result<()> {
+    let (secs, nanos) = match value.split_once('.') {
+        Some((s, n)) => (s.parse::<i64>()?, n.parse::<u32>().unwrap_or(0)),
+        None => (value.parse::<i64>()?, 0),
+    };
+    let ft = filetime::FileTime::from_unix_time(secs, nanos);
+    filetime::set_file_mtime(path, ft)?;
+    Ok(())
 }
 
 fn apply_put_metadata(
