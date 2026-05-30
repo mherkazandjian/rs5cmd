@@ -202,7 +202,10 @@ async fn expand_sources(
     let mut pairs = Vec::new();
     while let Some(obj) = rx.recv().await {
         if let Some(err) = obj.err {
-            return Err(err);
+            // A per-entry listing error (e.g. a broken symlink) must not abort
+            // the whole transfer; warn and keep copying the good files (#749).
+            eprintln!("{err:#}");
+            continue;
         }
         let Some(obj_url) = obj.url else { continue };
         if obj.typ.is_dir() {

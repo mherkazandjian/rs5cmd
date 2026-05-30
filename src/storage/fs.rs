@@ -170,8 +170,19 @@ fn walk_dir(f: &Filesystem, src: &Url, follow_symlinks: bool, tx: &mpsc::Sender<
         let entry = match entry {
             Ok(e) => e,
             Err(e) => {
-                let _ = tx.blocking_send(Object::with_error(anyhow::anyhow!(e)));
-                return;
+                // A WalkDir error here is almost always a broken (dangling)
+                // symlink hit via follow_links. Name the offending path and
+                // CONTINUE so the rest of the tree still transfers (#749).
+                let path_desc = e
+                    .path()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| src.absolute());
+                let _ = tx.blocking_send(Object::with_error(anyhow::anyhow!(
+                    "skipping broken symlink or unreadable path {}: {}",
+                    path_desc,
+                    e
+                )));
+                continue;
             }
         };
         // We're interested in files only.
@@ -189,8 +200,14 @@ fn walk_dir(f: &Filesystem, src: &Url, follow_symlinks: bool, tx: &mpsc::Sender<
         let mut fileurl = match Url::new(&entry.path().to_string_lossy(), UrlOptions::default()) {
             Ok(u) => u,
             Err(e) => {
-                let _ = tx.blocking_send(Object::with_error(anyhow::anyhow!(e)));
-                return;
+                // Same treatment as the walk error above: name the path and
+                // continue rather than aborting the whole walk (#749).
+                let _ = tx.blocking_send(Object::with_error(anyhow::anyhow!(
+                    "skipping {}: could not build url: {}",
+                    entry.path().display(),
+                    e
+                )));
+                continue;
             }
         };
         fileurl.set_relative(src);

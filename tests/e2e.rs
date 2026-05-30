@@ -1283,3 +1283,45 @@ fn rb_force_dry_run_deletes_nothing() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn cp_skips_broken_symlink_and_transfers_rest() {
+    // A directory containing a dangling symlink must upload the good files and
+    // skip (warn about, by name) the broken link instead of aborting (#749).
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("good_a.txt"), b"aaa").unwrap();
+    std::fs::write(dir.join("good_b.txt"), b"bbb").unwrap();
+
+    // Dangling symlink: target does not exist => WalkDir(follow_links) errors.
+    use std::os::unix::fs::symlink;
+    symlink("/nonexistent/definitely/missing/target", dir.join("dangling")).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Recursive upload must SUCCEED: good files copy; broken symlink is a warning
+    // whose message NAMES the offending path.
+    rs5cmd()
+        .args(["cp", &format!("{}/", dir.to_str().unwrap()), &s3("/u/")])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("dangling"));
+
+    // Both good files present in S3 -> proves the walk continued past the broken
+    // symlink instead of aborting.
+    rs5cmd()
+        .args(["ls", &s3("/u/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("good_a.txt"))
+        .stdout(predicate::str::contains("good_b.txt"));
+
+    rs5cmd().args(["rm", &s3("/u/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
