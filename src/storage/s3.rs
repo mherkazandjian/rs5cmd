@@ -6,7 +6,9 @@ use std::path::Path;
 use async_trait::async_trait;
 use aws_sdk_s3::config::{BehaviorVersion, Region};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{
+    CompletedMultipartUpload, CompletedPart, Delete, EncodingType, ObjectIdentifier,
+};
 use aws_sdk_s3::Client;
 use aws_smithy_types::byte_stream::Length;
 use futures::stream::{self, StreamExt};
@@ -45,6 +47,43 @@ fn is_copy_source_too_large(e: &anyhow::Error) -> bool {
 /// header value (the part after the final `/`).
 fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
     cr?.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+/// Percent-decodes a string echoed back by S3 when the list request was made
+/// with `EncodingType=Url`. We must request URL encoding so that keys containing
+/// XML-illegal control characters (e.g. ESC `0x1b`) can be represented in the
+/// XML response and deserialized at all (upstream s5cmd #677); the echoed keys,
+/// prefixes and pagination markers then have to be decoded back to their raw
+/// bytes before use. `%XX` sequences are decoded as bytes and the result is
+/// interpreted as UTF-8 (lossily, to never panic on malformed input); a lone or
+/// malformed `%` is left verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // A '%' followed by two hex digits decodes to a single byte.
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Returns the numeric value of an ASCII hex digit, or `None` if not hex.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// True if a GetObject error indicates the requested range was not satisfiable
@@ -1071,6 +1110,12 @@ impl S3 {
                 .list_objects_v2()
                 .bucket(&src.bucket)
                 .prefix(&src.prefix)
+                // Request URL-encoded keys so keys with XML-illegal control
+                // chars (e.g. ESC 0x1b) deserialize; echoed keys/prefixes are
+                // percent-decoded below (upstream s5cmd #677). The opaque V2
+                // continuation token is handled internally by the paginator and
+                // is NOT decoded.
+                .encoding_type(EncodingType::Url)
                 .set_delimiter(if src.delimiter.is_empty() {
                     None
                 } else {
@@ -1096,6 +1141,8 @@ impl S3 {
                     Some(Ok(page)) => {
                         for cp in page.common_prefixes() {
                             let Some(prefix) = cp.prefix() else { continue };
+                            let prefix = percent_decode(prefix);
+                            let prefix = prefix.as_str();
                             if !src.matches(prefix) {
                                 continue;
                             }
@@ -1116,6 +1163,8 @@ impl S3 {
                         }
                         for c in page.contents() {
                             let Some(key) = c.key() else { continue };
+                            let key = percent_decode(key);
+                            let key = key.as_str();
                             if !src.matches(key) {
                                 continue;
                             }
@@ -1176,6 +1225,10 @@ impl S3 {
                     .list_objects()
                     .bucket(&src.bucket)
                     .prefix(&src.prefix)
+                    // URL-encode echoed keys so XML-illegal control chars
+                    // deserialize (upstream s5cmd #677). Keys, prefixes and the
+                    // pagination marker are percent-decoded below.
+                    .encoding_type(EncodingType::Url)
                     .set_delimiter(if src.delimiter.is_empty() {
                         None
                     } else {
@@ -1194,6 +1247,8 @@ impl S3 {
 
                 for cp in page.common_prefixes() {
                     let Some(prefix) = cp.prefix() else { continue };
+                    let prefix = percent_decode(prefix);
+                    let prefix = prefix.as_str();
                     if !src.matches(prefix) {
                         continue;
                     }
@@ -1216,6 +1271,8 @@ impl S3 {
                 let mut last_key: Option<String> = None;
                 for c in page.contents() {
                     let Some(key) = c.key() else { continue };
+                    let key = percent_decode(key);
+                    let key = key.as_str();
                     last_key = Some(key.to_string());
                     if !src.matches(key) {
                         continue;
@@ -1253,7 +1310,10 @@ impl S3 {
                 if !page.is_truncated().unwrap_or(false) {
                     break;
                 }
-                marker = page.next_marker().map(|s| s.to_string()).or(last_key);
+                marker = page
+                    .next_marker()
+                    .map(percent_decode)
+                    .or(last_key);
                 if marker.is_none() {
                     break;
                 }
@@ -1282,6 +1342,11 @@ impl S3 {
                     .list_object_versions()
                     .bucket(&src.bucket)
                     .prefix(&src.prefix)
+                    // URL-encode echoed keys so XML-illegal control chars
+                    // deserialize (upstream s5cmd #677). Keys, prefixes and the
+                    // key/version-id pagination markers are percent-decoded
+                    // below.
+                    .encoding_type(EncodingType::Url)
                     .set_delimiter(if src.delimiter.is_empty() {
                         None
                     } else {
@@ -1303,6 +1368,8 @@ impl S3 {
 
                 for cp in page.common_prefixes() {
                     let Some(prefix) = cp.prefix() else { continue };
+                    let prefix = percent_decode(prefix);
+                    let prefix = prefix.as_str();
                     if !src.matches(prefix) {
                         continue;
                     }
@@ -1320,6 +1387,8 @@ impl S3 {
 
                 for v in page.versions() {
                     let Some(key) = v.key() else { continue };
+                    let key = percent_decode(key);
+                    let key = key.as_str();
                     if !src.matches(key) {
                         continue;
                     }
@@ -1354,6 +1423,8 @@ impl S3 {
 
                 for d in page.delete_markers() {
                     let Some(key) = d.key() else { continue };
+                    let key = percent_decode(key);
+                    let key = key.as_str();
                     if !src.matches(key) {
                         continue;
                     }
@@ -1383,8 +1454,8 @@ impl S3 {
                 if !page.is_truncated().unwrap_or(false) {
                     break;
                 }
-                key_marker = page.next_key_marker().map(|s| s.to_string());
-                version_marker = page.next_version_id_marker().map(|s| s.to_string());
+                key_marker = page.next_key_marker().map(percent_decode);
+                version_marker = page.next_version_id_marker().map(percent_decode);
                 if key_marker.is_none() && version_marker.is_none() {
                     break;
                 }
@@ -1823,4 +1894,51 @@ fn apply_put_metadata(
         req = req.metadata(k, v);
     }
     Ok(req)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn percent_decode_passthrough_plain() {
+        assert_eq!(percent_decode("hello/world.txt"), "hello/world.txt");
+    }
+
+    #[test]
+    fn percent_decode_control_char() {
+        // S3 with EncodingType=Url URL-encodes an ESC (0x1b) as "%1B"; we must
+        // decode it back to the raw control byte (upstream s5cmd #677).
+        assert_eq!(percent_decode("dir/key%1Bend"), "dir/key\u{1b}end");
+        // Lowercase hex is equally valid.
+        assert_eq!(percent_decode("dir/key%1bend"), "dir/key\u{1b}end");
+    }
+
+    #[test]
+    fn percent_decode_common_encodings() {
+        // Space, plus and percent are the cases that actually differ under
+        // URL-encoding of keys.
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("a%2Bb"), "a+b");
+        assert_eq!(percent_decode("a%25b"), "a%b");
+        // The encoded forward slash must round-trip to a real path separator.
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+    }
+
+    #[test]
+    fn percent_decode_malformed_is_verbatim() {
+        // A lone or malformed '%' (no two following hex digits) is left as-is
+        // rather than panicking or dropping bytes.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("50%of"), "50%of");
+        assert_eq!(percent_decode("trailing%2"), "trailing%2");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // A multibyte UTF-8 char (é = 0xC3 0xA9) encoded byte-by-byte must
+        // reassemble correctly.
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
 }

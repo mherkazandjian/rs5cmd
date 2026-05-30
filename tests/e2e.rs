@@ -1014,3 +1014,51 @@ fn sync_checksum_detects_same_size_content_change() {
     rs5cmd().args(["rm", &s3("/m/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+/// Regression test for upstream s5cmd #677: a key containing an XML-illegal
+/// control character (here ESC, 0x1b) used to make the ListObjectsV2 XML
+/// response fail to deserialize ("failed to decode REST XML response status
+/// code: 200"). We now request `EncodingType=Url` on all list paths and
+/// percent-decode the echoed keys, so such a key both lists and round-trips.
+#[test]
+fn list_key_with_xml_illegal_control_char() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Build a local source file to upload.
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("src.txt");
+    std::fs::write(&local, b"control-char key contents").unwrap();
+
+    // Object key embeds a raw ESC (0x1b) control char, which is illegal in XML
+    // 1.0 character data and previously broke list deserialization.
+    let key = "prefix/ctrl\u{1b}name.txt";
+    let dst = s3(&format!("/{key}"));
+    rs5cmd()
+        .args(["cp", local.to_str().unwrap(), &dst])
+        .assert()
+        .success();
+
+    // The bug manifested as a list/deserialization failure; success here (and a
+    // non-empty listing) proves the EncodingType=Url fix works.
+    let out = rs5cmd()
+        .args(["ls", &s3("/prefix/")])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("ctrl") && stdout.contains("name.txt"),
+        "listing did not contain the control-char key; got: {stdout:?}"
+    );
+
+    // Round-trip: remove the object by its decoded key to confirm the echoed key
+    // is usable end to end.
+    rs5cmd().args(["rm", &dst]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
