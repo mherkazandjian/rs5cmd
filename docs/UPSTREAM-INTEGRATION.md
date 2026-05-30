@@ -16,6 +16,31 @@ upstream issue (`#`) / PR (`PR#`) references.
 
 ---
 
+## Round 2 (2026-05-30): open-PR feature batch
+
+A second pass implemented a batch of good ideas from upstream **open PRs**.
+Implemented (each with MinIO e2e tests):
+
+| PR | Feature | Where |
+|----|---------|-------|
+| #795 ✅ | `--addressing-style path\|virtual` | `command/mod.rs`, `storage/s3.rs` |
+| #776 ✅ | skip non-regular files (sockets/FIFOs/devices) in the local walk | `storage/fs.rs` |
+| #534 ✅ | `--preserve-timestamps` (mtime ↔ object metadata) | `cp.rs`, `sync.rs`, `storage/s3.rs` |
+| #671 ✅ | `--client-copy` (remote→remote via download+upload) | `cp.rs`, `storage/s3.rs` |
+| #799 ✅ | `sync --checksum` (compare MD5/ETag) | `sync_strategy.rs`, `sync.rs` |
+
+Checked and found **already handled or not applicable** (no code change):
+
+| PR | Finding |
+|----|---------|
+| #847 — `--profile` full chain | **Already handled.** `S3::new` (and the fast path's `resolve_credentials`) call `aws_config::defaults(...).profile_name(p)`, which uses the full shared-config provider chain — SSO, assume-role, web-identity — not just `~/.aws/credentials`. The Go bug was specific to s5cmd's own loader. |
+| #683 — renew session token on expiry | **Handled on the SDK path:** the default credentials cache (`BehaviorVersion::latest`) refreshes expired temporary credentials automatically. *Limitation:* the io_uring fast path resolves credentials once at startup and signs with the static keys, so a very long fast-path run with short-lived creds would not refresh — acceptable for its small-object-burst use case; noted here for the record. |
+| #761 — shell-quoting of special-char filenames | **Not applicable.** rs5cmd's `sync` never serializes filenames into shell command strings — it calls the copy/delete paths in-process with `Url`/`PathBuf`. `run` parses input with `shell_words` (correct shell parsing). The Go `%q` quoting bug has no analogue here. |
+| #567 — server time for List | **Not worth a dedicated change.** The clock-skew re-copy concern it targets is now better addressed by the new `sync --checksum` (#799, content-based) and the existing `--size-only` (deterministic); the same-second-truncation caveat is already documented. |
+| #843 — explicit up/download buffers | **Already covered** by `--part-size` (the multipart/ranged chunk size) and `--concurrency` (parallel parts), which are the tunables the PR asks for; a separate buffer flag would be redundant. |
+
+---
+
 ## Audit (2026-05-30): Tier 1 / easy bugs were checked and are NOT ported
 
 Before integrating anything, every "obvious and easy" Tier-1 bug (plus the easy
