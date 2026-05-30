@@ -24,6 +24,12 @@ pub struct RmArgs {
     #[arg(long)]
     pub version_id: Option<String>,
 
+    /// Disable wildcard and prefix (trailing-slash) expansion; treat each target
+    /// as a single literal key. Lets you delete a directory-marker object such as
+    /// `s3://bucket/path/dirobj/` directly. Mirrors upstream s5cmd PR #861.
+    #[arg(long)]
+    pub raw: bool,
+
     /// Exclude objects whose relative path matches the given glob (repeatable).
     /// Only applied when a target expands via wildcard/prefix listing.
     #[arg(long)]
@@ -59,6 +65,7 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
         let url = Url::new(
             target,
             crate::storage::url::UrlOptions {
+                raw: args.raw,
                 version_id: args.version_id.clone(),
                 ..Default::default()
             },
@@ -66,7 +73,11 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!(e))?;
 
         // Collect the concrete object URLs to delete (expanding wildcards/prefixes).
-        let expand = url.is_wildcard() || (url.is_remote() && url.is_prefix());
+        // `--raw` forces literal single-key handling: no wildcard, no prefix
+        // expansion. `is_wildcard()` is already false when raw, but `is_prefix()`
+        // only checks the trailing slash, so guard it explicitly so a dir-marker
+        // key (e.g. `s3://b/dirobj/`) routes to the single delete path.
+        let expand = !url.is_raw() && (url.is_wildcard() || (url.is_remote() && url.is_prefix()));
 
         if !expand {
             // Single concrete object: deleted as-is, never filtered.
@@ -258,5 +269,26 @@ mod tests {
     fn filters_empty_keeps_everything() {
         let f = Filters::new(&[], &[]).unwrap();
         assert!(!f.should_skip("anything/at/all.bin"));
+    }
+
+    #[test]
+    fn raw_routes_dir_marker_to_single_delete() {
+        use crate::storage::url::{Url, UrlOptions};
+        // Non-raw: a trailing-slash key is a prefix and takes the (child-listing)
+        // expansion path, so the marker object itself is never deleted.
+        let plain = Url::new("s3://b/dirobj/", UrlOptions::default()).unwrap();
+        assert!(plain.is_prefix());
+        let plain_expand = plain.is_wildcard() || (plain.is_remote() && plain.is_prefix());
+        assert!(plain_expand, "non-raw dir-marker takes the prefix/list path");
+
+        // Raw: the fixed predicate from rm.rs:69 must route to the single delete.
+        let raw = Url::new(
+            "s3://b/dirobj/",
+            UrlOptions { raw: true, ..Default::default() },
+        ).unwrap();
+        assert!(raw.is_raw());
+        let raw_expand = !raw.is_raw()
+            && (raw.is_wildcard() || (raw.is_remote() && raw.is_prefix()));
+        assert!(!raw_expand, "raw dir-marker must use client.delete single path");
     }
 }
