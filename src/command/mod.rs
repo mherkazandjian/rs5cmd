@@ -5,6 +5,7 @@ mod bucket_version;
 mod cat;
 mod cp;
 mod du;
+mod filters;
 mod head;
 mod ls;
 mod pipe;

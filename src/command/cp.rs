@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use clap::Args;
 
+use super::filters::{filter_key, patterns_with_files, Filters};
 use super::GlobalOpts;
 use crate::storage::s3::S3;
 use crate::storage::url::Url;
@@ -96,6 +97,29 @@ pub struct CpArgs {
     /// with the suffix stripped from the local name (#785).
     #[arg(long)]
     pub links: bool,
+
+    /// Exclude objects whose relative path matches the given glob (repeatable).
+    /// Only applied when a source expands via wildcard/prefix/directory listing;
+    /// a single concrete source is never filtered.
+    #[arg(long)]
+    pub exclude: Vec<String>,
+
+    /// Only include objects whose relative path matches the given glob
+    /// (repeatable). Only applied when a source expands via
+    /// wildcard/prefix/directory listing; a single concrete source is never
+    /// filtered.
+    #[arg(long)]
+    pub include: Vec<String>,
+
+    /// Read additional `--exclude` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub exclude_from: Vec<String>,
+
+    /// Read additional `--include` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub include_from: Vec<String>,
 }
 
 /// Suffix appended to an object key when a local symlink is stored as a
@@ -149,6 +173,15 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         anyhow::bail!("--version-id/--all-versions require exactly one source");
     }
 
+    // Compile include/exclude filters into regexes once. Inline patterns are
+    // combined with any read from `--include-from`/`--exclude-from` files. The
+    // filters only ever apply to objects discovered by expanding a wildcard /
+    // prefix / directory source — a single concrete source is never filtered
+    // (matching rm's documented semantics).
+    let includes = patterns_with_files(&args.include, &args.include_from)?;
+    let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
+    let filters = Filters::new(&includes, &excludes)?;
+
     // Expand every source through the existing single-source logic and collect
     // all (src, dst) pairs so they share one client and one worker pool.
     let mut pairs: Vec<(Url, Url)> = Vec::new();
@@ -162,7 +195,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
             },
         )
         .map_err(|e| anyhow::anyhow!(e))?;
-        let expanded = expand_sources(&src, &dst, &opts, args.follow_symlinks).await?;
+        let expanded = expand_sources(&src, &dst, &opts, args.follow_symlinks, &filters).await?;
         pairs.extend(expanded);
     }
 
@@ -271,6 +304,7 @@ async fn expand_sources(
     dst: &Url,
     opts: &Options,
     follow_symlinks: bool,
+    filters: &Filters,
 ) -> anyhow::Result<Vec<(Url, Url)>> {
     let client = new_client(src, opts).await?;
 
@@ -311,6 +345,11 @@ async fn expand_sources(
         }
         let Some(obj_url) = obj.url else { continue };
         if obj.typ.is_dir() {
+            continue;
+        }
+        // Skip objects rejected by the include/exclude filters. Only reached on
+        // the expansion path, so a single concrete source is never filtered.
+        if filters.should_skip(&filter_key(&obj_url)) {
             continue;
         }
         // Destination keeps the source's relative layout under dst as a prefix.

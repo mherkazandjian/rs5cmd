@@ -23,9 +23,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Args;
-use regex::Regex;
 
 use self::sync_strategy::SyncStrategy;
+use super::filters::Filters;
 use super::GlobalOpts;
 use crate::storage::s3::S3;
 use crate::storage::url::Url;
@@ -159,8 +159,8 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
 
     // Compile include/exclude filters into regexes once. Inline patterns are
     // combined with any read from `--include-from`/`--exclude-from` files.
-    let includes = patterns_with_files(&args.include, &args.include_from)?;
-    let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
+    let includes = super::filters::patterns_with_files(&args.include, &args.include_from)?;
+    let excludes = super::filters::patterns_with_files(&args.exclude, &args.exclude_from)?;
     let filters = Filters::new(&includes, &excludes)?;
 
     // Determine whether the source expands to multiple objects ("batch"), which
@@ -407,64 +407,6 @@ fn report_rm(u: &Url, r: anyhow::Result<()>, had_error: &mut bool, ok: &mut u64)
             fatal
         }
     }
-}
-
-/// Compiled include/exclude glob filters, matched against relative paths.
-struct Filters {
-    includes: Vec<Regex>,
-    excludes: Vec<Regex>,
-}
-
-impl Filters {
-    fn new(includes: &[String], excludes: &[String]) -> anyhow::Result<Filters> {
-        Ok(Filters {
-            includes: compile_globs(includes)?,
-            excludes: compile_globs(excludes)?,
-        })
-    }
-
-    /// Returns true if an object with the given relative key should be skipped.
-    fn should_skip(&self, key: &str) -> bool {
-        // Excluded patterns win.
-        if self.excludes.iter().any(|re| re.is_match(key)) {
-            return true;
-        }
-        // If includes are present, the key must match at least one.
-        if !self.includes.is_empty() && !self.includes.iter().any(|re| re.is_match(key)) {
-            return true;
-        }
-        false
-    }
-}
-
-/// Returns the inline patterns followed by any read from the given files (one
-/// pattern per line; blank lines and lines starting with `#` are ignored).
-fn patterns_with_files(inline: &[String], files: &[String]) -> anyhow::Result<Vec<String>> {
-    let mut out = inline.to_vec();
-    for f in files {
-        let content = std::fs::read_to_string(f)
-            .map_err(|e| anyhow::anyhow!("reading pattern file {f}: {e}"))?;
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
-            out.push(line.to_string());
-        }
-    }
-    Ok(out)
-}
-
-/// Compiles wildcard glob strings into anchored regexes.
-fn compile_globs(patterns: &[String]) -> anyhow::Result<Vec<Regex>> {
-    let mut out = Vec::with_capacity(patterns.len());
-    for p in patterns {
-        let mut re = crate::strutil::wildcard_to_regexp(p);
-        re = crate::strutil::match_from_start_to_end(&re);
-        re = crate::strutil::add_newline_flag(&re);
-        out.push(Regex::new(&re)?);
-    }
-    Ok(out)
 }
 
 /// Determines whether the source expands to multiple objects. Mirrors the Go

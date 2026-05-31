@@ -1781,3 +1781,100 @@ fn cp_links_symlink_roundtrip() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn ls_include_exclude_filters() {
+    // `ls --exclude '*.log'` hides matching keys; `ls --include '*.log'` shows
+    // only matching keys. (s5cmd #655)
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["keep.txt", "drop.log", "more.txt"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/d/{k}"))])
+            .assert()
+            .success();
+    }
+
+    // --exclude hides the .log key, keeps the .txt keys.
+    rs5cmd()
+        .args(["ls", "--exclude", "*.log", &s3("/d/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("keep.txt"))
+        .stdout(predicate::str::contains("more.txt"))
+        .stdout(predicate::str::contains("drop.log").not());
+
+    // --include shows ONLY the .log key.
+    rs5cmd()
+        .args(["ls", "--include", "*.log", &s3("/d/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("drop.log"))
+        .stdout(predicate::str::contains("keep.txt").not())
+        .stdout(predicate::str::contains("more.txt").not());
+
+    rs5cmd().args(["rm", &s3("/d/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn mv_exclude_skips_during_wildcard_move() {
+    // `mv --exclude '*.log'` must skip excluded objects during a prefix/wildcard
+    // move (they remain at the source, are not moved to the destination); a
+    // single concrete move is never filtered. (s5cmd #655)
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["a.txt", "b.txt", "skip.log"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/src/{k}"))])
+            .assert()
+            .success();
+    }
+
+    // Move everything under src/ to dst/, excluding *.log.
+    rs5cmd()
+        .args(["mv", "--exclude", "*.log", &s3("/src/*"), &s3("/dst/")])
+        .assert()
+        .success();
+
+    // The two .txt objects landed under dst/ (and were deleted from src/).
+    rs5cmd()
+        .args(["ls", &s3("/dst/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"))
+        .stdout(predicate::str::contains("b.txt"))
+        .stdout(predicate::str::contains("skip.log").not());
+
+    // The excluded .log object was never moved: it is absent from dst/ and still
+    // present at src/.
+    rs5cmd()
+        .args(["ls", &s3("/src/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skip.log"))
+        .stdout(predicate::str::contains("a.txt").not())
+        .stdout(predicate::str::contains("b.txt").not());
+
+    rs5cmd().args(["rm", &s3("/src/*")]).assert().success();
+    rs5cmd().args(["rm", &s3("/dst/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}

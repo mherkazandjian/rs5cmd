@@ -7,6 +7,7 @@ use time::format_description::FormatItem;
 use time::macros::format_description;
 use time::{OffsetDateTime, UtcOffset};
 
+use super::filters::{filter_key, patterns_with_files, Filters};
 use super::GlobalOpts;
 use crate::storage::url::Url;
 use crate::storage::{new_client, ObjectType};
@@ -136,6 +137,24 @@ pub struct LsArgs {
     /// default (without this flag) is unchanged UTC output.
     #[arg(long)]
     pub local_time: bool,
+
+    /// Exclude objects whose relative path matches the given glob (repeatable).
+    #[arg(long)]
+    pub exclude: Vec<String>,
+
+    /// Only include objects whose relative path matches the given glob (repeatable).
+    #[arg(long)]
+    pub include: Vec<String>,
+
+    /// Read additional `--exclude` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub exclude_from: Vec<String>,
+
+    /// Read additional `--include` globs from a file (one per line; blank lines
+    /// and `#` comments ignored). Repeatable.
+    #[arg(long)]
+    pub include_from: Vec<String>,
 }
 
 /// Parses a `--newer-than` / `--older-than` value into an absolute
@@ -227,6 +246,12 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
         None => None,
     };
 
+    // Compile include/exclude filters into regexes once. Inline patterns are
+    // combined with any read from `--include-from`/`--exclude-from` files.
+    let includes = patterns_with_files(&args.include, &args.include_from)?;
+    let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
+    let filters = Filters::new(&includes, &excludes)?;
+
     let client = new_client(&url, &opts).await?;
     let mut rx = client.list(&url, true);
 
@@ -238,6 +263,16 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
     while let Some(obj) = rx.recv().await {
         if let Some(err) = obj.err {
             return Err(err);
+        }
+        // Include/exclude glob filter: skip any non-directory object whose
+        // relative key is rejected. Directory / common-prefix entries are not
+        // filtered (they carry no real key to match and are display-only).
+        if !obj.typ.is_dir() {
+            if let Some(u) = &obj.url {
+                if filters.should_skip(&filter_key(u)) {
+                    continue;
+                }
+            }
         }
         // Client-side LastModified filter: keep objects in [newer_than, older_than).
         // Entries without a mod_time (directories / common prefixes) are skipped
@@ -497,6 +532,10 @@ mod tests {
             newer_than: None,
             older_than: None,
             local_time: false,
+            exclude: Vec::new(),
+            include: Vec::new(),
+            exclude_from: Vec::new(),
+            include_from: Vec::new(),
         }
     }
 
