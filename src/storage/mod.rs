@@ -5,12 +5,14 @@ pub mod s3;
 pub mod url;
 
 use std::fmt;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
 use self::url::Url;
+use crate::ratelimit::RateLimiter;
 
 /// Metadata error: a specified object was not found.
 #[derive(Debug, thiserror::Error)]
@@ -202,6 +204,12 @@ pub struct Options {
     /// prune now-empty source directories walking up toward (but never past)
     /// the move source root. Non-empty/unremovable directories are skipped.
     pub remove_empty_dirs: bool,
+    /// Aggregate upload bandwidth cap (`--limit-upload`), shared across all
+    /// workers. `None` means no upload throttling.
+    pub upload_limiter: Option<Arc<RateLimiter>>,
+    /// Aggregate download bandwidth cap (`--limit-download`), shared across all
+    /// workers. `None` means no download throttling.
+    pub download_limiter: Option<Arc<RateLimiter>>,
 }
 
 /// Default multipart part size (bytes). Mirrors a common 8 MiB default and is
@@ -235,6 +243,8 @@ impl Default for Options {
             preserve_timestamps: false,
             client_copy: false,
             remove_empty_dirs: false,
+            upload_limiter: None,
+            download_limiter: None,
         }
     }
 }

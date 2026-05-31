@@ -19,6 +19,7 @@ use super::{
     Bucket, Metadata, NoObjectFound, Object, ObjectNotFound, ObjectType, Options, StorageClass,
     Storage,
 };
+use crate::ratelimit::RateLimiter;
 
 /// Max keys per DeleteObjects request (S3 API limit).
 const DELETE_CHUNK_SIZE: usize = 1000;
@@ -532,6 +533,12 @@ pub struct S3 {
     /// multipart-copy path can be exercised in tests without a 5 GiB object.
     multipart_copy_threshold: u64,
     preserve_timestamps: bool,
+    /// Aggregate upload bandwidth cap (`--limit-upload`), shared across all
+    /// workers (Arc). `None` means no upload throttling (#433).
+    upload_limiter: Option<std::sync::Arc<RateLimiter>>,
+    /// Aggregate download bandwidth cap (`--limit-download`), shared across all
+    /// workers (Arc). `None` means no download throttling (#433).
+    download_limiter: Option<std::sync::Arc<RateLimiter>>,
 }
 
 impl S3 {
@@ -629,6 +636,8 @@ impl S3 {
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MULTIPART_COPY_THRESHOLD),
             preserve_timestamps: opts.preserve_timestamps,
+            upload_limiter: opts.upload_limiter.clone(),
+            download_limiter: opts.download_limiter.clone(),
         })
     }
 
@@ -722,6 +731,10 @@ impl S3 {
             None
         };
         let first = resp.body.collect().await?.into_bytes();
+        // Throttle the download to the aggregate cap, if configured (#433).
+        if let Some(limiter) = &self.download_limiter {
+            limiter.acquire(first.len() as u64).await;
+        }
 
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -757,6 +770,10 @@ impl S3 {
         let mut file = tokio::fs::File::create(dst).await?;
         use tokio::io::AsyncWriteExt;
         while let Some(chunk) = body.try_next().await? {
+            // Throttle the download to the aggregate cap, if configured (#433).
+            if let Some(limiter) = &self.download_limiter {
+                limiter.acquire(chunk.len() as u64).await;
+            }
             file.write_all(&chunk).await?;
         }
         file.flush().await?;
@@ -784,6 +801,7 @@ impl S3 {
             let vid = src.version_id.clone();
             let rp = self.request_payer();
             let file = std::sync::Arc::clone(&file);
+            let limiter = self.download_limiter.clone();
             async move {
                 let range = format!("bytes={}-{}", offset, offset + len - 1);
                 let mut req = client
@@ -797,6 +815,10 @@ impl S3 {
                 }
                 let resp = req.send().await?;
                 let data = resp.body.collect().await?.into_bytes();
+                // Throttle this part to the aggregate download cap (#433).
+                if let Some(limiter) = &limiter {
+                    limiter.acquire(data.len() as u64).await;
+                }
                 tokio::task::spawn_blocking(move || {
                     use std::os::unix::fs::FileExt;
                     file.write_all_at(&data, offset)
@@ -851,6 +873,13 @@ impl S3 {
 
     async fn upload_single(&self, src: &Path, dst: &Url, metadata: &Metadata) -> anyhow::Result<()> {
         let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(u64::MAX);
+        // Throttle the upload to the aggregate cap, if configured (#433). Done
+        // before issuing the PUT so the bytes-per-second budget is reserved.
+        if let Some(limiter) = &self.upload_limiter {
+            if size != u64::MAX {
+                limiter.acquire(size).await;
+            }
+        }
         let body = if size <= Self::INLINE_BODY_MAX {
             ByteStream::from(tokio::fs::read(src).await?)
         } else {
@@ -979,7 +1008,13 @@ impl S3 {
             let upload_id = upload_id.to_string();
             let src = src.clone();
             let rp = self.request_payer();
+            let limiter = self.upload_limiter.clone();
             async move {
+                // Throttle this part to the aggregate upload cap (#433), before
+                // streaming it from disk and issuing the UploadPart request.
+                if let Some(limiter) = &limiter {
+                    limiter.acquire(len).await;
+                }
                 let body = ByteStream::read_from()
                     .path(&src)
                     .offset(offset)
