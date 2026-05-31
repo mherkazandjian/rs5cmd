@@ -1513,6 +1513,44 @@ impl S3 {
         rx
     }
 
+    /// Single-shot PUT of an in-memory body to `dst`. Used by the `--links`
+    /// symlink round-trip to store a small placeholder object whose body is the
+    /// link target string. (#785)
+    pub async fn put_object_bytes(&self, dst: &Url, body: Vec<u8>) -> anyhow::Result<()> {
+        self.client
+            .put_object()
+            .bucket(&dst.bucket)
+            .key(&dst.path)
+            .body(ByteStream::from(body))
+            .set_request_payer(self.request_payer())
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("put object s3://{}/{}: {e}", dst.bucket, dst.path))?;
+        Ok(())
+    }
+
+    /// Fetches the full body of `src` into memory. Used by the `--links`
+    /// symlink round-trip to read a placeholder object's stored target. (#785)
+    pub async fn get_object_bytes(&self, src: &Url) -> anyhow::Result<Vec<u8>> {
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("get object s3://{}/{}: {e}", src.bucket, src.path))?;
+        let data = resp.body.collect().await.map_err(|e| {
+            anyhow::anyhow!("reading object body s3://{}/{}: {e}", src.bucket, src.path)
+        })?;
+        Ok(data.to_vec())
+    }
+
     /// Returns the bucket's versioning status ("Enabled"/"Suspended"/"Unset").
     pub async fn get_bucket_versioning(&self, bucket: &str) -> anyhow::Result<String> {
         let out = self.client.get_bucket_versioning().bucket(bucket).send().await?;

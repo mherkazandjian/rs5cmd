@@ -88,7 +88,19 @@ pub struct CpArgs {
     /// untouched and reported as skipped instead of overwritten (#752).
     #[arg(long = "if-none-match")]
     pub if_none_match: bool,
+
+    /// rclone-style symlink round-trip (unix). Instead of following a local
+    /// symlink on upload, store its target as a small placeholder object whose
+    /// key gets a recognizable suffix (`.s5cmdlink`). On download, a key ending
+    /// in that suffix is recreated as a symlink pointing at the stored target,
+    /// with the suffix stripped from the local name (#785).
+    #[arg(long)]
+    pub links: bool,
 }
+
+/// Suffix appended to an object key when a local symlink is stored as a
+/// placeholder object via `--links`. The object body holds the link target.
+pub const LINK_SUFFIX: &str = ".s5cmdlink";
 
 impl CpArgs {
     fn metadata(&self) -> Metadata {
@@ -214,8 +226,9 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         let opts = Arc::clone(&opts);
         let metadata = Arc::clone(&metadata);
         let s3 = s3.clone();
+        let links = args.links;
         set.spawn(async move {
-            let r = copy_one(&s, &d, s3.as_deref(), &opts, &metadata, is_move).await;
+            let r = copy_one(&s, &d, s3.as_deref(), &opts, &metadata, is_move, links).await;
             (s, d, r)
         });
     }
@@ -401,7 +414,36 @@ async fn copy_one(
     opts: &Options,
     metadata: &Metadata,
     is_move: bool,
+    links: bool,
 ) -> anyhow::Result<()> {
+    // rclone-style `--links` symlink round-trip (unix only). On upload we store
+    // a symlink's target as a placeholder object (suffixed key); on download we
+    // recreate the symlink from such a placeholder. Both short-circuit the
+    // normal file transfer below.
+    #[cfg(unix)]
+    if links {
+        // local -> remote: source is a symlink => store placeholder.
+        if !src.is_remote() && dst.is_remote() {
+            if is_symlink_path(&src.absolute()) {
+                let s3 = s3.expect("upload requires an S3 client");
+                upload_symlink(s3, src, dst, opts).await?;
+                if is_move && !opts.dry_run {
+                    std::fs::remove_file(src.absolute())?;
+                }
+                return Ok(());
+            }
+        }
+        // remote -> local: placeholder object => recreate symlink.
+        if src.is_remote() && !dst.is_remote() && src.path.ends_with(LINK_SUFFIX) {
+            let s3 = s3.expect("download requires an S3 client");
+            download_symlink(s3, src, dst, opts).await?;
+            if is_move {
+                s3.delete(src).await?;
+            }
+            return Ok(());
+        }
+    }
+
     match (src.is_remote(), dst.is_remote()) {
         // remote -> remote: server-side copy, or client-side (download+upload)
         // streaming when --client-copy is set.
@@ -447,6 +489,63 @@ async fn copy_one(
             }
         }
     }
+    Ok(())
+}
+
+/// Whether the given local path is itself a symlink (does not follow it).
+#[cfg(unix)]
+fn is_symlink_path(path: &str) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
+}
+
+/// Stores a local symlink as a placeholder object (`--links`). The object key
+/// is the resolved destination key with [`LINK_SUFFIX`] appended, and the body
+/// is the link target string read via `std::fs::read_link` (the link is NOT
+/// followed). (#785)
+#[cfg(unix)]
+async fn upload_symlink(s3: &S3, src: &Url, dst: &Url, opts: &Options) -> anyhow::Result<()> {
+    let target = std::fs::read_link(src.absolute())
+        .map_err(|e| anyhow::anyhow!("reading symlink {}: {e}", src.absolute()))?;
+    let target_str = target.to_string_lossy().to_string();
+
+    // Append the suffix to the destination key (NOT a path-join, which would
+    // insert a separator) so it stays part of the object name.
+    let mut link_dst = dst.clone();
+    link_dst.path = format!("{}{}", link_dst.path, LINK_SUFFIX);
+
+    if opts.dry_run {
+        return Ok(());
+    }
+    s3.put_object_bytes(&link_dst, target_str.into_bytes()).await
+}
+
+/// Recreates a symlink from a placeholder object (`--links`). The object body
+/// is the link target; the symlink is created at the destination path with
+/// [`LINK_SUFFIX`] stripped from the file name. (#785)
+#[cfg(unix)]
+async fn download_symlink(s3: &S3, src: &Url, dst: &Url, opts: &Options) -> anyhow::Result<()> {
+    let body = s3.get_object_bytes(src).await?;
+    let target = String::from_utf8_lossy(&body).to_string();
+
+    // Strip the suffix from the local destination path.
+    let dst_abs = dst.absolute();
+    let link_path = match dst_abs.strip_suffix(LINK_SUFFIX) {
+        Some(stripped) => PathBuf::from(stripped),
+        None => PathBuf::from(&dst_abs),
+    };
+
+    if opts.dry_run {
+        return Ok(());
+    }
+    if let Some(parent) = link_path.parent() {
+        tokio::fs::create_dir_all(parent).await?;
+    }
+    // Remove any existing entry so symlink creation does not fail with EEXIST.
+    let _ = tokio::fs::remove_file(&link_path).await;
+    std::os::unix::fs::symlink(&target, &link_path)
+        .map_err(|e| anyhow::anyhow!("creating symlink {} -> {target}: {e}", link_path.display()))?;
     Ok(())
 }
 

@@ -1719,3 +1719,65 @@ fn cp_multiple_sources_to_non_dir_dest_errors() {
     // Nothing was written to the would-be single destination.
     assert!(!dst.exists(), "non-dir destination must not be created");
 }
+
+/// `cp --links` round-trips a symlink: upload stores a `.s5cmdlink` placeholder
+/// object whose body is the link target, and download recreates a real symlink
+/// (suffix stripped) pointing at that target. (#785)
+#[cfg(unix)]
+#[test]
+fn cp_links_symlink_roundtrip() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A regular file and a symlink that points at it.
+    let target_file = tmp.path().join("real.txt");
+    std::fs::write(&target_file, b"symlink target data").unwrap();
+    let link_path = tmp.path().join("link.txt");
+    std::os::unix::fs::symlink(&target_file, &link_path).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Upload the symlink with --links: a .s5cmdlink placeholder must appear.
+    rs5cmd()
+        .args(["cp", "--links", link_path.to_str().unwrap(), &s3("/link.txt")])
+        .assert()
+        .success();
+
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("link.txt.s5cmdlink"));
+
+    // Download the placeholder with --links into a fresh dir: expect a real
+    // symlink with the suffix stripped, pointing at the original target.
+    let out_dir = tmp.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let out_link = out_dir.join("link.txt.s5cmdlink");
+    rs5cmd()
+        .args(["cp", "--links", &s3("/link.txt.s5cmdlink"), out_link.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let restored = out_dir.join("link.txt");
+    let meta = std::fs::symlink_metadata(&restored).expect("restored symlink should exist");
+    assert!(
+        meta.file_type().is_symlink(),
+        "restored path should be a symlink, not a regular file"
+    );
+    let restored_target = std::fs::read_link(&restored).unwrap();
+    assert_eq!(
+        restored_target,
+        target_file,
+        "symlink should point at the original target"
+    );
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
