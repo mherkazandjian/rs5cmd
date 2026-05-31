@@ -1517,3 +1517,57 @@ fn cp_if_none_match_does_not_overwrite_existing() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+/// `ls --newer-than` / `--older-than` apply a client-side LastModified filter
+/// (upstream #388). A freshly uploaded object is "newer than 1h" (included) and
+/// is not "older than 1h" (excluded). Both invocations are short, blocking
+/// ls calls, so the suite cannot hang.
+#[test]
+fn ls_newer_than_and_older_than_filter() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("fresh.txt");
+    std::fs::write(&f, b"fresh").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &s3("/fresh.txt")])
+        .assert()
+        .success();
+
+    // Just-uploaded => modified within the last hour: --newer-than 1h includes it.
+    rs5cmd()
+        .args(["ls", "--newer-than", "1h", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh.txt"));
+
+    // ... and it is NOT older than 1h, so --older-than 1h excludes it. The
+    // object must not appear in the listing. We assert only on stdout (not the
+    // exit code) since a fully filtered-out listing may either succeed with no
+    // rows or exit non-zero like any other empty listing.
+    let out = rs5cmd()
+        .args(["ls", "--older-than", "1h", &s3("/")])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("fresh.txt"),
+        "--older-than 1h must exclude a just-uploaded object; got: {stdout:?}"
+    );
+
+    // An RFC3339 lower bound far in the past also includes the object.
+    rs5cmd()
+        .args(["ls", "--newer-than", "2000-01-01T00:00:00Z", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh.txt"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}

@@ -1,5 +1,7 @@
 //! `ls` — list buckets and objects.
 
+use std::time::{Duration, SystemTime};
+
 use clap::Args;
 use time::format_description::FormatItem;
 use time::macros::format_description;
@@ -50,6 +52,69 @@ pub struct LsArgs {
     /// listing or page through a large bucket.
     #[arg(long)]
     pub start_after: Option<String>,
+
+    /// Only list objects modified more recently than this. Accepts either an
+    /// RFC3339 timestamp (e.g. `2024-01-02T15:04:05Z`) or a relative duration
+    /// from now with an `s`/`m`/`h`/`d` suffix (e.g. `24h`, `7d`, `30m`).
+    #[arg(long)]
+    pub newer_than: Option<String>,
+
+    /// Only list objects modified before this. Accepts either an RFC3339
+    /// timestamp (e.g. `2024-01-02T15:04:05Z`) or a relative duration from now
+    /// with an `s`/`m`/`h`/`d` suffix (e.g. `24h`, `7d`, `30m`).
+    #[arg(long)]
+    pub older_than: Option<String>,
+}
+
+/// Parses a `--newer-than` / `--older-than` value into an absolute
+/// [`SystemTime`] bound.
+///
+/// Two forms are accepted:
+///   * a relative duration like `24h`, `7d`, `30m`, `45s` — interpreted as
+///     "that long ago", i.e. `now - duration`.
+///   * an RFC3339 timestamp such as `2024-01-02T15:04:05Z`.
+fn parse_time_bound(spec: &str, now: SystemTime) -> anyhow::Result<SystemTime> {
+    let s = spec.trim();
+    if s.is_empty() {
+        anyhow::bail!("empty time value");
+    }
+    if let Some(dur) = parse_relative_duration(s)? {
+        return now
+            .checked_sub(dur)
+            .ok_or_else(|| anyhow::anyhow!("duration `{s}` is too far in the past"));
+    }
+    // Otherwise treat it as an RFC3339 timestamp.
+    let odt = OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339)
+        .map_err(|e| anyhow::anyhow!("invalid time `{s}`: expected RFC3339 or a duration like 24h/7d/30m/45s ({e})"))?;
+    Ok(odt.into())
+}
+
+/// Parses a single-suffix relative duration (`<number><s|m|h|d>`).
+///
+/// Returns `Ok(None)` if `s` does not end in a recognised suffix (so the caller
+/// can fall back to RFC3339 parsing). Returns `Err` if it looks like a duration
+/// (recognised suffix) but the numeric part is invalid.
+fn parse_relative_duration(s: &str) -> anyhow::Result<Option<Duration>> {
+    let bytes = s.as_bytes();
+    let suffix = match bytes.last() {
+        Some(c) => *c as char,
+        None => return Ok(None),
+    };
+    let unit_secs: u64 = match suffix {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 60 * 60 * 24,
+        _ => return Ok(None),
+    };
+    let num = &s[..s.len() - 1];
+    if num.is_empty() || !num.bytes().all(|b| b.is_ascii_digit()) {
+        return Ok(None);
+    }
+    let n: u64 = num
+        .parse()
+        .map_err(|_| anyhow::anyhow!("invalid duration `{s}`"))?;
+    Ok(Some(Duration::from_secs(n.saturating_mul(unit_secs))))
 }
 
 pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
@@ -78,6 +143,18 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
         // `ls s3://bucket` lists the bucket contents (prefix == "").
     }
 
+    // Parse the optional LastModified bounds once, up front, so a malformed
+    // value fails fast before any listing request goes out.
+    let now = SystemTime::now();
+    let newer_than = match &args.newer_than {
+        Some(s) => Some(parse_time_bound(s, now)?),
+        None => None,
+    };
+    let older_than = match &args.older_than {
+        Some(s) => Some(parse_time_bound(s, now)?),
+        None => None,
+    };
+
     let client = new_client(&url, &opts).await?;
     let mut rx = client.list(&url, true);
 
@@ -89,6 +166,26 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
     while let Some(obj) = rx.recv().await {
         if let Some(err) = obj.err {
             return Err(err);
+        }
+        // Client-side LastModified filter: keep objects in [newer_than, older_than).
+        // Entries without a mod_time (directories / common prefixes) are skipped
+        // only when a time filter is active, mirroring upstream s5cmd #388.
+        if newer_than.is_some() || older_than.is_some() {
+            match obj.mod_time {
+                Some(t) => {
+                    if let Some(lo) = newer_than {
+                        if t < lo {
+                            continue;
+                        }
+                    }
+                    if let Some(hi) = older_than {
+                        if t >= hi {
+                            continue;
+                        }
+                    }
+                }
+                None => continue,
+            }
         }
         if args.summarize && !obj.typ.is_dir() {
             total_objects += 1;
@@ -301,7 +398,48 @@ mod tests {
             summarize: false,
             show_fullpath: false,
             start_after: None,
+            newer_than: None,
+            older_than: None,
         }
+    }
+
+    #[test]
+    fn parse_relative_duration_units() {
+        assert_eq!(parse_relative_duration("45s").unwrap(), Some(Duration::from_secs(45)));
+        assert_eq!(parse_relative_duration("30m").unwrap(), Some(Duration::from_secs(30 * 60)));
+        assert_eq!(parse_relative_duration("24h").unwrap(), Some(Duration::from_secs(24 * 3600)));
+        assert_eq!(parse_relative_duration("7d").unwrap(), Some(Duration::from_secs(7 * 86400)));
+    }
+
+    #[test]
+    fn parse_relative_duration_non_duration_is_none() {
+        // No recognised suffix => fall through to RFC3339 parsing.
+        assert_eq!(parse_relative_duration("2024-01-02T15:04:05Z").unwrap(), None);
+        assert_eq!(parse_relative_duration("h").unwrap(), None);
+        assert_eq!(parse_relative_duration("xyz").unwrap(), None);
+    }
+
+    #[test]
+    fn parse_time_bound_relative_is_in_past() {
+        let now = SystemTime::now();
+        let bound = parse_time_bound("1h", now).unwrap();
+        assert_eq!(now.duration_since(bound).unwrap(), Duration::from_secs(3600));
+    }
+
+    #[test]
+    fn parse_time_bound_rfc3339() {
+        // 1970-01-01T00:00:01Z == UNIX_EPOCH + 1s.
+        let bound = parse_time_bound("1970-01-01T00:00:01Z", SystemTime::now()).unwrap();
+        assert_eq!(
+            bound.duration_since(std::time::UNIX_EPOCH).unwrap(),
+            Duration::from_secs(1)
+        );
+    }
+
+    #[test]
+    fn parse_time_bound_rejects_garbage() {
+        assert!(parse_time_bound("not-a-time", SystemTime::now()).is_err());
+        assert!(parse_time_bound("", SystemTime::now()).is_err());
     }
 
     #[test]
