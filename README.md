@@ -7,11 +7,11 @@ Go s5cmd on small-object throughput and CPU efficiency.
 Development and testing are fully containerized (no Rust toolchain needed on the
 host); the suite runs against a MinIO S3-compatible server via docker-compose.
 
-- **15 commands**: `ls cp mv rm cat mb rb sync du pipe head presign select run bucket-version completion`
+- **16 commands**: `ls cp mv rm cat mb rb sync du pipe head presign select run bucket-version completion tree`
 - **Two transfer engines**: a portable `tokio` + `aws-sdk-s3` path (default), and
   an opt-in `--fast` io_uring path (Linux, `fast` feature) for many small objects.
-- **Tested end-to-end** against MinIO: 92 tests on the default build, 99 with the
-  fast path (`cargo test --features fast`).
+- **Tested end-to-end** against MinIO: ~119 unit + ~50 e2e tests on the default
+  build (`cargo test`), and the fast path compiles/tests with `--features fast`.
 
 ## Features
 
@@ -23,14 +23,24 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   `CopyObject` limit transparently fall back to **multipart `UploadPartCopy`**;
   `--client-copy` streams a remote→remote copy through the client instead.
   `--preserve-timestamps` carries the file mtime across as object metadata.
-  Non-regular files (sockets/FIFOs/devices) are skipped rather than erroring.
-  `mv` deletes the source only after a successful transfer.
+  Non-regular files (sockets/FIFOs/devices) are skipped rather than erroring; a
+  broken/dangling symlink is reported and skipped without aborting the rest of
+  the walk. `mv` deletes the source only after a successful transfer.
+  Additional `cp`/`mv` controls: **multiple sources** in one invocation
+  (`cp a b c dst/`), `--all-versions` (copy every version of a key),
+  `--links` (round-trip a symlink as a placeholder object, Unix),
+  `--if-none-match` (conditional write — skip if the object already exists), and
+  `mv --remove-empty-dirs` (prune now-empty local source dirs after a move).
+- **Bandwidth caps** — `--limit-upload`/`--limit-download` accept size strings
+  (e.g. `10MB`) and throttle aggregate throughput across the worker pool via a
+  shared token bucket.
 - **`sync`** with size-only, size+modtime, and content-**`--checksum`** (MD5/
   ETag) strategies, `--delete`, `--include`/`--exclude` globs (plus
   `--include-from`/`--exclude-from` files), `--exit-on-error`, and a
   `--max-delete N` safety cap that aborts before touching anything if
   `--delete` would remove more than N objects (guards against a misconfigured
-  source wiping the dest).
+  source wiping the dest), and `--force-glacier-transfer` to include Glacier
+  objects instead of skipping them.
 - **Addressing style** is selectable with `--addressing-style path|virtual` for
   S3-compatible providers (defaults: path-style for custom endpoints,
   virtual-host for AWS).
@@ -39,8 +49,18 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   (`http://`, `https://`), with optional `user:pass@`. Applies to the default
   transport (not the `--fast` io_uring path).
 - **Listing** (`ls`) with `-H/--humanize`, `--storage-class`, `--etag`,
-  `--summarize` (totals footer), and JSON output. **`du`** size/count summaries
-  (`--exclude`, `--all-versions`, group-by-storage-class).
+  `--summarize` (totals footer), `--show-fullpath`, `--start-after`, JSON output,
+  client-side `--newer-than`/`--older-than` time filters, `--include`/`--exclude`
+  (plus `--include-from`/`--exclude-from`) globs, and `--local-time` (renders
+  timestamps in the system local zone with an offset; default stays UTC).
+  Console "directory marker" objects (keys ending in `/`) are treated as real
+  objects, and listed keys render with consistent relative paths.
+- **`tree`** prints objects under a prefix as a hierarchy with box-drawing
+  connectors (`--depth`, `--limit`). **`du`** size/count summaries (`--exclude`,
+  `--all-versions`, group-by-storage-class).
+- **Deletion**: `rm` with `--include`/`--exclude` (+ `-from`) filters and `--raw`
+  to delete a DIROBJ object whose key ends in `/`; `rb --force` empties a bucket
+  (honoring `--dry-run`) before removing it.
 - **Object versioning** — `ls --all-versions`/`--version-id` (delete markers shown
   distinctly), `cp`/`cat`/`head`/`rm --version-id`, and `bucket-version` to get/set
   a bucket's versioning status.
@@ -54,11 +74,21 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 - **`run`** executes newline-delimited commands from a file or stdin, propagating
   global flags, with bounded concurrency.
 - **Cross-cutting**: `--json` structured output (one object per result line),
-  `indicatif` progress bars (`cp`/`mv`/`sync`, auto-suppressed under `--json` /
-  non-TTY), `--retry-count` with error-classified exponential backoff
-  (transient/5xx retried, permanent 4xx fail fast), `--dry-run`,
-  `--use-list-objects-v1` (for providers like GCS), `--no-sign-request`, and
-  `--no-verify-ssl`.
+  `--color auto|always|never` ANSI styling (honors `NO_COLOR`, suppressed under
+  `--json`/non-TTY), `indicatif` progress bars (`cp`/`mv`/`sync`, auto-suppressed
+  under `--json` / non-TTY), `--retry-count` with error-classified exponential
+  backoff (transient/5xx retried, permanent 4xx fail fast), `--dry-run` (with a
+  `(dry-run)` output marker), `--use-list-objects-v1` (for providers like GCS),
+  `--no-sign-request`, and `--no-verify-ssl`. Exits with code **130** on
+  SIGINT/SIGTERM. On Unix, the open-file limit (`RLIMIT_NOFILE`) is auto-raised
+  toward the hard limit and a warning is printed if it's too low for the
+  configured concurrency.
+- **Endpoint/region**: `--use-dualstack-endpoint` (IPv6) and
+  `--use-fips-endpoint`; per-side `--source-region`/`--destination-region` and
+  `--source-endpoint-url`/`--destination-endpoint-url`, which route an S3→S3
+  copy through a two-client download+upload when the sides differ. *(Note:
+  dualstack and genuine cross-region/endpoint copies are wired but not exercised
+  by the single-region MinIO test suite.)*
 
 ## Usage
 
