@@ -837,6 +837,64 @@ fn ls_show_fullpath_and_start_after() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+/// `ls --help` must document the new `--local-time` flag (#822). No endpoint
+/// needed, so this runs everywhere and is fully blocking.
+#[test]
+fn ls_help_mentions_local_time() {
+    rs5cmd()
+        .args(["ls", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--local-time"));
+}
+
+/// End-to-end check for `ls --local-time` (#822): the default UTC listing has no
+/// offset token on the timestamp, while `--local-time` appends a numeric
+/// `+HHMM` / `-HHMM` offset. Guarded on the shared-MinIO endpoint.
+#[test]
+fn ls_local_time_appends_offset_token() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    assert_cmd::Command::cargo_bin("rs5cmd")
+        .unwrap()
+        .args(["pipe", &s3("/when.txt")])
+        .write_stdin("tz check")
+        .assert()
+        .success();
+
+    // Default listing: object present, and the timestamp carries NO offset
+    // token (regression guard that default UTC output is unchanged).
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("when.txt"))
+        .stdout(
+            predicate::str::is_match(r"\d{2}:\d{2}:\d{2} [+-]\d{4}")
+                .unwrap()
+                .not(),
+        );
+
+    // `--local-time` listing: object present AND a `HH:MM:SS +HHMM` offset token
+    // appears on the timestamp line.
+    rs5cmd()
+        .args(["ls", "--local-time", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("when.txt"))
+        .stdout(predicate::str::is_match(r"\d{2}:\d{2}:\d{2} [+-]\d{4}").unwrap());
+
+    rs5cmd().args(["rm", &s3("/when.txt")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
 #[test]
 fn sync_exclude_from_file() {
     // --exclude-from reads globs from a file; matching objects are not copied.
