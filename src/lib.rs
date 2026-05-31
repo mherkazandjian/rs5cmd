@@ -6,5 +6,6 @@ pub mod error;
 pub mod fastpath;
 pub mod output;
 pub mod progress;
+pub mod rlimit;
 pub mod storage;
 pub mod strutil;

@@ -384,7 +384,7 @@ fn report(
         Err(e) => {
             *had_error = true;
             let fatal = is_fatal(&e);
-            crate::output::op_error(op, &s.to_string(), Some(&d.to_string()), &format!("{e:#}"));
+            crate::output::op_error(op, &s.to_string(), Some(&d.to_string()), &crate::error::format_error(&e));
             fatal
         }
     }
@@ -403,7 +403,7 @@ fn report_rm(u: &Url, r: anyhow::Result<()>, had_error: &mut bool, ok: &mut u64)
         Err(e) => {
             *had_error = true;
             let fatal = is_fatal(&e);
-            crate::output::op_error("rm", &u.to_string(), None, &format!("{e:#}"));
+            crate::output::op_error("rm", &u.to_string(), None, &crate::error::format_error(&e));
             fatal
         }
     }

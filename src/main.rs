@@ -15,6 +15,12 @@ async fn main() -> ExitCode {
         .init();
 
     let cli = Cli::parse();
+
+    // Best-effort: raise the open-file soft limit and warn if it is likely too
+    // low for the configured parallelism (upstream issue #390). `--concurrency`
+    // is a per-`cp`/`sync` flag (default 8); use that default for the estimate.
+    rs5cmd::rlimit::setup_nofile_limits(cli.global.numworkers, 8);
+
     match command::run(cli).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {

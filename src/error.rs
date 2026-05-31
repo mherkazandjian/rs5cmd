@@ -52,6 +52,34 @@ pub fn is_cancellation(err: &anyhow::Error) -> bool {
         .any(|e| e.to_string().to_lowercase().contains("cancel"))
 }
 
+/// On Unix, `EMFILE` ("Too many open files") is errno 24. Reports whether any
+/// error in the chain is a raw `EMFILE` I/O error.
+#[cfg(unix)]
+pub fn is_emfile(err: &anyhow::Error) -> bool {
+    const EMFILE: i32 = 24;
+    err.chain().any(|e| {
+        e.downcast_ref::<std::io::Error>()
+            .and_then(|io| io.raw_os_error())
+            == Some(EMFILE)
+    })
+}
+
+#[cfg(not(unix))]
+pub fn is_emfile(_err: &anyhow::Error) -> bool {
+    false
+}
+
+/// Formats an error for display (`{e:#}`), appending the RLIMIT_NOFILE hint when
+/// the cause is a raw `EMFILE` so the user gets an actionable next step (#390).
+pub fn format_error(err: &anyhow::Error) -> String {
+    let base = format!("{err:#}");
+    if is_emfile(err) {
+        format!("{base} ({})", crate::rlimit::EMFILE_HINT)
+    } else {
+        base
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

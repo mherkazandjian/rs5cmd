@@ -244,7 +244,9 @@ fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut boo
         }
         Err(e) => {
             *had_error = true;
-            crate::output::op_error(op, &s.to_string(), Some(&d.to_string()), &format!("{e:#}"));
+            // Annotate raw EMFILE with the RLIMIT_NOFILE hint (#390).
+            let msg = crate::error::format_error(&e);
+            crate::output::op_error(op, &s.to_string(), Some(&d.to_string()), &msg);
         }
     }
 }
