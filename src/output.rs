@@ -5,10 +5,12 @@
 //! emit helpers below. Mirrors s5cmd's `--json` behavior: each result is a
 //! single JSON object on its own line.
 
+use std::io::IsTerminal;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static JSON: AtomicBool = AtomicBool::new(false);
 static DRY_RUN: AtomicBool = AtomicBool::new(false);
+static COLOR: AtomicBool = AtomicBool::new(false);
 
 /// Enables/disables JSON output. Call once at startup from the global flag.
 pub fn set_json(on: bool) {
@@ -17,6 +19,69 @@ pub fn set_json(on: bool) {
 
 pub fn is_json() -> bool {
     JSON.load(Ordering::Relaxed)
+}
+
+/// Color choice requested by the user via `--color`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorChoice {
+    Auto,
+    Always,
+    Never,
+}
+
+/// Resolves the requested color choice once at startup into a process-global
+/// flag (mirrors `set_json` above).
+///
+/// `auto` enables color only when stdout is a TTY and the `NO_COLOR` convention
+/// (https://no-color.org) is not in effect. JSON output must always stay clean,
+/// so color is force-disabled whenever JSON mode is on — call `set_json` first.
+pub fn set_color(choice: ColorChoice) {
+    let no_color = std::env::var_os("NO_COLOR")
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+    let enabled = match choice {
+        ColorChoice::Never => false,
+        ColorChoice::Always => true,
+        ColorChoice::Auto => std::io::stdout().is_terminal() && !no_color,
+    };
+    COLOR.store(enabled && !is_json(), Ordering::Relaxed);
+}
+
+pub fn is_color() -> bool {
+    COLOR.load(Ordering::Relaxed)
+}
+
+const C_RESET: &str = "\x1b[0m";
+const C_BLUE: &str = "\x1b[34m";
+const C_GREEN: &str = "\x1b[32m";
+const C_RED: &str = "\x1b[31m";
+
+/// Colors a directory / common-prefix (blue) when color is enabled, else
+/// returns the string unchanged.
+pub fn paint_dir(s: &str) -> String {
+    if is_color() {
+        format!("{C_BLUE}{s}{C_RESET}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Colors an object name (green) when color is enabled, else unchanged.
+pub fn paint_object(s: &str) -> String {
+    if is_color() {
+        format!("{C_GREEN}{s}{C_RESET}")
+    } else {
+        s.to_string()
+    }
+}
+
+/// Colors an error fragment (red) when color is enabled, else unchanged.
+pub fn paint_error(s: &str) -> String {
+    if is_color() {
+        format!("{C_RED}{s}{C_RESET}")
+    } else {
+        s.to_string()
+    }
 }
 
 /// Marks the process as running under `--dry-run`. Call once at startup from the
@@ -73,9 +138,10 @@ pub fn op_error(op: &str, src: &str, dst: Option<&str>, err: &str) {
         }
         println!("{v}");
     } else {
+        let prefix = paint_error("ERROR");
         match dst {
-            Some(d) => eprintln!("ERROR {op} {src} {d}: {err}"),
-            None => eprintln!("ERROR {op} {src}: {err}"),
+            Some(d) => eprintln!("{prefix} {op} {src} {d}: {err}"),
+            None => eprintln!("{prefix} {op} {src}: {err}"),
         }
     }
 }

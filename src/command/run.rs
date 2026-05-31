@@ -171,6 +171,7 @@ mod tests {
             proxy: None,
             numworkers: 256,
             retry_count: 10,
+            color: crate::command::ColorMode::Auto,
         }
     }
 

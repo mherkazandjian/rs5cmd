@@ -1878,3 +1878,112 @@ fn mv_exclude_skips_during_wildcard_move() {
     rs5cmd().args(["rm", &s3("/dst/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+/// Helper: make a bucket and upload one object so `ls` yields a colorable line.
+/// Bounded internal retry on the listing absorbs MinIO propagation; never hangs.
+fn color_seed_and_ls(extra_args: &[&str]) -> Vec<u8> {
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("colorme.txt");
+    std::fs::write(&f, b"data").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &s3("/colorme.txt")])
+        .assert()
+        .success();
+
+    let mut last = Vec::new();
+    for attempt in 0..20 {
+        let mut cmd = rs5cmd();
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        cmd.arg("ls").arg(s3("/"));
+        let out = cmd.output().expect("failed to run rs5cmd ls");
+        assert!(
+            out.status.success(),
+            "ls failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        last = out.stdout;
+        if last.windows(7).any(|w| w == b"colorme") {
+            break;
+        }
+        if attempt < 19 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+    last
+}
+
+/// `--color` is documented in `ls --help`. No endpoint needed; fully blocking.
+#[test]
+fn color_flag_in_help() {
+    rs5cmd()
+        .args(["ls", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--color"));
+}
+
+/// Default (auto) output is piped under assert_cmd (non-tty), so no ANSI escape
+/// may appear in `ls` stdout — guards byte-identical default output. (#88)
+#[test]
+fn ls_auto_color_has_no_escape_when_piped() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&[]);
+    assert!(
+        !out.contains(&0x1b),
+        "ls stdout must contain no ANSI escape when stdout is not a tty"
+    );
+}
+
+/// `--color never` never emits ANSI escapes. (#88)
+#[test]
+fn ls_color_never_has_no_escape() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&["--color", "never"]);
+    assert!(
+        !out.contains(&0x1b),
+        "ls stdout must contain no ANSI escape with --color never"
+    );
+}
+
+/// `--color always` forces ANSI escapes even on a non-tty stdout. (#88)
+#[test]
+fn ls_color_always_has_escape() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&["--color", "always"]);
+    assert!(
+        out.contains(&0x1b),
+        "ls stdout must contain an ANSI escape with --color always"
+    );
+}
+
+/// `--json` keeps output clean even when `--color always` is requested. (#88)
+#[test]
+fn ls_json_suppresses_color() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&["--json", "--color", "always"]);
+    assert!(
+        !out.contains(&0x1b),
+        "json ls stdout must contain no ANSI escape even with --color always"
+    );
+}

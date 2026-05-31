@@ -439,8 +439,16 @@ fn format_object(obj: &crate::storage::Object, args: &LsArgs) -> String {
 
     if obj.typ.is_dir() && matches!(obj.typ, ObjectType::Dir) && obj.size == 0 && obj.mod_time.is_none()
     {
-        // Directory / common prefix entry.
-        return format!("{:>19} {:>2} {:<1} {:>12}  {}", "", "", "", "DIR", path);
+        // Directory / common prefix entry. Color the name only (the fixed-width
+        // columns stay byte-identical so non-tty output is unchanged).
+        return format!(
+            "{:>19} {:>2} {:<1} {:>12}  {}",
+            "",
+            "",
+            "",
+            "DIR",
+            crate::output::paint_dir(&path)
+        );
     }
 
     let version = obj
@@ -479,6 +487,7 @@ fn format_object(obj: &crate::storage::Object, args: &LsArgs) -> String {
         obj.size.to_string()
     };
 
+    let path = crate::output::paint_object(&path);
     format!("{date:>19} {stclass:>2} {etag:<1} {size:>12}  {path}{version}")
 }
 

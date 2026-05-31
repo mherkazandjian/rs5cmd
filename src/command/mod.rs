@@ -15,8 +15,9 @@ mod run;
 mod select;
 mod sync;
 
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 
+use crate::output::ColorChoice;
 use crate::storage::Options;
 
 /// A very fast S3 and local filesystem execution tool (Rust port of s5cmd).
@@ -93,6 +94,42 @@ pub struct GlobalOpts {
     /// Max retry attempts for transient errors.
     #[arg(long, global = true, default_value_t = 10)]
     pub retry_count: u32,
+
+    /// Colorize output: `auto` (color only when stdout is a TTY and NO_COLOR is
+    /// unset), `always`, or `never`. Color is always suppressed under `--json`.
+    #[arg(long, global = true, value_enum, default_value_t = ColorMode::Auto)]
+    pub color: ColorMode,
+}
+
+/// User-facing `--color` choice. Mirrors [`ColorChoice`] but lives on the CLI
+/// surface so `output` stays free of clap.
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorMode {
+    Auto,
+    Always,
+    Never,
+}
+
+// clap's `default_value_t` requires `Display`; render the lowercase value names.
+impl std::fmt::Display for ColorMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            ColorMode::Auto => "auto",
+            ColorMode::Always => "always",
+            ColorMode::Never => "never",
+        };
+        f.write_str(s)
+    }
+}
+
+impl From<ColorMode> for ColorChoice {
+    fn from(m: ColorMode) -> Self {
+        match m {
+            ColorMode::Auto => ColorChoice::Auto,
+            ColorMode::Always => ColorChoice::Always,
+            ColorMode::Never => ColorChoice::Never,
+        }
+    }
 }
 
 impl GlobalOpts {
@@ -161,6 +198,9 @@ pub struct CompletionArgs {
 /// Runs the parsed CLI.
 pub async fn run(cli: Cli) -> anyhow::Result<()> {
     crate::output::set_json(cli.global.json);
+    // Resolve `--color` once, globally. Must run AFTER set_json so JSON output
+    // stays clean (set_color force-disables color under JSON mode).
+    crate::output::set_color(cli.global.color.into());
     // Honor `--dry-run` so result lines are visibly marked (set once, globally).
     crate::output::set_dry_run(cli.global.dry_run);
     match cli.command {
