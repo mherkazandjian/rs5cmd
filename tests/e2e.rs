@@ -1987,3 +1987,75 @@ fn ls_json_suppresses_color() {
         "json ls stdout must contain no ANSI escape even with --color always"
     );
 }
+
+/// `tree` lists objects under a prefix recursively and renders them as a
+/// hierarchy with box-drawing connectors. For keys `a/b/c.txt`, `a/d.txt`,
+/// `e.txt` the directories `a` and `b` and the leaves `c.txt`, `d.txt`, `e.txt`
+/// must all appear, with at least one `├──`/`└──` connector. (upstream #489)
+///
+/// A bounded retry on the listing absorbs MinIO propagation so the deepest leaf
+/// (`c.txt`) is reliably present; this uses `.output()` and never hangs.
+#[test]
+fn tree_renders_hierarchy_with_connectors() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("payload.txt");
+    std::fs::write(&local, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Upload a small hierarchy: a/b/c.txt, a/d.txt, e.txt.
+    for key in ["a/b/c.txt", "a/d.txt", "e.txt"] {
+        rs5cmd()
+            .args(["cp", local.to_str().unwrap(), &s3(&format!("/{key}"))])
+            .assert()
+            .success();
+    }
+
+    // Run `tree` and retry until every directory and leaf has propagated.
+    let mut stdout = String::new();
+    for attempt in 0..20 {
+        let out = rs5cmd()
+            .args(["tree", &s3("/")])
+            .output()
+            .expect("failed to run rs5cmd tree");
+        assert!(
+            out.status.success(),
+            "tree failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        if ["a", "b", "c.txt", "d.txt", "e.txt"]
+            .iter()
+            .all(|name| stdout.contains(name))
+        {
+            break;
+        }
+        if attempt < 19 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    // Box-drawing connectors must be rendered for the hierarchy (├── or └──).
+    assert!(
+        stdout.contains('\u{251c}') || stdout.contains('\u{2514}'),
+        "expected tree connectors, stdout was:\n{stdout}"
+    );
+    // Every directory and recursive leaf must appear (order-independent).
+    for name in ["a", "b", "c.txt", "d.txt", "e.txt"] {
+        assert!(
+            stdout.contains(name),
+            "expected `{name}` in tree output, stdout was:\n{stdout}"
+        );
+    }
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}

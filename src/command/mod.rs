@@ -14,6 +14,7 @@ mod rm;
 mod run;
 mod select;
 mod sync;
+mod tree;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 
@@ -172,6 +173,8 @@ pub enum Command {
     Sync(sync::SyncArgs),
     /// Show object size usage.
     Du(du::DuArgs),
+    /// List objects under a prefix as a hierarchical tree.
+    Tree(tree::TreeArgs),
     /// Stream stdin to a remote object.
     Pipe(pipe::PipeArgs),
     /// Print remote object metadata (or check a bucket exists).
@@ -213,6 +216,7 @@ pub async fn run(cli: Cli) -> anyhow::Result<()> {
         Command::Rb(args) => bucket::run_rb(&cli.global, args).await,
         Command::Sync(args) => sync::run(&cli.global, args).await,
         Command::Du(args) => du::run(&cli.global, args).await,
+        Command::Tree(args) => tree::run(&cli.global, args).await,
         Command::Pipe(args) => pipe::run(&cli.global, args).await,
         Command::Head(args) => head::run(&cli.global, args).await,
         Command::Presign(args) => presign::run(&cli.global, args).await,
