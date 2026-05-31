@@ -1571,3 +1571,93 @@ fn ls_newer_than_and_older_than_filter() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+/// Multiple local sources in one `cp` to an s3 prefix must land every source
+/// object under that prefix (upstream issue #2). All commands are short,
+/// blocking cp/ls/rm/rb invocations so the suite cannot hang.
+#[test]
+fn cp_multiple_local_sources_to_s3_prefix() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("file1.txt");
+    let f2 = tmp.path().join("file2.txt");
+    let f3 = tmp.path().join("file3.txt");
+    std::fs::write(&f1, b"one").unwrap();
+    std::fs::write(&f2, b"two").unwrap();
+    std::fs::write(&f3, b"three").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Three sources, trailing prefix destination: all three land under it.
+    rs5cmd()
+        .args([
+            "cp",
+            f1.to_str().unwrap(),
+            f2.to_str().unwrap(),
+            f3.to_str().unwrap(),
+            &s3("/prefix/"),
+        ])
+        .assert()
+        .success();
+
+    rs5cmd()
+        .args(["ls", &s3("/prefix/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("file1.txt"))
+        .stdout(predicate::str::contains("file2.txt"))
+        .stdout(predicate::str::contains("file3.txt"));
+
+    rs5cmd().args(["rm", &s3("/prefix/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Multiple local sources copied into a local directory must all land inside it
+/// (issue #2). No endpoint required; purely local fs work, fully blocking.
+#[test]
+fn cp_multiple_local_sources_to_local_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("a.txt");
+    let f2 = tmp.path().join("b.txt");
+    std::fs::write(&f1, b"aaa").unwrap();
+    std::fs::write(&f2, b"bbb").unwrap();
+    let dst = tmp.path().join("out");
+    std::fs::create_dir(&dst).unwrap();
+
+    // Trailing slash makes the destination unambiguously a directory.
+    let dst_arg = format!("{}/", dst.to_str().unwrap());
+    rs5cmd()
+        .args(["cp", f1.to_str().unwrap(), f2.to_str().unwrap(), &dst_arg])
+        .assert()
+        .success();
+
+    assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"aaa");
+    assert_eq!(std::fs::read(dst.join("b.txt")).unwrap(), b"bbb");
+}
+
+/// Multiple sources with a NON-directory destination must error clearly and not
+/// produce any output file (issue #2). Local-only, blocking, cannot hang.
+#[test]
+fn cp_multiple_sources_to_non_dir_dest_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("a.txt");
+    let f2 = tmp.path().join("b.txt");
+    std::fs::write(&f1, b"aaa").unwrap();
+    std::fs::write(&f2, b"bbb").unwrap();
+    // A plain (non-existent, no trailing slash) file path: not a directory.
+    let dst = tmp.path().join("single_target.txt");
+
+    rs5cmd()
+        .args(["cp", f1.to_str().unwrap(), f2.to_str().unwrap(), dst.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be a directory or s3 prefix"));
+
+    // Nothing was written to the would-be single destination.
+    assert!(!dst.exists(), "non-dir destination must not be created");
+}

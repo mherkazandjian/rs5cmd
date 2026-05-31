@@ -12,10 +12,11 @@ use crate::storage::{new_client, Metadata, Options};
 
 #[derive(Args, Debug)]
 pub struct CpArgs {
-    /// Source (local path or s3:// URL), may contain wildcards.
-    pub src: String,
-    /// Destination (local path or s3:// URL).
-    pub dst: String,
+    /// One or more sources (local paths or s3:// URLs), may contain wildcards,
+    /// followed by a single destination as the final positional. With more than
+    /// one source the destination must be a directory (local) or prefix (s3).
+    #[arg(required = true, num_args = 1.., value_name = "PATH")]
+    pub paths: Vec<String>,
 
     /// Follow symbolic links when walking local directories.
     #[arg(long, default_value_t = true)]
@@ -108,20 +109,55 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     opts.preserve_timestamps = args.preserve_timestamps;
     opts.client_copy = args.client_copy;
     opts.remove_empty_dirs = args.remove_empty_dirs;
-    let src = Url::new(
-        &args.src,
-        crate::storage::url::UrlOptions {
-            version_id: args.version_id.clone(),
-            all_versions: args.all_versions,
-            ..Default::default()
-        },
-    )
-    .map_err(|e| anyhow::anyhow!(e))?;
-    let dst = Url::parse(&args.dst).map_err(|e| anyhow::anyhow!(e))?;
+    let op = if is_move { "mv" } else { "cp" };
+
+    // The final positional is the destination; everything before it is a source.
+    // `clap` guarantees at least one positional (`required = true`), but a lone
+    // positional means a source was given with no destination.
+    if args.paths.len() < 2 {
+        anyhow::bail!("{op} requires at least one source and a destination");
+    }
+    let dst_raw = args.paths.last().expect("paths is non-empty");
+    let src_raws = &args.paths[..args.paths.len() - 1];
+
+    let dst = Url::parse(dst_raw).map_err(|e| anyhow::anyhow!(e))?;
     let metadata = args.metadata();
 
-    let pairs = expand_sources(&src, &dst, &opts, args.follow_symlinks).await?;
-    let op = if is_move { "mv" } else { "cp" };
+    // With more than one source, the destination must be a directory (local) or
+    // a prefix/bucket (s3) — a single named target cannot receive many objects.
+    let multi_source = src_raws.len() > 1;
+    if multi_source && !dest_is_dir_like(&dst) {
+        anyhow::bail!(
+            "{op}: destination {dst_raw} must be a directory or s3 prefix when copying multiple sources"
+        );
+    }
+
+    // Per-source version-id / all-versions only make sense for a single source.
+    if src_raws.len() > 1 && (args.version_id.is_some() || args.all_versions) {
+        anyhow::bail!("--version-id/--all-versions require exactly one source");
+    }
+
+    // Expand every source through the existing single-source logic and collect
+    // all (src, dst) pairs so they share one client and one worker pool.
+    let mut pairs: Vec<(Url, Url)> = Vec::new();
+    for raw in src_raws {
+        let src = Url::new(
+            raw,
+            crate::storage::url::UrlOptions {
+                version_id: args.version_id.clone(),
+                all_versions: args.all_versions,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| anyhow::anyhow!(e))?;
+        let expanded = expand_sources(&src, &dst, &opts, args.follow_symlinks).await?;
+        pairs.extend(expanded);
+    }
+
+    // Any remote side present means we need an S3 client. Use the first source
+    // (or the destination) that is remote as the config anchor.
+    let any_src_remote = pairs.iter().any(|(s, _)| s.is_remote());
+    let dst_remote = dst.is_remote();
 
     // io_uring fast path: dispatch small-object upload/download/server-side-copy
     // sets (any mix as long as each pair touches a remote) to the per-core
@@ -141,8 +177,14 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // invocation has one direction, so one client — from whichever side is
     // remote — serves every object. Re-creating it per object would reload the
     // whole AWS config + credential chain each time.)
-    let s3: Option<Arc<S3>> = if src.is_remote() || dst.is_remote() {
-        let anchor = if src.is_remote() { &src } else { &dst };
+    let s3: Option<Arc<S3>> = if any_src_remote || dst_remote {
+        // Anchor the client config on whichever side is remote: prefer a remote
+        // source pair, otherwise the destination.
+        let anchor = pairs
+            .iter()
+            .find(|(s, _)| s.is_remote())
+            .map(|(s, _)| s)
+            .unwrap_or(&dst);
         Some(Arc::new(S3::new(anchor, &opts).await?))
     } else {
         None
@@ -282,14 +324,7 @@ async fn expand_all_versions(
     // Is the destination a directory (a place to drop multiple files) rather
     // than a single named target? When directory-like, versions land under it as
     // `<base>_<versionid>`; otherwise the single dst path itself is suffixed.
-    let dst_is_dir = if dst.is_remote() {
-        dst.is_bucket() || dst.absolute().ends_with('/')
-    } else {
-        dst.absolute().ends_with('/')
-            || std::fs::metadata(dst.absolute())
-                .map(|m| m.is_dir())
-                .unwrap_or(false)
-    };
+    let dst_is_dir = dest_is_dir_like(dst);
 
     let mut rx = client.list(src, follow_symlinks);
     let mut pairs = Vec::new();
@@ -331,19 +366,23 @@ fn versioned_dest(src: &Url, dst: &Url, dst_is_dir: bool) -> Url {
     }
 }
 
-/// Resolves the destination for a single-object copy. If dst is directory-like,
-/// the source base name is appended.
-fn resolve_single_dest(src: &Url, dst: &Url) -> Url {
-    let dir_like = if dst.is_remote() {
+/// Whether `dst` is a place that can receive multiple objects: an s3 bucket or
+/// prefix (trailing `/`), or a local directory (existing dir or trailing `/`).
+fn dest_is_dir_like(dst: &Url) -> bool {
+    if dst.is_remote() {
         dst.is_bucket() || dst.absolute().ends_with('/')
     } else {
         dst.absolute().ends_with('/')
             || std::fs::metadata(dst.absolute())
                 .map(|m| m.is_dir())
                 .unwrap_or(false)
-    };
+    }
+}
 
-    if dir_like {
+/// Resolves the destination for a single-object copy. If dst is directory-like,
+/// the source base name is appended.
+fn resolve_single_dest(src: &Url, dst: &Url) -> Url {
+    if dest_is_dir_like(dst) {
         dst.join(&src.base())
     } else {
         dst.clone()
