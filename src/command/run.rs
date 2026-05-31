@@ -176,6 +176,8 @@ mod tests {
             numworkers: 256,
             retry_count: 10,
             color: crate::command::ColorMode::Auto,
+            limit_upload: None,
+            limit_download: None,
         }
     }
 
