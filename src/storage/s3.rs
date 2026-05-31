@@ -43,6 +43,27 @@ fn is_copy_source_too_large(e: &anyhow::Error) -> bool {
     m.contains("larger than the maximum allowable size") || m.contains("entitytoolarge")
 }
 
+/// True if a write error is a failed conditional write (`If-None-Match: "*"`
+/// against an existing object -> HTTP 412 `PreconditionFailed`). Matched
+/// case-insensitively against the full Debug/Display chain so it is robust
+/// across SDK error shapes (#752).
+fn is_precondition_failed<E: std::fmt::Debug>(e: &E) -> bool {
+    let m = format!("{e:?}").to_ascii_lowercase();
+    m.contains("preconditionfailed") || m.contains("precondition failed")
+}
+
+/// Maps an SDK write error to a typed [`crate::storage::PreconditionFailedError`]
+/// when it is a 412 `PreconditionFailed` (failed `If-None-Match`), so callers can
+/// treat it as "object already exists, skipped" instead of a hard error (#752);
+/// otherwise returns the original error unchanged.
+fn map_conditional_write_error(e: anyhow::Error, dst: &Url) -> anyhow::Error {
+    if is_precondition_failed(&e) {
+        anyhow::Error::new(crate::storage::PreconditionFailedError { url: dst.to_string() })
+    } else {
+        e
+    }
+}
+
 /// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
 /// header value (the part after the final `/`).
 fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
@@ -838,7 +859,13 @@ impl S3 {
             .set_request_payer(self.request_payer());
 
         req = apply_put_metadata(req, metadata)?;
-        req.send().await?;
+        if metadata.if_none_match {
+            // Conditional write: fail with HTTP 412 if the object already exists.
+            req = req.if_none_match("*");
+        }
+        req.send()
+            .await
+            .map_err(|e| map_conditional_write_error(e.into(), dst))?;
         Ok(())
     }
 
@@ -885,15 +912,22 @@ impl S3 {
                 let completed = CompletedMultipartUpload::builder()
                     .set_parts(Some(parts))
                     .build();
-                self.client
+                let mut complete = self
+                    .client
                     .complete_multipart_upload()
                     .bucket(&dst.bucket)
                     .key(&dst.path)
                     .upload_id(&upload_id)
                     .multipart_upload(completed)
-                    .set_request_payer(self.request_payer())
+                    .set_request_payer(self.request_payer());
+                if metadata.if_none_match {
+                    // Conditional write: fail with 412 if the object already exists.
+                    complete = complete.if_none_match("*");
+                }
+                complete
                     .send()
-                    .await?;
+                    .await
+                    .map_err(|e| map_conditional_write_error(e.into(), dst))?;
                 Ok(())
             }
             Err(e) => {
@@ -1605,6 +1639,17 @@ impl S3 {
         dst: &Url,
         metadata: &Metadata,
     ) -> anyhow::Result<()> {
+        if metadata.if_none_match {
+            // CopyObject in aws-sdk-s3 1.x does not surface `If-None-Match`, so
+            // emulate the conditional write: if the destination already exists,
+            // skip it with the same typed error the PUT/multipart paths raise.
+            // (A pre-existing object makes this a guaranteed skip; the small TOCTOU
+            // window is acceptable for a best-effort no-clobber, matching upstream
+            // intent.)
+            if self.head_size(dst).await.is_ok() {
+                anyhow::bail!(crate::storage::PreconditionFailedError { url: dst.to_string() });
+            }
+        }
         let mut req = self
             .client
             .copy_object()
@@ -1939,5 +1984,46 @@ mod tests {
         // A multibyte UTF-8 char (é = 0xC3 0xA9) encoded byte-by-byte must
         // reassemble correctly.
         assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    // ---- Conditional write (`--if-none-match`) error mapping (#752) ----
+
+    #[test]
+    fn precondition_failed_is_detected_case_insensitively() {
+        // The 412 code as the SDK/MinIO surface it, in any case, is detected; an
+        // unrelated error is not misclassified.
+        assert!(super::is_precondition_failed(&"PreconditionFailed"));
+        assert!(super::is_precondition_failed(&"at least one of the pre-conditions you specified did not hold (PreconditionFailed)"));
+        assert!(super::is_precondition_failed(&"Precondition Failed"));
+        assert!(!super::is_precondition_failed(&"NoSuchKey"));
+        assert!(!super::is_precondition_failed(&"AccessDenied"));
+        assert!(!super::is_precondition_failed(&""));
+    }
+
+    #[test]
+    fn map_conditional_write_error_converts_412_to_typed_skip() {
+        let dst = super::Url::parse("s3://bucket/key").unwrap();
+        // A 412 maps to the typed PreconditionFailedError so cp can skip it.
+        let mapped = super::map_conditional_write_error(
+            anyhow::anyhow!("server said PreconditionFailed"),
+            &dst,
+        );
+        let pf = mapped.downcast_ref::<crate::storage::PreconditionFailedError>();
+        assert!(pf.is_some(), "412 should map to PreconditionFailedError");
+        let msg = mapped.to_string();
+        assert!(msg.contains("already exists"), "got: {msg}");
+        assert!(msg.contains("s3://bucket/key"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_conditional_write_error_passes_through_unrelated_errors() {
+        let dst = super::Url::parse("s3://bucket/key").unwrap();
+        let mapped =
+            super::map_conditional_write_error(anyhow::anyhow!("AccessDenied"), &dst);
+        // Unrelated errors are returned unchanged (NOT a precondition skip).
+        assert!(mapped
+            .downcast_ref::<crate::storage::PreconditionFailedError>()
+            .is_none());
+        assert!(mapped.to_string().contains("AccessDenied"));
     }
 }

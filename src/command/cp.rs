@@ -81,6 +81,12 @@ pub struct CpArgs {
     /// directories are skipped silently. No effect on `cp`.
     #[arg(long)]
     pub remove_empty_dirs: bool,
+
+    /// Conditional write: only write the destination if it does not already
+    /// exist (S3 `If-None-Match: "*"`). An existing destination object is left
+    /// untouched and reported as skipped instead of overwritten (#752).
+    #[arg(long = "if-none-match")]
+    pub if_none_match: bool,
 }
 
 impl CpArgs {
@@ -89,6 +95,7 @@ impl CpArgs {
             storage_class: self.storage_class.clone(),
             acl: self.acl.clone(),
             content_type: self.content_type.clone(),
+            if_none_match: self.if_none_match,
             ..Default::default()
         }
     }
@@ -187,6 +194,12 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
 fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut bool) {
     match r {
         Ok(()) => crate::output::op_success(op, &s.to_string(), Some(&d.to_string())),
+        // A failed `--if-none-match` conditional write means the destination
+        // already exists: this is a skip, not a failure, so it must NOT set
+        // had_error (the overall command still succeeds) (#752).
+        Err(ref e) if e.downcast_ref::<crate::storage::PreconditionFailedError>().is_some() => {
+            eprintln!("{op} {s} {d}: object already exists, skipped");
+        }
         Err(e) => {
             *had_error = true;
             crate::output::op_error(op, &s.to_string(), Some(&d.to_string()), &format!("{e:#}"));

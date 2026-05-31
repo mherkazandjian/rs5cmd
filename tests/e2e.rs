@@ -1458,3 +1458,62 @@ fn dry_run_output_is_marked() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+/// Conditional write: `cp --if-none-match` (#752). The compose MinIO supports
+/// `If-None-Match: "*"` on PutObject and returns HTTP 412 (PreconditionFailed)
+/// when the destination object already exists, leaving it untouched. rs5cmd maps
+/// that to an "object already exists, skipped" notice, NOT a hard error. All
+/// commands here are short, blocking cp/cat/mb/rm/rb invocations (no streaming,
+/// no signals), so the suite cannot hang.
+#[test]
+fn cp_if_none_match_does_not_overwrite_existing() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let first = tmp.path().join("first.txt");
+    let second = tmp.path().join("second.txt");
+    std::fs::write(&first, b"FIRST").unwrap();
+    std::fs::write(&second, b"SECOND").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // First write creates the object with "FIRST".
+    rs5cmd()
+        .args(["cp", first.to_str().unwrap(), &s3("/k.txt")])
+        .assert()
+        .success();
+
+    // Second cp with --if-none-match must NOT overwrite and must NOT hard-fail:
+    // the existing object makes it a skip, so the command still succeeds.
+    rs5cmd()
+        .args(["cp", "--if-none-match", second.to_str().unwrap(), &s3("/k.txt")])
+        .assert()
+        .success();
+
+    // The object content is unchanged (still "FIRST") — it was not overwritten.
+    rs5cmd()
+        .args(["cat", &s3("/k.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FIRST"))
+        .stdout(predicate::str::contains("SECOND").not());
+
+    // --if-none-match to a brand-new key still writes (the no-clobber guard only
+    // skips existing objects).
+    rs5cmd()
+        .args(["cp", "--if-none-match", second.to_str().unwrap(), &s3("/fresh.txt")])
+        .assert()
+        .success();
+    rs5cmd()
+        .args(["cat", &s3("/fresh.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SECOND"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}

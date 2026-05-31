@@ -130,6 +130,21 @@ pub struct Metadata {
     pub user_defined: std::collections::HashMap<String, String>,
     /// COPY (default) or REPLACE.
     pub directive: Option<String>,
+    /// Conditional write: when true, the destination write carries
+    /// `If-None-Match: "*"`, so S3 fails with HTTP 412 (`PreconditionFailed`)
+    /// if the destination object already exists. `cp` turns that 412 into an
+    /// "object already exists, skipped" notice instead of a hard error (#752).
+    pub if_none_match: bool,
+}
+
+/// Returned by S3 write operations when a conditional write (`If-None-Match:
+/// "*"`) fails because the destination object already exists (HTTP 412). `cp`
+/// downcasts an `anyhow::Error` to this type to render an "object already
+/// exists, skipped" notice rather than treating it as a hard failure (#752).
+#[derive(Debug, Clone, thiserror::Error)]
+#[error("object already exists, skipped: {url}")]
+pub struct PreconditionFailedError {
+    pub url: String,
 }
 
 /// Configuration shared by storage backends.
