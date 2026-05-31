@@ -4,6 +4,32 @@ A classification of **every open** [peak/s5cmd](https://github.com/peak/s5cmd)
 issue and pull request, filtered for what is worth integrating into this Rust
 port (`rs5cmd`). Each item was checked against the actual rs5cmd source.
 
+> **Implementation status (2026-05-31).** All **29 confirmed genuinely-missing**
+> items have now been implemented on branch `implement-upstream-portable`, each as
+> its own commit gated by the full MinIO test suite (`docker compose run --rm test`,
+> read green before commit). Final state: **119 unit + 50 e2e tests, 0 failed**;
+> both the default build and `cargo build --features fast` (io_uring path) compile.
+>
+> | Done | Items |
+> |------|-------|
+> | Correctness fixes | #677 list control-char keys · #517 trailing-slash objects · #755 ls path consistency · #834/#861 `rm --raw` · #749 broken-symlink continue |
+> | Exit codes | #615/#863 SIGINT → exit 130 |
+> | Transfer/cmd features | #2 multi-source cp/mv · #762 `cp --all-versions` · #785 `--links` · #812 sync `--force-glacier-transfer` · #752 `--if-none-match` · #846 `mv --remove-empty-dirs` · #651 `rb --force` |
+> | Listing/UX | #655 include/exclude on ls & mv · #388 `ls --newer-than/--older-than` · #822 `ls --local-time` · #489 `tree` command · #697 dry-run marker · #88 `--color` |
+> | Throughput/infra | #433 `--limit-upload/--limit-download` · #390 RLIMIT_NOFILE · #719 `--use-dualstack-endpoint` |
+> | Multi-region cluster | #816/#514/#702/#700/#671 per-side region/endpoint + two-client copy fallback |
+>
+> **Honest caveats (MinIO-only test env):** `#858` bucket-region auto-detection was
+> **deliberately skipped** (the rest of the multi-region cluster — per-side flags +
+> two-client S3→S3 copy — landed). Real cross-region/cross-endpoint copy (#514/#700/
+> #816) and dualstack/IPv6 (#719) are **not exercised** by single-region MinIO — the
+> tests verify flag wiring + plumbing + same-endpoint regression only. SIGINT (#615/
+> #863) is **unit-tested** (the exit-code mapping), not via an e2e signal test (an
+> e2e that signalled a live transfer hung the suite during development). `ls
+> --local-time` (#822) reads the offset via libc `localtime_r` (the `time` crate's
+> `local-offset` feature wasn't in the offline build cache). Bandwidth (#433) and
+> all features avoid new crates (the Docker build registry is offline-cached).
+
 > **Coverage honesty.** An earlier version of this file called itself "a survey
 > of open issues and PRs" but in fact only deep-verified ~20 hand-picked items.
 > That wording overstated the coverage. This version replaces it: on
