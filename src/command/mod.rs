@@ -69,6 +69,16 @@ pub struct GlobalOpts {
     #[arg(long, global = true, value_parser = ["path", "virtual"])]
     pub addressing_style: Option<String>,
 
+    /// Resolve S3 endpoints to their dual-stack (IPv4 + IPv6) variant so
+    /// requests can travel over IPv6 (upstream #719). Has no effect against a
+    /// custom `--endpoint-url` (e.g. MinIO), which is used verbatim.
+    #[arg(long, global = true)]
+    pub use_dualstack_endpoint: bool,
+
+    /// Resolve S3 endpoints to their FIPS-compliant variant.
+    #[arg(long, global = true)]
+    pub use_fips_endpoint: bool,
+
     /// Route requests through a proxy: `socks5://`, `socks5h://`, `http://` or
     /// `https://[user:pass@]host:port`. Falls back to the ALL_PROXY/HTTPS_PROXY/
     /// HTTP_PROXY env vars. (Applies to the default path, not `--fast`.)
@@ -96,6 +106,8 @@ impl GlobalOpts {
             profile: self.profile.clone(),
             proxy: self.proxy.clone(),
             addressing_style: self.addressing_style.clone(),
+            use_dualstack_endpoint: self.use_dualstack_endpoint,
+            use_fips_endpoint: self.use_fips_endpoint,
             max_retries: self.retry_count,
             ..Default::default()
         }

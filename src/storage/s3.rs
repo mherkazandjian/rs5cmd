@@ -590,6 +590,18 @@ impl S3 {
             builder = builder.region(Region::new("us-east-1"));
         }
 
+        // `--use-dualstack-endpoint` (#719): resolve the dual-stack (IPv4+IPv6)
+        // S3 endpoint so traffic can use IPv6. `--use-fips-endpoint`: resolve the
+        // FIPS endpoint. Both feed the SDK endpoint-resolver via the config
+        // builder and are no-ops against a custom endpoint (used verbatim), so
+        // they fall back harmlessly when pointed at MinIO.
+        if opts.use_dualstack_endpoint {
+            builder = builder.use_dual_stack(true);
+        }
+        if opts.use_fips_endpoint {
+            builder = builder.use_fips(true);
+        }
+
         // `--no-verify-ssl`: swap in a custom HTTP client whose rustls config
         // skips certificate verification, for self-signed HTTPS endpoints. The
         // bundled `aws-smithy-http-client` TLS context can only ADD trust, not

@@ -166,6 +166,8 @@ mod tests {
             region: None,
             profile: None,
             addressing_style: None,
+            use_dualstack_endpoint: false,
+            use_fips_endpoint: false,
             proxy: None,
             numworkers: 256,
             retry_count: 10,

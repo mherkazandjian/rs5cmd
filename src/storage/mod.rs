@@ -167,6 +167,13 @@ pub struct Options {
     /// `None`, path-style is used for custom endpoints (MinIO etc.) and the SDK
     /// default (virtual-host) for real AWS — matching prior behavior.
     pub addressing_style: Option<String>,
+    /// Resolve S3 endpoints to their dual-stack (IPv4 + IPv6) variant so
+    /// requests can travel over IPv6 (upstream #719). Applied via the SDK config
+    /// builder's `use_dual_stack`. Ignored when a custom endpoint is set.
+    pub use_dualstack_endpoint: bool,
+    /// Resolve S3 endpoints to their FIPS-compliant variant. Applied via the SDK
+    /// config builder's `use_fips`. Ignored when a custom endpoint is set.
+    pub use_fips_endpoint: bool,
     /// Multipart part size in bytes. Objects larger than this are transferred
     /// in parallel parts; smaller ones use a single PUT/GET.
     pub part_size: u64,
@@ -206,6 +213,8 @@ impl Default for Options {
             region: None,
             proxy: None,
             addressing_style: None,
+            use_dualstack_endpoint: false,
+            use_fips_endpoint: false,
             part_size: DEFAULT_PART_SIZE,
             concurrency: DEFAULT_CONCURRENCY,
             preserve_timestamps: false,
@@ -244,5 +253,30 @@ pub async fn new_client(u: &Url, opts: &Options) -> anyhow::Result<Box<dyn Stora
         Ok(Box::new(s3::S3::new(u, opts).await?))
     } else {
         Ok(Box::new(fs::Filesystem::new(opts.dry_run)))
+    }
+}
+
+#[cfg(test)]
+mod dualstack_tests {
+    use super::*;
+
+    // The `--use-dualstack-endpoint` (#719) and `--use-fips-endpoint` flags
+    // default off, and an `Options` literal can opt in to either. This covers
+    // the storage-layer plumbing the flags feed into. NOTE: MinIO/custom
+    // endpoints are used verbatim by the SDK, so real dual-stack (IPv6) DNS
+    // resolution is NOT exercised by the test suite — only the wiring.
+    #[test]
+    fn options_default_dualstack_and_fips_off() {
+        let o = Options::default();
+        assert!(!o.use_dualstack_endpoint);
+        assert!(!o.use_fips_endpoint);
+
+        let o = Options {
+            use_dualstack_endpoint: true,
+            use_fips_endpoint: true,
+            ..Default::default()
+        };
+        assert!(o.use_dualstack_endpoint);
+        assert!(o.use_fips_endpoint);
     }
 }
