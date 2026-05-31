@@ -39,6 +39,8 @@ aws-credential-types = "1"
 # default build can express no-verify. `rustls`/`http` are also used by `fast`.
 # `ring` provider matches the fast path's crypto backend.
 rustls = { version = "0.23", features = ["ring"] }
+# Parse a custom CA bundle (`--ca-certs-file`) into rustls certificates.
+rustls-pemfile = "2"
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "native-tokio"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper = "1"

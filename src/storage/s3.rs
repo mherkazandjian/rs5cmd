@@ -122,16 +122,30 @@ fn is_range_not_satisfiable<E: std::fmt::Debug>(e: &E) -> bool {
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
+/// Loads a PEM bundle of CA certificates from `path` (for `--ca-certs-file`).
+fn load_ca_bundle(path: &str) -> anyhow::Result<Vec<rustls::pki_types::CertificateDer<'static>>> {
+    let pem = std::fs::read(path).map_err(|e| anyhow::anyhow!("ca-certs-file {path}: {e}"))?;
+    let certs = rustls_pemfile::certs(&mut pem.as_slice())
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| anyhow::anyhow!("parsing ca-certs-file {path}: {e}"))?;
+    if certs.is_empty() {
+        anyhow::bail!("ca-certs-file {path} contained no certificates");
+    }
+    Ok(certs)
+}
+
 /// Builds a custom HTTP client for the AWS SDK when we need behavior the
 /// bundled connector can't express: `--no-verify-ssl` (skip TLS verification
-/// for self-signed endpoints) and/or `--proxy` (route through a SOCKS5 or HTTP
-/// proxy). We assemble a hyper + hyper-rustls connector — optionally wrapping a
-/// `ProxyConnector` — and adapt it to the smithy `HttpClient` trait that
-/// `aws_sdk_s3::config::Builder::http_client` accepts.
+/// for self-signed endpoints), `--proxy` (route through a SOCKS5 or HTTP proxy),
+/// and/or `--ca-certs-file` (trust a private/self-signed CA without disabling
+/// verification). We assemble a hyper + hyper-rustls connector — optionally
+/// wrapping a `ProxyConnector` — and adapt it to the smithy `HttpClient` trait
+/// that `aws_sdk_s3::config::Builder::http_client` accepts.
 fn build_sdk_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
-) -> aws_smithy_runtime_api::client::http::SharedHttpClient {
+    ca_certs: Option<&str>,
+) -> anyhow::Result<aws_smithy_runtime_api::client::http::SharedHttpClient> {
     use aws_smithy_runtime_api::client::http::SharedHttpClient;
     use hyper_rustls::HttpsConnectorBuilder;
     use hyper_util::client::legacy::Client;
@@ -144,6 +158,7 @@ fn build_sdk_http_client(
     let provider = Arc::new(rustls::crypto::ring::default_provider());
 
     let tls = if no_verify {
+        // Verification disabled — a custom CA bundle would be moot, so skip it.
         rustls::ClientConfig::builder_with_provider(provider.clone())
             .with_safe_default_protocol_versions()
             .expect("rustls safe default protocol versions")
@@ -153,6 +168,15 @@ fn build_sdk_http_client(
     } else {
         let mut roots = rustls::RootCertStore::empty();
         roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        // `--ca-certs-file`: trust additional (e.g. private/self-signed) CAs on
+        // top of the bundled webpki roots.
+        if let Some(path) = ca_certs {
+            for cert in load_ca_bundle(path)? {
+                roots
+                    .add(cert)
+                    .map_err(|e| anyhow::anyhow!("adding ca-certs-file cert: {e}"))?;
+            }
+        }
         rustls::ClientConfig::builder_with_provider(provider)
             .with_safe_default_protocol_versions()
             .expect("rustls safe default protocol versions")
@@ -170,7 +194,7 @@ fn build_sdk_http_client(
                 .build();
             let client: Client<_, aws_smithy_types::body::SdkBody> =
                 Client::builder(TokioExecutor::new()).build(https);
-            SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) })
+            Ok(SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) }))
         }
         Some(p) => {
             let https = HttpsConnectorBuilder::new()
@@ -181,7 +205,7 @@ fn build_sdk_http_client(
                 .wrap_connector(ProxyConnector { proxy: p });
             let client: Client<_, aws_smithy_types::body::SdkBody> =
                 Client::builder(TokioExecutor::new()).build(https);
-            SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) })
+            Ok(SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) }))
         }
     }
 }
@@ -620,8 +644,12 @@ impl S3 {
         // (the bundled connector supports neither). When neither is requested we
         // leave the SDK's default client in place.
         let proxy_cfg = effective_proxy(opts)?;
-        if opts.no_verify_ssl || proxy_cfg.is_some() {
-            builder = builder.http_client(build_sdk_http_client(opts.no_verify_ssl, proxy_cfg));
+        if opts.no_verify_ssl || proxy_cfg.is_some() || opts.ca_certs_file.is_some() {
+            builder = builder.http_client(build_sdk_http_client(
+                opts.no_verify_ssl,
+                proxy_cfg,
+                opts.ca_certs_file.as_deref(),
+            )?);
         }
 
         Ok(S3 {

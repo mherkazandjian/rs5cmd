@@ -180,6 +180,11 @@ pub struct Options {
     /// `None`, path-style is used for custom endpoints (MinIO etc.) and the SDK
     /// default (virtual-host) for real AWS — matching prior behavior.
     pub addressing_style: Option<String>,
+    /// Path to a PEM bundle of additional trusted CA certificates
+    /// (`--ca-certs-file`, or s3cmd's `ca_certs_file`). When set, its certs are
+    /// added to the TLS root store so private/self-signed CAs validate without
+    /// disabling verification. Ignored when `no_verify_ssl` is set.
+    pub ca_certs_file: Option<String>,
     /// Resolve S3 endpoints to their dual-stack (IPv4 + IPv6) variant so
     /// requests can travel over IPv6 (upstream #719). Applied via the SDK config
     /// builder's `use_dual_stack`. Ignored when a custom endpoint is set.
@@ -236,6 +241,7 @@ impl Default for Options {
             destination_endpoint: None,
             proxy: None,
             addressing_style: None,
+            ca_certs_file: None,
             use_dualstack_endpoint: false,
             use_fips_endpoint: false,
             part_size: DEFAULT_PART_SIZE,

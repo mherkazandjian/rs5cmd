@@ -85,7 +85,7 @@ async fn run_line(global: &GlobalOpts, line: &str, lineno: usize) -> anyhow::Res
         super::Cli::try_parse_from(&argv).map_err(|e| anyhow::anyhow!("line {lineno}: {e}"))?;
 
     // s5cmd disallows `run` nested inside a run file.
-    if matches!(cli.command, super::Command::Run(_)) {
+    if matches!(cli.command, Some(super::Command::Run(_))) {
         anyhow::bail!("nested run is not supported (line {lineno})");
     }
 
@@ -139,6 +139,21 @@ fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
     argv.push(global.numworkers.to_string());
     argv.push("--retry-count".to_string());
     argv.push(global.retry_count.to_string());
+    // Compat flags that affect per-command behavior must propagate too.
+    // (`--limitrate` builds a fresh per-command limiter; the aggregate cap is
+    // therefore per sub-command, matching how main treats limit-upload/download.)
+    if let Some(ca) = &global.ca_certs_file {
+        argv.push("--ca-certs-file".to_string());
+        argv.push(ca.clone());
+    }
+    if let Some(rp) = &global.request_payer {
+        argv.push("--request-payer".to_string());
+        argv.push(rp.clone());
+    }
+    if let Some(rate) = &global.limitrate {
+        argv.push("--limitrate".to_string());
+        argv.push(rate.clone());
+    }
 
     argv.extend(tokens.iter().cloned());
     argv
@@ -178,6 +193,12 @@ mod tests {
             color: crate::command::ColorMode::Auto,
             limit_upload: None,
             limit_download: None,
+            limitrate: None,
+            ca_certs_file: None,
+            request_payer: None,
+            credentials_file: None,
+            s3cfg: None,
+            install_completion: false,
         }
     }
 
