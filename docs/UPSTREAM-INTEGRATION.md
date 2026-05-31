@@ -1,166 +1,210 @@
 # Upstream integration triage
 
-A survey of [peak/s5cmd](https://github.com/peak/s5cmd) **open issues**, **open
-PRs**, and **recently-merged work**, filtered for things worth integrating into
-this Rust port. Compiled on branch `integrate-upstream` (2026-05-30).
+A classification of **every open** [peak/s5cmd](https://github.com/peak/s5cmd)
+issue and pull request, filtered for what is worth integrating into this Rust
+port (`rs5cmd`). Each item was checked against the actual rs5cmd source.
 
-Each item is filtered against what rs5cmd **already implements** (the 14
-commands, all-direction transfers, multipart, ranged download, sync strategies,
-versioning, `--json`, retries, `--no-verify-ssl`, the io_uring fast path, …) and
-against the previously agreed **out-of-scope** list (bucket policy/tagging/
-lifecycle, byte-level progress bars, real-AWS test coverage, and `cp`
-arbitrary-metadata flags).
+> **Implementation status (2026-05-31).** All **29 confirmed genuinely-missing**
+> items have now been implemented on branch `implement-upstream-portable`, each as
+> its own commit gated by the full MinIO test suite (`docker compose run --rm test`,
+> read green before commit). Final state: **119 unit + 50 e2e tests, 0 failed**;
+> both the default build and `cargo build --features fast` (io_uring path) compile.
+>
+> | Done | Items |
+> |------|-------|
+> | Correctness fixes | #677 list control-char keys · #517 trailing-slash objects · #755 ls path consistency · #834/#861 `rm --raw` · #749 broken-symlink continue |
+> | Exit codes | #615/#863 SIGINT → exit 130 |
+> | Transfer/cmd features | #2 multi-source cp/mv · #762 `cp --all-versions` · #785 `--links` · #812 sync `--force-glacier-transfer` · #752 `--if-none-match` · #846 `mv --remove-empty-dirs` · #651 `rb --force` |
+> | Listing/UX | #655 include/exclude on ls & mv · #388 `ls --newer-than/--older-than` · #822 `ls --local-time` · #489 `tree` command · #697 dry-run marker · #88 `--color` |
+> | Throughput/infra | #433 `--limit-upload/--limit-download` · #390 RLIMIT_NOFILE · #719 `--use-dualstack-endpoint` |
+> | Multi-region cluster | #816/#514/#702/#700/#671 per-side region/endpoint + two-client copy fallback |
+>
+> **Honest caveats (MinIO-only test env):** `#858` bucket-region auto-detection was
+> **deliberately skipped** (the rest of the multi-region cluster — per-side flags +
+> two-client S3→S3 copy — landed). Real cross-region/cross-endpoint copy (#514/#700/
+> #816) and dualstack/IPv6 (#719) are **not exercised** by single-region MinIO — the
+> tests verify flag wiring + plumbing + same-endpoint regression only. SIGINT (#615/
+> #863) is **unit-tested** (the exit-code mapping), not via an e2e signal test (an
+> e2e that signalled a live transfer hung the suite during development). `ls
+> --local-time` (#822) reads the offset via libc `localtime_r` (the `time` crate's
+> `local-offset` feature wasn't in the offline build cache). Bandwidth (#433) and
+> all features avoid new crates (the Docker build registry is offline-cached).
 
-Effort: **S** = a few hours, **M** = a day-ish, **L** = multi-day. Numbers are
-upstream issue (`#`) / PR (`PR#`) references.
+> **Coverage honesty.** An earlier version of this file called itself "a survey
+> of open issues and PRs" but in fact only deep-verified ~20 hand-picked items.
+> That wording overstated the coverage. This version replaces it: on
+> **2026-05-30** all open items were pulled straight from the GitHub API
+> (`gh issue list` / `gh pr list`) and **every one** was classified by a
+> source-reading agent, with each "portable" candidate re-checked by a second,
+> adversarial agent. Integrity check: the 184 classified numbers exactly equal
+> the 184 numbers GitHub returned — none invented, none missed, no duplicates.
 
----
-
-## Round 2 (2026-05-30): open-PR feature batch
-
-A second pass implemented a batch of good ideas from upstream **open PRs**.
-Implemented (each with MinIO e2e tests):
-
-| PR | Feature | Where |
-|----|---------|-------|
-| #795 ✅ | `--addressing-style path\|virtual` | `command/mod.rs`, `storage/s3.rs` |
-| #776 ✅ | skip non-regular files (sockets/FIFOs/devices) in the local walk | `storage/fs.rs` |
-| #534 ✅ | `--preserve-timestamps` (mtime ↔ object metadata) | `cp.rs`, `sync.rs`, `storage/s3.rs` |
-| #671 ✅ | `--client-copy` (remote→remote via download+upload) | `cp.rs`, `storage/s3.rs` |
-| #799 ✅ | `sync --checksum` (compare MD5/ETag) | `sync_strategy.rs`, `sync.rs` |
-| #823 ✅ | `--proxy`/`-x` SOCKS5 + HTTP-CONNECT proxy (env fallback) | `storage/s3.rs`, `command/mod.rs` |
-
-The proxy work adds a custom `tower` connector (SOCKS5 via `tokio-socks`,
-HTTP `CONNECT` hand-rolled) wrapped by hyper-rustls and adapted to the SDK's
-`http_client` hook, generalizing the former no-verify-only client builder. A
-`socks5` + `test-proxy` docker-compose pair routes the `proxy_socks5_transfer`
-e2e test through a real SOCKS5 proxy (`docker compose run --rm test-proxy`); it
-self-skips in the plain `test` service. **Limitation:** proxy applies only to
-the default transport, not the io_uring `--fast` path (monoio-transports has its
-own connector).
-
-Checked and found **already handled or not applicable** (no code change):
-
-| PR | Finding |
-|----|---------|
-| #847 — `--profile` full chain | **Already handled.** `S3::new` (and the fast path's `resolve_credentials`) call `aws_config::defaults(...).profile_name(p)`, which uses the full shared-config provider chain — SSO, assume-role, web-identity — not just `~/.aws/credentials`. The Go bug was specific to s5cmd's own loader. |
-| #683 — renew session token on expiry | **Handled on the SDK path:** the default credentials cache (`BehaviorVersion::latest`) refreshes expired temporary credentials automatically. *Limitation:* the io_uring fast path resolves credentials once at startup and signs with the static keys, so a very long fast-path run with short-lived creds would not refresh — acceptable for its small-object-burst use case; noted here for the record. |
-| #761 — shell-quoting of special-char filenames | **Not applicable.** rs5cmd's `sync` never serializes filenames into shell command strings — it calls the copy/delete paths in-process with `Url`/`PathBuf`. `run` parses input with `shell_words` (correct shell parsing). The Go `%q` quoting bug has no analogue here. |
-| #567 — server time for List | **Not worth a dedicated change.** The clock-skew re-copy concern it targets is now better addressed by the new `sync --checksum` (#799, content-based) and the existing `--size-only` (deterministic); the same-second-truncation caveat is already documented. |
-| #843 — explicit up/download buffers | **Already covered** by `--part-size` (the multipart/ranged chunk size) and `--concurrency` (parallel parts), which are the tunables the PR asks for; a separate buffer flag would be redundant. |
+Snapshot counts at triage time: **139 open issues + 45 open PRs = 184 items.**
 
 ---
 
-## Audit (2026-05-30): Tier 1 / easy bugs were checked and are NOT ported
+## 1. Coverage matrix (all 184 items)
 
-Before integrating anything, every "obvious and easy" Tier-1 bug (plus the easy
-formatting/stream items) was verified against the actual rs5cmd source. **None
-of them are reproduced in this port** — the Rust implementation already avoids
-each one, so no fix was warranted:
+| Category | Count | Meaning |
+|----------|------:|---------|
+| `NOT_APPLICABLE`     | 52 | Go-specific, packaging, CI, questions, support threads, docs-only, duplicates |
+| `BUG_NOT_PRESENT`    | 41 | An upstream bug that **rs5cmd already avoids** (Rust design / already-correct) |
+| `PORTABLE_MISSING`   | 30 | A genuine, in-scope capability rs5cmd lacks |
+| `OUT_OF_SCOPE`       | 29 | Conflicts with the agreed out-of-scope list (tagging, SSE-C, progress bars, packaging, …) |
+| `ALREADY_IMPLEMENTED`| 24 | rs5cmd already does this |
+| `BUG_PRESENT`        |  8 | An upstream bug **faithfully reproduced** in rs5cmd |
+| **Total**            | **184** | |
 
-| Upstream bug | rs5cmd status | Evidence |
-|--------------|---------------|----------|
-| #751 / #698 — silent drop on listing error → data loss | already safe | `collect_source_objects` returns `Err` on any listing error (`sync.rs:421-428`); `collect_dest_objects` propagates non-"not found" errors (`sync.rs:475-488`). No silent `continue`. |
-| #869 / #824 / #852 — sync exits 0 despite errors | already correct | `sync.rs:281-283`: `if had_error { bail!(…) }`, unconditional (not gated on `--exit-on-error`, which only controls early abort). |
-| #815 — `sync --delete` ignores `--exclude` | already correct | include/exclude filters applied to *both* source and dest listings (`sync.rs:437`, `:494`); the delete set is built from the already-filtered `dest_objects` (`sync.rs:153-159`). |
-| #838 — panic on missing source stat | already safe | `sync_strategy.rs:62-69` treats unknown timestamps as `UNIX_EPOCH` via `.unwrap_or(…)`; no `unwrap()` to panic. |
-| #804 / #860 — errors/logs on stdout | already correct | `op_error` → `eprintln!` (`output.rs:58-61`), run summary → stderr (`sync.rs:278`), tracing → stderr (`main.rs:14`). Payload/JSON only on stdout. |
-| #817 — `--humanize` missing byte suffix | already correct | `ls.rs:232-235` uses `humansize::BINARY` (renders `B`/`KiB`). |
+The 30 `PORTABLE_MISSING` + 8 `BUG_PRESENT` = **38 portable candidates** were
+each handed to an adversarial verifier (default-skeptic: *prove it's already
+handled*). The verifier **downgraded 8** of them and **confirmed 29** as
+genuinely worth doing (one bug, #834, folds into its own PR #861, so 38 = 29
+confirmed + 8 downgraded + 1 folded).
 
-The remaining work below is therefore genuine new behavior (Tier 2/3) rather
-than ported-bug fixes.
+### Adversarially downgraded (initial triage thought portable → proven otherwise)
 
----
+These are the confidence payoff of the second pass — flagged as gaps, then
+disproven against the source:
 
-## Tier 1 — Correctness & data-safety
-
-The most valuable cluster. These are *bugs in the Go tool* that a fresh Rust
-port can get right and lock in with MinIO regression tests. Cheap, high-trust.
-
-| Item | Refs | What's wrong upstream | What rs5cmd should do |
-|------|------|------------------------|------------------------|
-| **Silent drop on listing error** | #751 | A UTF-8/listing/pagination error truncates the object list; `cp`/`sync` skip files yet exit 0. Reported data loss on a 50 TB transfer. | Lister must surface decode/pagination errors loudly (abort or log+continue), never silently shorten the result set. |
-| **sync exits 0 on error** | #869, #824, #852 | Bad path/region prints `ERROR` but the process returns 0, breaking CI/scripts. | Any per-job error propagates to a non-zero exit; audit `--exit-on-error` semantics. |
-| **`sync --delete` ignores `--exclude`** | #815 | Excluded destination files are deleted anyway (diverges from `aws s3 sync`). | The delete pass must apply the same include/exclude filters as the copy pass. |
-| **`sync --delete` wipes dest when source list fails** | PR#698 | A swallowed listing/network error yields an empty source set, which `--delete` treats as "delete everything." | Never treat a *failed* listing as an authoritative empty source; abort the delete phase on listing error. |
-| **stdout/stderr hygiene** | #804, PR#860 | Errors/usage/logs go to stdout, corrupting `cat`/`pipe` pipelines and `--json`. | All diagnostics → stderr; only payload/`--json` → stdout. |
-| **Panic on override stat failure** | PR#838 | With size/modtime override, a swallowed not-found on the *source* stat causes a nil deref. | Guard the size+modtime compare against a missing source stat (likely an `unwrap()`/`None` in `sync_strategy`). |
-| **`--max-delete N` safety cap** ✅ DONE | PR#699 | No guard against a runaway `--delete`. | rsync-style cap on number of deletions; natural companion to the `--delete` fixes. **Implemented** in `sync.rs`: aborts before any copy/delete if the delete set exceeds N; e2e test `sync_max_delete_aborts_without_touching_anything`. |
-
-**Recommended first PR.** Bundle these as one "sync/listing correctness +
-exit-code/stream hygiene" change with targeted MinIO tests for each.
+| # | Title | Re-verdict | Why |
+|---|-------|-----------|-----|
+| #690 | Extended character support for S3-compatible backend | already-present | no over-strict bucket-name regex exists in rs5cmd |
+| #694 | endpoint_url in config file | already-present | endpoint resolution already covers it |
+| #695 | sync --delete wipes dest on source error | already-present | rs5cmd aborts on source-listing error before --delete runs |
+| #707 | rm doesn't delete 0-byte folder placeholders | already-present | rs5cmd's lister/expander does not drop trailing-slash keys |
+| #824 | sync silently fails on wrong-region bucket | already-present | sync surfaces the error and exits non-zero |
+| #826 | cp fails with "chmod operation not permitted" | already-present | rs5cmd does not unconditionally chmod on download |
+| #827 | --exclude doesn't work on filenames as expected | already-present | filter semantics match upstream's documented behavior |
+| #696 | retry on multipart signature auth error | out-of-scope | upstream never implemented it; auto-retrying 403 masks real cred/clock faults |
 
 ---
 
-## Tier 2 — Genuine capability gaps
+## 2. Confirmed worklist — 29 genuinely-missing, in-scope items
 
-Real missing behavior (not just polish).
+Verified present-as-gap by reading the rs5cmd source. Effort: **S** ≈ hours,
+**M** ≈ a day. None are started; this is the menu, not a record of work done.
 
-| Item | Refs | Gap | Effort |
-|------|------|-----|--------|
-| **Multipart server-side copy > 5 GiB** ✅ DONE | PR#856 | Plain `CopyObject` fails on sources > 5 GiB; rs5cmd's S3→S3 `cp`/`mv` had this exact gap. **Implemented** in `s3.rs`: a single `CopyObject` is tried first, and on the 5 GiB `EntityTooLarge` error it falls back to multipart `UploadPartCopy` (part size auto-grown to stay within the 10k-part limit, source content-type carried over). e2e test `s3_to_s3_multipart_copy_for_large_source` forces the path via `RS5CMD_MULTIPART_COPY_THRESHOLD` and byte-verifies the copy. | M |
-| **Skip per-object HEAD when no progress bar** | PR#793 | Remote→local `cp` issues an extra HEAD per object just to size the bar; wasteful when no bar is shown. Clean perf/cost win that complements the io_uring fast path. | S |
-| **Full `--profile` credential chain** | PR#847 | `--profile` should use the shared-config chain (SSO, assume-role), not just `~/.aws/credentials`. | S |
-| **Session-token renewal on expiry** | PR#683 | Long-running jobs with web-identity creds fail on `ExpiredToken`; re-read the projected-token file. Relevant only for very long transfers. | M |
-| **Glacier transfer controls** | v2.0.0 | rs5cmd hard-errors on Glacier objects with no override; add `--force-glacier-transfer` / `--ignore-glacier-warnings`. | M |
+### 2a. Correctness bugs faithfully ported from upstream (highest trust-per-line)
+
+| # | Gap | Fix sketch | Effort |
+|---|-----|-----------|:--:|
+| #677 | List **deserialization fails on keys with XML-illegal control chars** (the `SerializationError: failed to decode REST XML 200`). All three list paths omit `EncodingType=url`. | Add `.encoding_type(Url)` to `list_v2`/`list_objects_v1`/`list_object_versions` and percent-decode echoed keys/prefixes **and pagination markers** (not the opaque V2 token). `src/storage/s3.rs` | M |
+| #517 | **Keys ending in `/`** (S3-console "directory" marker objects) are misclassified as directories in the `Contents`/`Versions` loops, so they can't be `cp`/`cat`/`ls`'d as objects. | Treat only `CommonPrefixes` entries as `Dir`; a real object key (has ETag/size) is a `File` even if it ends `/`. `src/storage/s3.rs` | M |
+| #755 | `ls` emits **both absolute and relative paths** in one listing: an object whose key equals the prefix prints absolute, siblings print relative. | Drop the `key == prefix` special-case in `parse_non_batch`. `src/storage/url.rs` (*upstream #755 is itself unresolved — fixing it diverges from Go behavior; confirm parity-vs-fix*). | S |
+| #834 / #861 | **`rm` can't delete DIROBJ objects** (trailing `/`): `is_prefix()` rejects them. Upstream's own fix PR is #861 (a `--raw` flag). | Add `rm --raw` → route through single-object `delete()`. `src/command/rm.rs`, `src/storage/url.rs` | S |
+| #749 | A **broken/dangling symlink** during the local walk aborts the whole transfer and the error doesn't name the link. | In `walk_dir` name the offending path and `continue` instead of `return`. `src/storage/fs.rs` | S |
+
+### 2b. Exit-code correctness
+
+| # | Gap | Fix sketch | Effort |
+|---|-----|-----------|:--:|
+| #615 / #863 | **No SIGINT handling** — Ctrl-C doesn't return POSIX exit code 130. (#863 is upstream's fix PR for #615.) | `tokio::select!` `command::run` against `ctrl_c()`, return `ExitCode::from(130)`, ideally cancel in-flight transfers. `src/main.rs` | S |
+
+### 2c. New transfer / command capabilities
+
+| # | Gap | Effort |
+|---|-----|:--:|
+| #2 | **Multiple local sources** in one `cp`/`mv` (`cp f1 f2 f3 dst/`); `CpArgs` holds single `src`/`dst` today. | M |
+| #762 | `cp --all-versions` of a single key (route through the ListObjectVersions path; disambiguate dest by version id). | M |
+| #785 | rclone-style `--links` — round-trip symlinks as placeholder objects. | M |
+| #812 | `--force-glacier-transfer` on **sync** (cp already errors on Glacier; sync just skips). | M |
+| #752 | Conditional write `--if-none-match` (S3 `If-None-Match: *`, map 412 → "skipped"). | M |
+| #846 | `mv --remove-empty-dirs` (prune source dirs emptied by a local→remote move). | S |
+| #651 | `rb --force` (empty the bucket, then delete). | S |
+
+### 2d. Multi-region / multi-endpoint cluster (shares one design)
+
+rs5cmd builds a **single** S3 client from one region/endpoint/profile and shares
+it for both sides of a copy/sync. These all want per-side config and/or
+bucket-region auto-detection:
+
+| # | Gap | Effort |
+|---|-----|:--:|
+| #858 | sync region handling + **bucket-region auto-detect** (PR). | M |
+| #816 | sync not respecting region flags (per-side region). | M |
+| #514 | `cp` per-side `--source-region`/`--destination-region`. | M |
+| #702 | `ls`/implied lists respect a region argument (per-side region). | M |
+| #700 | per-side `--source-endpoint-url`/`--destination-endpoint-url`. | M |
+| #671 | per-side region/profile/endpoint/no-verify for `--client-copy` (base feature already done). | M |
+
+### 2e. Listing / filtering UX
+
+| # | Gap | Effort |
+|---|-----|:--:|
+| #655 | `--include`/`--exclude` (+ `-from`) on **ls and mv** (promote rm's `Filters` helper to a shared module). | M |
+| #388 | `ls --newer-than`/`--older-than` client-side LastModified filter. | M |
+| #822 | `ls --local-time` (render timestamps in local tz; keep UTC default). | S |
+| #489 | `tree` command (hierarchical listing with box-drawing connectors). | M |
+
+### 2f. Throughput / ergonomics
+
+| # | Gap | Effort |
+|---|-----|:--:|
+| #433 | `--limit-upload`/`--limit-download` bandwidth cap (shared token bucket across workers). | M |
+| #390 | RLIMIT_NOFILE awareness: raise the soft limit and/or warn before EMFILE. | M |
+| #719 | `--use-dualstack-endpoint` (IPv6) (+ optional `--use-fips-endpoint`). | S |
+| #697 | Dry-run **indicator** in output (`(dry-run)` prefix / `"dryRun": true`) at the `op_success` choke point. | S |
+| #88  | `--color auto\|always\|never` styling for ls/du/errors. | M |
 
 ---
 
-## Tier 3 — Low-effort parity features
+## 3. Already implemented (24) — no action
 
-Small, well-scoped, mostly additive.
+#29 (>5 GiB bucket-to-bucket copy) · #152 (MD5/hash overwrite) · #532, #534
+(preserve timestamps) · #561, #799 (sync by hash) · #571 (assume-role profile) ·
+#670 (external/in-cloud S3-compatible copy) · #699 (max-delete) · #758 (sync
+s3→s3) · #771 (fish completion) · #776 (exclude non-regular files) · #792, (and
+out-of-scope #793) (skip HEAD when no progress bar) · #794, #795 (virtual-host
+addressing) · #796 (sync "nothing to do" message) · #809 (Tencent COS = custom
+endpoint) · #823 (SOCKS5 proxy) · #830 (multipart chunk size) · #844 (parallel
+rm) · #847 (--profile full chain) · #850 (`ls --start-after`) · #856 (>5 GiB
+multipart copy) · #868 (`--exclude-from`/`--include-from`).
 
-| Item | Refs | Notes | Effort |
-|------|------|-------|--------|
-| `ls --show-fullpath` ✅ DONE | PR#599/#601 | Prints absolute s3:// path, suppresses columns; script/`xargs`-friendly. Implemented in `ls.rs`. | S |
-| `ls --start-after` ✅ DONE | PR#850 | `ListObjectsV2 StartAfter` (V1 `Marker`) plumbed through `Url`/`UrlOptions` into both list paths. | S |
-| `sync` "nothing to sync" message ✅ DONE | #796 | sync already printed a run summary on stderr; now says "nothing to sync" explicitly when no copies/deletes occurred. (Byte-level progress is out of scope; op-count progress bars already exist.) | S |
-| `--exclude-from` / `--include-from` ✅ DONE | #868 | `sync` and `rm` read extra filter globs from files (one per line; blank lines and `#` comments ignored), combined with inline `--include`/`--exclude`. | S |
-| Exit code 130 on SIGINT | PR#863 | POSIX-correct Ctrl-C exit code. Not yet done. | S |
-| Shell completion ✅ DONE | v2.1.0 | `completion <shell>` subcommand via `clap_complete` (bash/zsh/fish/powershell/elvish). | S |
-| `ls` local-timezone timestamps | #822, #845 | Optional flag to show local tz like aws-cli. | S |
-| `--humanize` byte suffix | #817 | Print `B` suffix for sub-KiB sizes. | S |
-| Addressing-style toggle | #794, PR#795 | `--addressing-style path|virtual` for S3-compatible providers. | S/M |
-| Proxy support | PR#823 | `--proxy`/`-x` SOCKS5/HTTP(S); mostly HTTP-client config in Rust. | M |
-| Skip non-regular files | PR#776 | Don't error on sockets/pipes/devices during cp/sync walk. | S |
-| Global `--stat` summary | v1.2.0 | Print op-count/error totals at the end. | M |
-| Download integrity verification | #829 | Optional checksum (ETag/CRC) validation after download — a credible rs5cmd differentiator. | M |
+## 4. Upstream bugs NOT reproduced in rs5cmd (41) — no action
 
----
+Verified the Rust port already avoids each. Highlights: #751 (silent-drop on
+listing UTF error — rs5cmd aborts), #869/#824/#852 (sync exits 0 on error —
+rs5cmd bails non-zero), #815 (sync --delete ignores --exclude — rs5cmd filters
+both sides), #838 (panic on missing stat — guarded), #804/#851/#860 (logs on
+stdout — rs5cmd uses stderr), #817 (humanize byte suffix — already correct),
+#521/#728/#761 (special-char filename quoting — rs5cmd never serializes to a
+shell string), #542 (sha256 header on copy), #319/#400 (Go thread-limit
+crashes), #683/#678/#526 (token expiry — SDK auto-refreshes), #718 (--no-clobber
+semantics), #744 (umask), #791/#810 (local dest mkdir), #545/#554/#660/#667/
+#681/#689/#691/#698/#709/#715/#775/#802/#807/#831/#845/#519/#520/#649/#839.
 
-## Deferred — conflicts with current scope
+## 5. Out of scope (29) — no action without a scope change
 
-These overlap the agreed out-of-scope cp-metadata work; listed for completeness
-only, **not** recommended without a scope change:
+Object tagging #803 · SSE-C #808 · `--metadata-directive` default #813 · GCS
+SSE-CSEK #592 · per-object storage class #837 · GrantRead #515 · preserve perms
+#350 · KMS cross-account #865 · mimetype guess toggle #673 · progress-bar items
+#680/#688/#787/#784/#753/#793/#853 · log-to-file #723 · pre-signed upload #754 ·
+s3tar #750 · 1-depth wildcard #540 · HTTP/3 QUIC #557/#560 · packaging
+#687/#703/#783/#786/#866 · Go/SDK/EKS upgrades #769/#848.
 
-- **`--metadata-directive` (COPY/REPLACE) + content-type propagation on S3→S3
-  copy** (PR#668, PR#739). Note the storage layer already references
-  `metadata_directive`; only `cp.rs` lacks the flag. The *content-type drop on
-  server-side copy* (#739) is arguably a correctness bug rather than a feature,
-  if you want to reclassify it into Tier 1.
-- Plumbing `--content-encoding` / `--content-disposition` / `--cache-control` /
-  `--expires` into `cp` (already wired for `pipe`).
-- Object tagging (#803), per-object storage class (#837), SSE-C (#808),
-  timestamp-preservation metadata (PR#534).
+## 6. Not applicable (52) — no action
 
----
-
-## Excluded (already done, packaging, or non-portable)
-
-Already in rs5cmd: glacier-skip in sync (#712), relative-key sync matching
-(#676), S3→S3 multipart copy basics, versioning, dry-run, retries, multiple
-wildcard sources (#2). Non-portable / out of scope: AWS SDK v2 upgrade (#832),
-Go-toolchain CVE rebuilds (#805/#820/#835), Ubuntu PPA / pip wheels
-(#786/#703), Go-only channel-direction fix (PR#864), HTTP/3 QUIC (#560).
+Questions/support (#414/#418/#454/#528/#531/#551/#575/#674/#679/#686/#693/#720/
+#725/#741/#743/#745/#746/#748/#765/#797/#800/#819/#821/#829/#855), docs/CI/typos
+(#499/#499/#585/#584/#701/#706/#773/#774/#780/#781/#828/#840/#857), Go-only
+internals & toolchain/CVE/arch (#488/#805/#818/#820/#825/#832/#835/#841/#842/
+#859/#862/#864/#867/#839/#867), MRAP #821.
 
 ---
 
-## Suggested sequencing
+## Appendix — methodology & prior rounds
 
-1. **Tier 1 correctness bundle** — one change, one test per bug. Highest
-   trust-per-line; nothing here is large.
-2. **#856 (>5 GiB copy)** and **PR#793 (skip HEAD)** — the two Tier-2 items that
-   are both small and clearly worth it.
-3. **PR#847 (`--profile` chain)** — foundational auth correctness.
-4. Cherry-pick Tier 3 by demand (`ls --show-fullpath`, sync progress, and shell
-   completion are the most-requested).
+This exhaustive sweep was run as a multi-agent workflow: 16 parallel classifier
+agents (one per ~12-item chunk, each grepping/reading `rs5cmd/src`), then
+per-candidate adversarial verifiers. Raw results were integrity-checked against
+the `gh` item list before this summary was written.
+
+The earlier hand-picked rounds (still valid, now subsumed by the matrix above)
+implemented and MinIO-tested: `--max-delete` (#699), >5 GiB multipart copy
+(#856), HEAD-less download (#792), Tier-3 parity (`ls --show-fullpath`/
+`--start-after`, `--exclude-from`/`--include-from`, shell completion),
+`--addressing-style` (#795), skip non-regular files (#776),
+`--preserve-timestamps` (#534), `--client-copy` (#671 base), `sync --checksum`
+(#799), and `--proxy`/`-x` SOCKS5 + HTTP-CONNECT (#823). Those audits also
+confirmed #847/#683/#761/#567/#843 as already-handled or not-applicable —
+consistent with the matrix here.

@@ -8,5 +8,7 @@ pub mod fastpath;
 pub mod mount;
 pub mod output;
 pub mod progress;
+pub mod ratelimit;
+pub mod rlimit;
 pub mod storage;
 pub mod strutil;

@@ -6,7 +6,9 @@ use std::path::Path;
 use async_trait::async_trait;
 use aws_sdk_s3::config::{BehaviorVersion, Region};
 use aws_sdk_s3::primitives::ByteStream;
-use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart, Delete, ObjectIdentifier};
+use aws_sdk_s3::types::{
+    CompletedMultipartUpload, CompletedPart, Delete, EncodingType, ObjectIdentifier,
+};
 use aws_sdk_s3::Client;
 use aws_smithy_types::byte_stream::Length;
 use futures::stream::{self, StreamExt};
@@ -17,6 +19,7 @@ use super::{
     Bucket, Metadata, NoObjectFound, Object, ObjectNotFound, ObjectType, Options, StorageClass,
     Storage,
 };
+use crate::ratelimit::RateLimiter;
 
 /// Max keys per DeleteObjects request (S3 API limit).
 const DELETE_CHUNK_SIZE: usize = 1000;
@@ -41,10 +44,68 @@ fn is_copy_source_too_large(e: &anyhow::Error) -> bool {
     m.contains("larger than the maximum allowable size") || m.contains("entitytoolarge")
 }
 
+/// True if a write error is a failed conditional write (`If-None-Match: "*"`
+/// against an existing object -> HTTP 412 `PreconditionFailed`). Matched
+/// case-insensitively against the full Debug/Display chain so it is robust
+/// across SDK error shapes (#752).
+fn is_precondition_failed<E: std::fmt::Debug>(e: &E) -> bool {
+    let m = format!("{e:?}").to_ascii_lowercase();
+    m.contains("preconditionfailed") || m.contains("precondition failed")
+}
+
+/// Maps an SDK write error to a typed [`crate::storage::PreconditionFailedError`]
+/// when it is a 412 `PreconditionFailed` (failed `If-None-Match`), so callers can
+/// treat it as "object already exists, skipped" instead of a hard error (#752);
+/// otherwise returns the original error unchanged.
+fn map_conditional_write_error(e: anyhow::Error, dst: &Url) -> anyhow::Error {
+    if is_precondition_failed(&e) {
+        anyhow::Error::new(crate::storage::PreconditionFailedError { url: dst.to_string() })
+    } else {
+        e
+    }
+}
+
 /// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
 /// header value (the part after the final `/`).
 fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
     cr?.rsplit('/').next()?.trim().parse::<u64>().ok()
+}
+
+/// Percent-decodes a string echoed back by S3 when the list request was made
+/// with `EncodingType=Url`. We must request URL encoding so that keys containing
+/// XML-illegal control characters (e.g. ESC `0x1b`) can be represented in the
+/// XML response and deserialized at all (upstream s5cmd #677); the echoed keys,
+/// prefixes and pagination markers then have to be decoded back to their raw
+/// bytes before use. `%XX` sequences are decoded as bytes and the result is
+/// interpreted as UTF-8 (lossily, to never panic on malformed input); a lone or
+/// malformed `%` is left verbatim.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        // A '%' followed by two hex digits decodes to a single byte.
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push((h << 4) | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Returns the numeric value of an ASCII hex digit, or `None` if not hex.
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// True if a GetObject error indicates the requested range was not satisfiable
@@ -472,6 +533,12 @@ pub struct S3 {
     /// multipart-copy path can be exercised in tests without a 5 GiB object.
     multipart_copy_threshold: u64,
     preserve_timestamps: bool,
+    /// Aggregate upload bandwidth cap (`--limit-upload`), shared across all
+    /// workers (Arc). `None` means no upload throttling (#433).
+    upload_limiter: Option<std::sync::Arc<RateLimiter>>,
+    /// Aggregate download bandwidth cap (`--limit-download`), shared across all
+    /// workers (Arc). `None` means no download throttling (#433).
+    download_limiter: Option<std::sync::Arc<RateLimiter>>,
 }
 
 impl S3 {
@@ -530,6 +597,18 @@ impl S3 {
             builder = builder.region(Region::new("us-east-1"));
         }
 
+        // `--use-dualstack-endpoint` (#719): resolve the dual-stack (IPv4+IPv6)
+        // S3 endpoint so traffic can use IPv6. `--use-fips-endpoint`: resolve the
+        // FIPS endpoint. Both feed the SDK endpoint-resolver via the config
+        // builder and are no-ops against a custom endpoint (used verbatim), so
+        // they fall back harmlessly when pointed at MinIO.
+        if opts.use_dualstack_endpoint {
+            builder = builder.use_dual_stack(true);
+        }
+        if opts.use_fips_endpoint {
+            builder = builder.use_fips(true);
+        }
+
         // `--no-verify-ssl`: swap in a custom HTTP client whose rustls config
         // skips certificate verification, for self-signed HTTPS endpoints. The
         // bundled `aws-smithy-http-client` TLS context can only ADD trust, not
@@ -557,6 +636,8 @@ impl S3 {
                 .and_then(|s| s.parse::<u64>().ok())
                 .unwrap_or(DEFAULT_MULTIPART_COPY_THRESHOLD),
             preserve_timestamps: opts.preserve_timestamps,
+            upload_limiter: opts.upload_limiter.clone(),
+            download_limiter: opts.download_limiter.clone(),
         })
     }
 
@@ -677,6 +758,10 @@ impl S3 {
             None
         };
         let first = resp.body.collect().await?.into_bytes();
+        // Throttle the download to the aggregate cap, if configured (#433).
+        if let Some(limiter) = &self.download_limiter {
+            limiter.acquire(first.len() as u64).await;
+        }
 
         let file = std::fs::OpenOptions::new()
             .write(true)
@@ -712,6 +797,10 @@ impl S3 {
         let mut file = tokio::fs::File::create(dst).await?;
         use tokio::io::AsyncWriteExt;
         while let Some(chunk) = body.try_next().await? {
+            // Throttle the download to the aggregate cap, if configured (#433).
+            if let Some(limiter) = &self.download_limiter {
+                limiter.acquire(chunk.len() as u64).await;
+            }
             file.write_all(&chunk).await?;
         }
         file.flush().await?;
@@ -739,6 +828,7 @@ impl S3 {
             let vid = src.version_id.clone();
             let rp = self.request_payer();
             let file = std::sync::Arc::clone(&file);
+            let limiter = self.download_limiter.clone();
             async move {
                 let range = format!("bytes={}-{}", offset, offset + len - 1);
                 let mut req = client
@@ -752,6 +842,10 @@ impl S3 {
                 }
                 let resp = req.send().await?;
                 let data = resp.body.collect().await?.into_bytes();
+                // Throttle this part to the aggregate download cap (#433).
+                if let Some(limiter) = &limiter {
+                    limiter.acquire(data.len() as u64).await;
+                }
                 tokio::task::spawn_blocking(move || {
                     use std::os::unix::fs::FileExt;
                     file.write_all_at(&data, offset)
@@ -806,6 +900,13 @@ impl S3 {
 
     async fn upload_single(&self, src: &Path, dst: &Url, metadata: &Metadata) -> anyhow::Result<()> {
         let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(u64::MAX);
+        // Throttle the upload to the aggregate cap, if configured (#433). Done
+        // before issuing the PUT so the bytes-per-second budget is reserved.
+        if let Some(limiter) = &self.upload_limiter {
+            if size != u64::MAX {
+                limiter.acquire(size).await;
+            }
+        }
         let body = if size <= Self::INLINE_BODY_MAX {
             ByteStream::from(tokio::fs::read(src).await?)
         } else {
@@ -826,7 +927,13 @@ impl S3 {
             .set_request_payer(self.request_payer());
 
         req = apply_put_metadata(req, metadata)?;
-        req.send().await?;
+        if metadata.if_none_match {
+            // Conditional write: fail with HTTP 412 if the object already exists.
+            req = req.if_none_match("*");
+        }
+        req.send()
+            .await
+            .map_err(|e| map_conditional_write_error(e.into(), dst))?;
         Ok(())
     }
 
@@ -873,15 +980,22 @@ impl S3 {
                 let completed = CompletedMultipartUpload::builder()
                     .set_parts(Some(parts))
                     .build();
-                self.client
+                let mut complete = self
+                    .client
                     .complete_multipart_upload()
                     .bucket(&dst.bucket)
                     .key(&dst.path)
                     .upload_id(&upload_id)
                     .multipart_upload(completed)
-                    .set_request_payer(self.request_payer())
+                    .set_request_payer(self.request_payer());
+                if metadata.if_none_match {
+                    // Conditional write: fail with 412 if the object already exists.
+                    complete = complete.if_none_match("*");
+                }
+                complete
                     .send()
-                    .await?;
+                    .await
+                    .map_err(|e| map_conditional_write_error(e.into(), dst))?;
                 Ok(())
             }
             Err(e) => {
@@ -921,7 +1035,13 @@ impl S3 {
             let upload_id = upload_id.to_string();
             let src = src.clone();
             let rp = self.request_payer();
+            let limiter = self.upload_limiter.clone();
             async move {
+                // Throttle this part to the aggregate upload cap (#433), before
+                // streaming it from disk and issuing the UploadPart request.
+                if let Some(limiter) = &limiter {
+                    limiter.acquire(len).await;
+                }
                 let body = ByteStream::read_from()
                     .path(&src)
                     .offset(offset)
@@ -1098,6 +1218,12 @@ impl S3 {
                 .list_objects_v2()
                 .bucket(&src.bucket)
                 .prefix(&src.prefix)
+                // Request URL-encoded keys so keys with XML-illegal control
+                // chars (e.g. ESC 0x1b) deserialize; echoed keys/prefixes are
+                // percent-decoded below (upstream s5cmd #677). The opaque V2
+                // continuation token is handled internally by the paginator and
+                // is NOT decoded.
+                .encoding_type(EncodingType::Url)
                 .set_delimiter(if src.delimiter.is_empty() {
                     None
                 } else {
@@ -1123,6 +1249,8 @@ impl S3 {
                     Some(Ok(page)) => {
                         for cp in page.common_prefixes() {
                             let Some(prefix) = cp.prefix() else { continue };
+                            let prefix = percent_decode(prefix);
+                            let prefix = prefix.as_str();
                             if !src.matches(prefix) {
                                 continue;
                             }
@@ -1143,16 +1271,17 @@ impl S3 {
                         }
                         for c in page.contents() {
                             let Some(key) = c.key() else { continue };
+                            let key = percent_decode(key);
+                            let key = key.as_str();
                             if !src.matches(key) {
                                 continue;
                             }
                             let mut newurl = src.clone();
                             newurl.path = key.to_string();
-                            let typ = if key.ends_with('/') {
-                                ObjectType::Dir
-                            } else {
-                                ObjectType::File
-                            };
+                            // A key returned in Contents is a real object, even a
+                            // console dir-marker ending in "/" (upstream #517). Only
+                            // CommonPrefixes (handled in the loop above) are dirs.
+                            let typ = ObjectType::File;
                             object_found = true;
                             let obj = Object {
                                 url: Some(newurl),
@@ -1203,6 +1332,10 @@ impl S3 {
                     .list_objects()
                     .bucket(&src.bucket)
                     .prefix(&src.prefix)
+                    // URL-encode echoed keys so XML-illegal control chars
+                    // deserialize (upstream s5cmd #677). Keys, prefixes and the
+                    // pagination marker are percent-decoded below.
+                    .encoding_type(EncodingType::Url)
                     .set_delimiter(if src.delimiter.is_empty() {
                         None
                     } else {
@@ -1221,6 +1354,8 @@ impl S3 {
 
                 for cp in page.common_prefixes() {
                     let Some(prefix) = cp.prefix() else { continue };
+                    let prefix = percent_decode(prefix);
+                    let prefix = prefix.as_str();
                     if !src.matches(prefix) {
                         continue;
                     }
@@ -1243,17 +1378,17 @@ impl S3 {
                 let mut last_key: Option<String> = None;
                 for c in page.contents() {
                     let Some(key) = c.key() else { continue };
+                    let key = percent_decode(key);
+                    let key = key.as_str();
                     last_key = Some(key.to_string());
                     if !src.matches(key) {
                         continue;
                     }
                     let mut newurl = src.clone();
                     newurl.path = key.to_string();
-                    let typ = if key.ends_with('/') {
-                        ObjectType::Dir
-                    } else {
-                        ObjectType::File
-                    };
+                    // Real object from Contents -> File even with a trailing "/"
+                    // (upstream #517); only CommonPrefixes (above) are dirs.
+                    let typ = ObjectType::File;
                     object_found = true;
                     let obj = Object {
                         url: Some(newurl),
@@ -1280,7 +1415,10 @@ impl S3 {
                 if !page.is_truncated().unwrap_or(false) {
                     break;
                 }
-                marker = page.next_marker().map(|s| s.to_string()).or(last_key);
+                marker = page
+                    .next_marker()
+                    .map(percent_decode)
+                    .or(last_key);
                 if marker.is_none() {
                     break;
                 }
@@ -1309,6 +1447,11 @@ impl S3 {
                     .list_object_versions()
                     .bucket(&src.bucket)
                     .prefix(&src.prefix)
+                    // URL-encode echoed keys so XML-illegal control chars
+                    // deserialize (upstream s5cmd #677). Keys, prefixes and the
+                    // key/version-id pagination markers are percent-decoded
+                    // below.
+                    .encoding_type(EncodingType::Url)
                     .set_delimiter(if src.delimiter.is_empty() {
                         None
                     } else {
@@ -1330,6 +1473,8 @@ impl S3 {
 
                 for cp in page.common_prefixes() {
                     let Some(prefix) = cp.prefix() else { continue };
+                    let prefix = percent_decode(prefix);
+                    let prefix = prefix.as_str();
                     if !src.matches(prefix) {
                         continue;
                     }
@@ -1347,6 +1492,8 @@ impl S3 {
 
                 for v in page.versions() {
                     let Some(key) = v.key() else { continue };
+                    let key = percent_decode(key);
+                    let key = key.as_str();
                     if !src.matches(key) {
                         continue;
                     }
@@ -1357,7 +1504,9 @@ impl S3 {
                     let mut nu = src.clone();
                     nu.path = key.to_string();
                     nu.version_id = vid.to_string();
-                    let typ = if key.ends_with('/') { ObjectType::Dir } else { ObjectType::File };
+                    // Real object version from Versions -> File even with a trailing
+                    // "/" (upstream #517); only CommonPrefixes (above) are dirs.
+                    let typ = ObjectType::File;
                     object_found = true;
                     let obj = Object {
                         url: Some(nu),
@@ -1381,6 +1530,8 @@ impl S3 {
 
                 for d in page.delete_markers() {
                     let Some(key) = d.key() else { continue };
+                    let key = percent_decode(key);
+                    let key = key.as_str();
                     if !src.matches(key) {
                         continue;
                     }
@@ -1410,8 +1561,8 @@ impl S3 {
                 if !page.is_truncated().unwrap_or(false) {
                     break;
                 }
-                key_marker = page.next_key_marker().map(|s| s.to_string());
-                version_marker = page.next_version_id_marker().map(|s| s.to_string());
+                key_marker = page.next_key_marker().map(percent_decode);
+                version_marker = page.next_version_id_marker().map(percent_decode);
                 if key_marker.is_none() && version_marker.is_none() {
                     break;
                 }
@@ -1422,6 +1573,44 @@ impl S3 {
             }
         });
         rx
+    }
+
+    /// Single-shot PUT of an in-memory body to `dst`. Used by the `--links`
+    /// symlink round-trip to store a small placeholder object whose body is the
+    /// link target string. (#785)
+    pub async fn put_object_bytes(&self, dst: &Url, body: Vec<u8>) -> anyhow::Result<()> {
+        self.client
+            .put_object()
+            .bucket(&dst.bucket)
+            .key(&dst.path)
+            .body(ByteStream::from(body))
+            .set_request_payer(self.request_payer())
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("put object s3://{}/{}: {e}", dst.bucket, dst.path))?;
+        Ok(())
+    }
+
+    /// Fetches the full body of `src` into memory. Used by the `--links`
+    /// symlink round-trip to read a placeholder object's stored target. (#785)
+    pub async fn get_object_bytes(&self, src: &Url) -> anyhow::Result<Vec<u8>> {
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let resp = req
+            .send()
+            .await
+            .map_err(|e| anyhow::anyhow!("get object s3://{}/{}: {e}", src.bucket, src.path))?;
+        let data = resp.body.collect().await.map_err(|e| {
+            anyhow::anyhow!("reading object body s3://{}/{}: {e}", src.bucket, src.path)
+        })?;
+        Ok(data.to_vec())
     }
 
     /// Returns the bucket's versioning status ("Enabled"/"Suspended"/"Unset").
@@ -1562,6 +1751,17 @@ impl S3 {
         dst: &Url,
         metadata: &Metadata,
     ) -> anyhow::Result<()> {
+        if metadata.if_none_match {
+            // CopyObject in aws-sdk-s3 1.x does not surface `If-None-Match`, so
+            // emulate the conditional write: if the destination already exists,
+            // skip it with the same typed error the PUT/multipart paths raise.
+            // (A pre-existing object makes this a guaranteed skip; the small TOCTOU
+            // window is acceptable for a best-effort no-clobber, matching upstream
+            // intent.)
+            if self.head_size(dst).await.is_ok() {
+                anyhow::bail!(crate::storage::PreconditionFailedError { url: dst.to_string() });
+            }
+        }
         let mut req = self
             .client
             .copy_object()
@@ -1782,6 +1982,48 @@ impl S3 {
         r
     }
 
+    /// Cross-client streaming copy: downloads `src` through *this* (source)
+    /// client and uploads it to `dst` through `dst_client`. Used when the two
+    /// sides of a remote→remote copy resolve to different regions/endpoints, so
+    /// a single server-side `CopyObject` (which one client issues against one
+    /// endpoint) cannot bridge them (#858/#816/#514/#702/#700/#671). The
+    /// source's content-type is carried over unless `metadata` overrides it.
+    ///
+    /// Mechanically identical to [`Self::client_copy`] except the upload runs on
+    /// a second client; reuses the same `download` + `upload` machinery.
+    pub async fn client_copy_to(
+        &self,
+        dst_client: &S3,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
+        if self.dry_run || dst_client.dry_run {
+            return Ok(());
+        }
+        let n = CLIENT_COPY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("rs5cmd-cc-{}-{}", std::process::id(), n));
+
+        // Download from the source-side client.
+        self.download(src, &tmp).await?;
+
+        // Preserve the source content-type unless the caller set one.
+        let owned;
+        let upload_meta = if metadata.content_type.as_deref().unwrap_or("").is_empty() {
+            let mut m = metadata.clone();
+            m.content_type = self.head_content_type(src).await.ok().flatten();
+            owned = m;
+            &owned
+        } else {
+            metadata
+        };
+
+        // Upload to the destination-side client.
+        let r = dst_client.upload(&tmp, dst, upload_meta).await;
+        let _ = std::fs::remove_file(&tmp);
+        r
+    }
+
     /// Returns the source object's content-type via HeadObject, if any.
     async fn head_content_type(&self, src: &Url) -> anyhow::Result<Option<String>> {
         let mut req = self
@@ -1850,4 +2092,92 @@ fn apply_put_metadata(
         req = req.metadata(k, v);
     }
     Ok(req)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::percent_decode;
+
+    #[test]
+    fn percent_decode_passthrough_plain() {
+        assert_eq!(percent_decode("hello/world.txt"), "hello/world.txt");
+    }
+
+    #[test]
+    fn percent_decode_control_char() {
+        // S3 with EncodingType=Url URL-encodes an ESC (0x1b) as "%1B"; we must
+        // decode it back to the raw control byte (upstream s5cmd #677).
+        assert_eq!(percent_decode("dir/key%1Bend"), "dir/key\u{1b}end");
+        // Lowercase hex is equally valid.
+        assert_eq!(percent_decode("dir/key%1bend"), "dir/key\u{1b}end");
+    }
+
+    #[test]
+    fn percent_decode_common_encodings() {
+        // Space, plus and percent are the cases that actually differ under
+        // URL-encoding of keys.
+        assert_eq!(percent_decode("a%20b"), "a b");
+        assert_eq!(percent_decode("a%2Bb"), "a+b");
+        assert_eq!(percent_decode("a%25b"), "a%b");
+        // The encoded forward slash must round-trip to a real path separator.
+        assert_eq!(percent_decode("a%2Fb"), "a/b");
+    }
+
+    #[test]
+    fn percent_decode_malformed_is_verbatim() {
+        // A lone or malformed '%' (no two following hex digits) is left as-is
+        // rather than panicking or dropping bytes.
+        assert_eq!(percent_decode("100%"), "100%");
+        assert_eq!(percent_decode("50%of"), "50%of");
+        assert_eq!(percent_decode("trailing%2"), "trailing%2");
+        assert_eq!(percent_decode("%zz"), "%zz");
+    }
+
+    #[test]
+    fn percent_decode_multibyte_utf8() {
+        // A multibyte UTF-8 char (é = 0xC3 0xA9) encoded byte-by-byte must
+        // reassemble correctly.
+        assert_eq!(percent_decode("caf%C3%A9"), "café");
+    }
+
+    // ---- Conditional write (`--if-none-match`) error mapping (#752) ----
+
+    #[test]
+    fn precondition_failed_is_detected_case_insensitively() {
+        // The 412 code as the SDK/MinIO surface it, in any case, is detected; an
+        // unrelated error is not misclassified.
+        assert!(super::is_precondition_failed(&"PreconditionFailed"));
+        assert!(super::is_precondition_failed(&"at least one of the pre-conditions you specified did not hold (PreconditionFailed)"));
+        assert!(super::is_precondition_failed(&"Precondition Failed"));
+        assert!(!super::is_precondition_failed(&"NoSuchKey"));
+        assert!(!super::is_precondition_failed(&"AccessDenied"));
+        assert!(!super::is_precondition_failed(&""));
+    }
+
+    #[test]
+    fn map_conditional_write_error_converts_412_to_typed_skip() {
+        let dst = super::Url::parse("s3://bucket/key").unwrap();
+        // A 412 maps to the typed PreconditionFailedError so cp can skip it.
+        let mapped = super::map_conditional_write_error(
+            anyhow::anyhow!("server said PreconditionFailed"),
+            &dst,
+        );
+        let pf = mapped.downcast_ref::<crate::storage::PreconditionFailedError>();
+        assert!(pf.is_some(), "412 should map to PreconditionFailedError");
+        let msg = mapped.to_string();
+        assert!(msg.contains("already exists"), "got: {msg}");
+        assert!(msg.contains("s3://bucket/key"), "got: {msg}");
+    }
+
+    #[test]
+    fn map_conditional_write_error_passes_through_unrelated_errors() {
+        let dst = super::Url::parse("s3://bucket/key").unwrap();
+        let mapped =
+            super::map_conditional_write_error(anyhow::anyhow!("AccessDenied"), &dst);
+        // Unrelated errors are returned unchanged (NOT a precondition skip).
+        assert!(mapped
+            .downcast_ref::<crate::storage::PreconditionFailedError>()
+            .is_none());
+        assert!(mapped.to_string().contains("AccessDenied"));
+    }
 }

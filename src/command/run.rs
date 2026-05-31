@@ -164,11 +164,20 @@ mod tests {
             dry_run: false,
             json: false,
             region: None,
+            source_region: None,
+            destination_region: None,
+            source_endpoint_url: None,
+            destination_endpoint_url: None,
             profile: None,
             addressing_style: None,
+            use_dualstack_endpoint: false,
+            use_fips_endpoint: false,
             proxy: None,
             numworkers: 256,
             retry_count: 10,
+            color: crate::command::ColorMode::Auto,
+            limit_upload: None,
+            limit_download: None,
         }
     }
 

@@ -687,6 +687,73 @@ fn move_local_to_s3_deletes_source() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+// `mv --remove-empty-dirs` should prune the source directories a local->remote
+// move empties, bounded at the move source root; without the flag they remain
+// (#846).
+#[test]
+fn mv_remove_empty_dirs_prunes_emptied_source_dirs() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // Nested tree:  root/sub/inner/c.txt  — moving the file empties inner and
+    // sub, up to but not including root.
+    let root = tmp.path().join("root");
+    let inner = root.join("sub").join("inner");
+    std::fs::create_dir_all(&inner).unwrap();
+    let file = inner.join("c.txt");
+    std::fs::write(&file, b"hello c").unwrap();
+
+    // Move everything under root into the bucket WITH pruning enabled.
+    let pattern = format!("{}/*", root.to_str().unwrap());
+    rs5cmd()
+        .args(["mv", "--remove-empty-dirs", &pattern, &s3("/on/")])
+        .assert()
+        .success();
+
+    assert!(!file.exists(), "moved file should be gone");
+    assert!(
+        !root.join("sub").join("inner").exists(),
+        "emptied inner dir should be pruned with --remove-empty-dirs"
+    );
+    assert!(
+        !root.join("sub").exists(),
+        "emptied sub dir should be pruned with --remove-empty-dirs"
+    );
+    // The move source root itself must never be removed.
+    assert!(root.exists(), "move source root must not be pruned");
+
+    // --- Control: identical shape, WITHOUT the flag — dirs must remain. ---
+    let root2 = tmp.path().join("root2");
+    let inner2 = root2.join("sub").join("inner");
+    std::fs::create_dir_all(&inner2).unwrap();
+    let file2 = inner2.join("d.txt");
+    std::fs::write(&file2, b"hello d").unwrap();
+
+    let pattern2 = format!("{}/*", root2.to_str().unwrap());
+    rs5cmd()
+        .args(["mv", &pattern2, &s3("/off/")])
+        .assert()
+        .success();
+
+    assert!(!file2.exists(), "moved file should be gone");
+    assert!(
+        root2.join("sub").join("inner").exists(),
+        "without --remove-empty-dirs the emptied dirs must remain"
+    );
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
 #[test]
 fn proxy_socks5_transfer() {
     // Routes a full upload/list/download through a SOCKS5 proxy (--proxy). Only
@@ -767,6 +834,64 @@ fn ls_show_fullpath_and_start_after() {
         .stdout(predicate::str::contains("b.txt").not());
 
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// `ls --help` must document the new `--local-time` flag (#822). No endpoint
+/// needed, so this runs everywhere and is fully blocking.
+#[test]
+fn ls_help_mentions_local_time() {
+    rs5cmd()
+        .args(["ls", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--local-time"));
+}
+
+/// End-to-end check for `ls --local-time` (#822): the default UTC listing has no
+/// offset token on the timestamp, while `--local-time` appends a numeric
+/// `+HHMM` / `-HHMM` offset. Guarded on the shared-MinIO endpoint.
+#[test]
+fn ls_local_time_appends_offset_token() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    assert_cmd::Command::cargo_bin("rs5cmd")
+        .unwrap()
+        .args(["pipe", &s3("/when.txt")])
+        .write_stdin("tz check")
+        .assert()
+        .success();
+
+    // Default listing: object present, and the timestamp carries NO offset
+    // token (regression guard that default UTC output is unchanged).
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("when.txt"))
+        .stdout(
+            predicate::str::is_match(r"\d{2}:\d{2}:\d{2} [+-]\d{4}")
+                .unwrap()
+                .not(),
+        );
+
+    // `--local-time` listing: object present AND a `HH:MM:SS +HHMM` offset token
+    // appears on the timestamp line.
+    rs5cmd()
+        .args(["ls", "--local-time", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("when.txt"))
+        .stdout(predicate::str::is_match(r"\d{2}:\d{2}:\d{2} [+-]\d{4}").unwrap());
+
+    rs5cmd().args(["rm", &s3("/when.txt")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
@@ -1012,5 +1137,925 @@ fn sync_checksum_detects_same_size_content_change() {
         .stdout(predicate::str::contains("cp "));
 
     rs5cmd().args(["rm", &s3("/m/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Regression test for upstream s5cmd #677: a key containing an XML-illegal
+/// control character (here ESC, 0x1b) used to make the ListObjectsV2 XML
+/// response fail to deserialize ("failed to decode REST XML response status
+/// code: 200"). We now request `EncodingType=Url` on all list paths and
+/// percent-decode the echoed keys, so such a key both lists and round-trips.
+#[test]
+fn list_key_with_xml_illegal_control_char() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Build a local source file to upload.
+    let dir = tempfile::tempdir().unwrap();
+    let local = dir.path().join("src.txt");
+    std::fs::write(&local, b"control-char key contents").unwrap();
+
+    // Object key embeds a raw ESC (0x1b) control char, which is illegal in XML
+    // 1.0 character data and previously broke list deserialization.
+    let key = "prefix/ctrl\u{1b}name.txt";
+    let dst = s3(&format!("/{key}"));
+    rs5cmd()
+        .args(["cp", local.to_str().unwrap(), &dst])
+        .assert()
+        .success();
+
+    // The bug manifested as a list/deserialization failure; success here (and a
+    // non-empty listing) proves the EncodingType=Url fix works.
+    let out = rs5cmd()
+        .args(["ls", &s3("/prefix/")])
+        .assert()
+        .success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        stdout.contains("ctrl") && stdout.contains("name.txt"),
+        "listing did not contain the control-char key; got: {stdout:?}"
+    );
+
+    // Round-trip: remove the object by its decoded key to confirm the echoed key
+    // is usable end to end.
+    rs5cmd().args(["rm", &dst]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn dir_marker_object_is_a_file_not_a_dir() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let endpoint = std::env::var("AWS_ENDPOINT_URL")
+        .or_else(|_| std::env::var("S3_ENDPOINT_URL"))
+        .unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Create a REAL object with key exactly "foo/" (console dir-marker). Use an
+    // explicit s3api PutObject so the marker carries an ETag/size/last_modified
+    // exactly like a console-created dir marker, bypassing rs5cmd's own
+    // client-side trailing-slash guards (pipe rejects a "/"-suffixed dest; cp
+    // would append the source basename).
+    let tmp = tempfile::tempdir().unwrap();
+    let body = tmp.path().join("body");
+    std::fs::write(&body, b"marker-body").unwrap();
+    let put = std::process::Command::new("aws")
+        .args([
+            "--endpoint-url",
+            &endpoint,
+            "s3api",
+            "put-object",
+            "--bucket",
+            &bucket,
+            "--key",
+            "foo/",
+            "--body",
+            body.to_str().unwrap(),
+        ])
+        .status();
+    match put {
+        Ok(s) if s.success() => {}
+        _ => {
+            eprintln!("skipping: aws cli unavailable to create dir-marker");
+            return;
+        }
+    }
+
+    // Also create a normal object under a genuine prefix (CommonPrefix check).
+    let real = tmp.path().join("real.txt");
+    std::fs::write(&real, b"hello").unwrap();
+    rs5cmd()
+        .args(["cp", real.to_str().unwrap(), &s3("/baz/real.txt")])
+        .assert()
+        .success();
+
+    // LOAD-BEARING: cat the exact marker key. cat routes through list() because
+    // foo/ is a prefix; pre-fix the marker was typed Dir and skipped
+    // ("no objects matched"); post-fix it is a File and its bytes are returned.
+    rs5cmd()
+        .args(["cat", &s3("/foo/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("marker-body"));
+
+    // ls of the exact key shows it as a real object row (not a DIR row).
+    rs5cmd()
+        .args(["ls", &s3("/foo/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("foo/"))
+        .stdout(predicate::str::contains("DIR").not());
+
+    // cp the marker to a local file: only works if classified File.
+    let out = tmp.path().join("marker.out");
+    rs5cmd()
+        .args(["cp", &s3("/foo/"), out.to_str().unwrap()])
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(&out).unwrap(), b"marker-body");
+
+    // Regression guard: a genuine CommonPrefix still renders DIR under the
+    // default delimiter, proving the common_prefixes path was not broken.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("baz/"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn ls_prefix_with_object_equal_to_prefix() {
+    // ls of a prefix that ALSO exists as a real object key (key == prefix) must
+    // print that object relativized to its basename, never the full
+    // un-relativized key (upstream #755). With the default delimiter, `ls` of the
+    // non-slash-terminated prefix "a/b" returns the exact-match object "a/b",
+    // which must render as the relativized basename "b" (pre-fix it rendered as
+    // the absolute key "a/b"). The sibling/children relativization is covered by
+    // the url.rs unit test parse_non_batch_relativizes_key_equal_to_prefix.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    // Object whose key EXACTLY equals the listing prefix "a/b" ...
+    rs5cmd().args(["cp", f.to_str().unwrap(), &s3("/a/b")]).assert().success();
+    // ... plus two siblings nested under that same prefix, so "a/b" is a real
+    // prefix as well as a real object key.
+    rs5cmd().args(["cp", f.to_str().unwrap(), &s3("/a/b/file1")]).assert().success();
+    rs5cmd().args(["cp", f.to_str().unwrap(), &s3("/a/b/file2")]).assert().success();
+
+    // ls the prefix "a/b" (no trailing slash — the reproducing case). The
+    // exact-match object is relativized to its basename "b".
+    let out = rs5cmd().args(["ls", &s3("/a/b")]).assert().success();
+    let stdout = String::from_utf8_lossy(&out.get_output().stdout).into_owned();
+    assert!(
+        stdout.lines().any(|l| l.ends_with("  b")),
+        "exact-match object should list relativized as basename \"b\"; got: {stdout:?}"
+    );
+    // Regression guard for #755: the row must NOT carry the un-relativized key
+    // "a/b", and nothing in this listing is an absolute s3:// path.
+    assert!(
+        !stdout.contains(" a/b\n") && !stdout.contains(" a/b "),
+        "exact-match object must not list as the un-relativized \"a/b\"; got: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains("s3://"),
+        "no entry should be an absolute s3:// path; got: {stdout:?}"
+    );
+
+    // Cleanup: delete each key explicitly, then the bucket. (A non-recursive
+    // root wildcard `rm /*` only removes the top-level "a/b" object and leaves
+    // the nested children, which would make `rb` fail with BucketNotEmpty.)
+    rs5cmd().args(["rm", &s3("/a/b/file1")]).assert().success();
+    rs5cmd().args(["rm", &s3("/a/b/file2")]).assert().success();
+    rs5cmd().args(["rm", &s3("/a/b")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn rb_force_deletes_nonempty_bucket() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x.txt");
+    std::fs::write(&f, b"data").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["a.txt", "b.txt", "c.txt"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/{k}"))])
+            .assert()
+            .success();
+    }
+    // Plain rb fails on a non-empty bucket (current behavior preserved).
+    rs5cmd().args(["rb", &s3("")]).assert().failure();
+    // Bucket + objects still present.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"));
+    // rb --force empties then removes; prints per-object rm lines and the rb line.
+    rs5cmd()
+        .args(["rb", "--force", &s3("")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"))
+        .stdout(predicate::str::contains("rb "));
+    // Bucket is gone: ls now fails (NoSuchBucket).
+    rs5cmd().args(["ls", &s3("/")]).assert().failure();
+}
+
+#[test]
+fn rb_force_dry_run_deletes_nothing() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x.txt");
+    std::fs::write(&f, b"d").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &s3("/a.txt")])
+        .assert()
+        .success();
+    // Dry-run deletes nothing. rs5cmd's S3 listing path short-circuits under
+    // --dry-run, so the force-empty loop sees no objects and emits no per-object
+    // would-delete lines; remove_bucket is also a no-op under dry-run. The
+    // command still succeeds and prints the final "rb <url>" line. The real
+    // guarantee -- that nothing is deleted -- is verified by the follow-up ls.
+    rs5cmd()
+        .args(["--dry-run", "rb", "--force", &s3("")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("rb "));
+    // Object still present and bucket still exists: dry-run deleted nothing.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"));
+    // Real cleanup.
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_skips_broken_symlink_and_transfers_rest() {
+    // A directory containing a dangling symlink must upload the good files and
+    // skip (warn about, by name) the broken link instead of aborting (#749).
+    if !endpoint_configured() {
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("src");
+    std::fs::create_dir(&dir).unwrap();
+    std::fs::write(dir.join("good_a.txt"), b"aaa").unwrap();
+    std::fs::write(dir.join("good_b.txt"), b"bbb").unwrap();
+
+    // Dangling symlink: target does not exist => WalkDir(follow_links) errors.
+    use std::os::unix::fs::symlink;
+    symlink("/nonexistent/definitely/missing/target", dir.join("dangling")).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Recursive upload must SUCCEED: good files copy; broken symlink is a warning
+    // whose message NAMES the offending path.
+    rs5cmd()
+        .args(["cp", &format!("{}/", dir.to_str().unwrap()), &s3("/u/")])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("dangling"));
+
+    // Both good files present in S3 -> proves the walk continued past the broken
+    // symlink instead of aborting.
+    rs5cmd()
+        .args(["ls", &s3("/u/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("good_a.txt"))
+        .stdout(predicate::str::contains("good_b.txt"));
+
+    rs5cmd().args(["rm", &s3("/u/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Upstream #697: a `--dry-run` op must be visibly distinguishable from a real
+/// one. The text success line is prefixed with `(dry-run) ` and the JSON line
+/// gains `"dryRun":true`; a real op carries neither. All commands here are
+/// short, non-streaming `cp`/`ls`/`mb`/`rb`/`rm` invocations driven through the
+/// blocking `assert_cmd` helper used by every other e2e test (no signals, no
+/// long-lived children) so the suite cannot hang.
+#[test]
+fn dry_run_output_is_marked() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("dry.txt");
+    std::fs::write(&local, b"dry-run payload").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // --dry-run (text): success line carries the marker.
+    rs5cmd()
+        .args(["--dry-run", "cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(dry-run)"));
+
+    // The dry-run must NOT have created the object.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry.txt").not());
+
+    // --dry-run --json: success object gains "dryRun":true.
+    rs5cmd()
+        .args(["--json", "--dry-run", "cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"dryRun\":true"));
+
+    // Real op (text): no marker.
+    rs5cmd()
+        .args(["cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(dry-run)").not());
+
+    // The real op DID create the object.
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dry.txt"));
+
+    // Real op (json): no dryRun field at all.
+    rs5cmd()
+        .args(["--json", "cp", local.to_str().unwrap(), &s3("/dry.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dryRun").not());
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Conditional write: `cp --if-none-match` (#752). The compose MinIO supports
+/// `If-None-Match: "*"` on PutObject and returns HTTP 412 (PreconditionFailed)
+/// when the destination object already exists, leaving it untouched. rs5cmd maps
+/// that to an "object already exists, skipped" notice, NOT a hard error. All
+/// commands here are short, blocking cp/cat/mb/rm/rb invocations (no streaming,
+/// no signals), so the suite cannot hang.
+#[test]
+fn cp_if_none_match_does_not_overwrite_existing() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let first = tmp.path().join("first.txt");
+    let second = tmp.path().join("second.txt");
+    std::fs::write(&first, b"FIRST").unwrap();
+    std::fs::write(&second, b"SECOND").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // First write creates the object with "FIRST".
+    rs5cmd()
+        .args(["cp", first.to_str().unwrap(), &s3("/k.txt")])
+        .assert()
+        .success();
+
+    // Second cp with --if-none-match must NOT overwrite and must NOT hard-fail:
+    // the existing object makes it a skip, so the command still succeeds.
+    rs5cmd()
+        .args(["cp", "--if-none-match", second.to_str().unwrap(), &s3("/k.txt")])
+        .assert()
+        .success();
+
+    // The object content is unchanged (still "FIRST") — it was not overwritten.
+    rs5cmd()
+        .args(["cat", &s3("/k.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("FIRST"))
+        .stdout(predicate::str::contains("SECOND").not());
+
+    // --if-none-match to a brand-new key still writes (the no-clobber guard only
+    // skips existing objects).
+    rs5cmd()
+        .args(["cp", "--if-none-match", second.to_str().unwrap(), &s3("/fresh.txt")])
+        .assert()
+        .success();
+    rs5cmd()
+        .args(["cat", &s3("/fresh.txt")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("SECOND"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// `ls --newer-than` / `--older-than` apply a client-side LastModified filter
+/// (upstream #388). A freshly uploaded object is "newer than 1h" (included) and
+/// is not "older than 1h" (excluded). Both invocations are short, blocking
+/// ls calls, so the suite cannot hang.
+#[test]
+fn ls_newer_than_and_older_than_filter() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("fresh.txt");
+    std::fs::write(&f, b"fresh").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &s3("/fresh.txt")])
+        .assert()
+        .success();
+
+    // Just-uploaded => modified within the last hour: --newer-than 1h includes it.
+    rs5cmd()
+        .args(["ls", "--newer-than", "1h", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh.txt"));
+
+    // ... and it is NOT older than 1h, so --older-than 1h excludes it. The
+    // object must not appear in the listing. We assert only on stdout (not the
+    // exit code) since a fully filtered-out listing may either succeed with no
+    // rows or exit non-zero like any other empty listing.
+    let out = rs5cmd()
+        .args(["ls", "--older-than", "1h", &s3("/")])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !stdout.contains("fresh.txt"),
+        "--older-than 1h must exclude a just-uploaded object; got: {stdout:?}"
+    );
+
+    // An RFC3339 lower bound far in the past also includes the object.
+    rs5cmd()
+        .args(["ls", "--newer-than", "2000-01-01T00:00:00Z", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("fresh.txt"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Multiple local sources in one `cp` to an s3 prefix must land every source
+/// object under that prefix (upstream issue #2). All commands are short,
+/// blocking cp/ls/rm/rb invocations so the suite cannot hang.
+#[test]
+fn cp_multiple_local_sources_to_s3_prefix() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("file1.txt");
+    let f2 = tmp.path().join("file2.txt");
+    let f3 = tmp.path().join("file3.txt");
+    std::fs::write(&f1, b"one").unwrap();
+    std::fs::write(&f2, b"two").unwrap();
+    std::fs::write(&f3, b"three").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Three sources, trailing prefix destination: all three land under it.
+    rs5cmd()
+        .args([
+            "cp",
+            f1.to_str().unwrap(),
+            f2.to_str().unwrap(),
+            f3.to_str().unwrap(),
+            &s3("/prefix/"),
+        ])
+        .assert()
+        .success();
+
+    rs5cmd()
+        .args(["ls", &s3("/prefix/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("file1.txt"))
+        .stdout(predicate::str::contains("file2.txt"))
+        .stdout(predicate::str::contains("file3.txt"));
+
+    rs5cmd().args(["rm", &s3("/prefix/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Multiple local sources copied into a local directory must all land inside it
+/// (issue #2). No endpoint required; purely local fs work, fully blocking.
+#[test]
+fn cp_multiple_local_sources_to_local_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("a.txt");
+    let f2 = tmp.path().join("b.txt");
+    std::fs::write(&f1, b"aaa").unwrap();
+    std::fs::write(&f2, b"bbb").unwrap();
+    let dst = tmp.path().join("out");
+    std::fs::create_dir(&dst).unwrap();
+
+    // Trailing slash makes the destination unambiguously a directory.
+    let dst_arg = format!("{}/", dst.to_str().unwrap());
+    rs5cmd()
+        .args(["cp", f1.to_str().unwrap(), f2.to_str().unwrap(), &dst_arg])
+        .assert()
+        .success();
+
+    assert_eq!(std::fs::read(dst.join("a.txt")).unwrap(), b"aaa");
+    assert_eq!(std::fs::read(dst.join("b.txt")).unwrap(), b"bbb");
+}
+
+/// Multiple sources with a NON-directory destination must error clearly and not
+/// produce any output file (issue #2). Local-only, blocking, cannot hang.
+#[test]
+fn cp_multiple_sources_to_non_dir_dest_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let f1 = tmp.path().join("a.txt");
+    let f2 = tmp.path().join("b.txt");
+    std::fs::write(&f1, b"aaa").unwrap();
+    std::fs::write(&f2, b"bbb").unwrap();
+    // A plain (non-existent, no trailing slash) file path: not a directory.
+    let dst = tmp.path().join("single_target.txt");
+
+    rs5cmd()
+        .args(["cp", f1.to_str().unwrap(), f2.to_str().unwrap(), dst.to_str().unwrap()])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be a directory or s3 prefix"));
+
+    // Nothing was written to the would-be single destination.
+    assert!(!dst.exists(), "non-dir destination must not be created");
+}
+
+/// `cp --links` round-trips a symlink: upload stores a `.s5cmdlink` placeholder
+/// object whose body is the link target, and download recreates a real symlink
+/// (suffix stripped) pointing at that target. (#785)
+#[cfg(unix)]
+#[test]
+fn cp_links_symlink_roundtrip() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+
+    // A regular file and a symlink that points at it.
+    let target_file = tmp.path().join("real.txt");
+    std::fs::write(&target_file, b"symlink target data").unwrap();
+    let link_path = tmp.path().join("link.txt");
+    std::os::unix::fs::symlink(&target_file, &link_path).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Upload the symlink with --links: a .s5cmdlink placeholder must appear.
+    rs5cmd()
+        .args(["cp", "--links", link_path.to_str().unwrap(), &s3("/link.txt")])
+        .assert()
+        .success();
+
+    rs5cmd()
+        .args(["ls", &s3("/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("link.txt.s5cmdlink"));
+
+    // Download the placeholder with --links into a fresh dir: expect a real
+    // symlink with the suffix stripped, pointing at the original target.
+    let out_dir = tmp.path().join("out");
+    std::fs::create_dir(&out_dir).unwrap();
+    let out_link = out_dir.join("link.txt.s5cmdlink");
+    rs5cmd()
+        .args(["cp", "--links", &s3("/link.txt.s5cmdlink"), out_link.to_str().unwrap()])
+        .assert()
+        .success();
+
+    let restored = out_dir.join("link.txt");
+    let meta = std::fs::symlink_metadata(&restored).expect("restored symlink should exist");
+    assert!(
+        meta.file_type().is_symlink(),
+        "restored path should be a symlink, not a regular file"
+    );
+    let restored_target = std::fs::read_link(&restored).unwrap();
+    assert_eq!(
+        restored_target,
+        target_file,
+        "symlink should point at the original target"
+    );
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn ls_include_exclude_filters() {
+    // `ls --exclude '*.log'` hides matching keys; `ls --include '*.log'` shows
+    // only matching keys. (s5cmd #655)
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["keep.txt", "drop.log", "more.txt"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/d/{k}"))])
+            .assert()
+            .success();
+    }
+
+    // --exclude hides the .log key, keeps the .txt keys.
+    rs5cmd()
+        .args(["ls", "--exclude", "*.log", &s3("/d/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("keep.txt"))
+        .stdout(predicate::str::contains("more.txt"))
+        .stdout(predicate::str::contains("drop.log").not());
+
+    // --include shows ONLY the .log key.
+    rs5cmd()
+        .args(["ls", "--include", "*.log", &s3("/d/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("drop.log"))
+        .stdout(predicate::str::contains("keep.txt").not())
+        .stdout(predicate::str::contains("more.txt").not());
+
+    rs5cmd().args(["rm", &s3("/d/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn mv_exclude_skips_during_wildcard_move() {
+    // `mv --exclude '*.log'` must skip excluded objects during a prefix/wildcard
+    // move (they remain at the source, are not moved to the destination); a
+    // single concrete move is never filtered. (s5cmd #655)
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("x");
+    std::fs::write(&f, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    for k in ["a.txt", "b.txt", "skip.log"] {
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &s3(&format!("/src/{k}"))])
+            .assert()
+            .success();
+    }
+
+    // Move everything under src/ to dst/, excluding *.log.
+    rs5cmd()
+        .args(["mv", "--exclude", "*.log", &s3("/src/*"), &s3("/dst/")])
+        .assert()
+        .success();
+
+    // The two .txt objects landed under dst/ (and were deleted from src/).
+    rs5cmd()
+        .args(["ls", &s3("/dst/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("a.txt"))
+        .stdout(predicate::str::contains("b.txt"))
+        .stdout(predicate::str::contains("skip.log").not());
+
+    // The excluded .log object was never moved: it is absent from dst/ and still
+    // present at src/.
+    rs5cmd()
+        .args(["ls", &s3("/src/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("skip.log"))
+        .stdout(predicate::str::contains("a.txt").not())
+        .stdout(predicate::str::contains("b.txt").not());
+
+    rs5cmd().args(["rm", &s3("/src/*")]).assert().success();
+    rs5cmd().args(["rm", &s3("/dst/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// Helper: make a bucket and upload one object so `ls` yields a colorable line.
+/// Bounded internal retry on the listing absorbs MinIO propagation; never hangs.
+fn color_seed_and_ls(extra_args: &[&str]) -> Vec<u8> {
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("colorme.txt");
+    std::fs::write(&f, b"data").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &s3("/colorme.txt")])
+        .assert()
+        .success();
+
+    let mut last = Vec::new();
+    for attempt in 0..20 {
+        let mut cmd = rs5cmd();
+        for a in extra_args {
+            cmd.arg(a);
+        }
+        cmd.arg("ls").arg(s3("/"));
+        let out = cmd.output().expect("failed to run rs5cmd ls");
+        assert!(
+            out.status.success(),
+            "ls failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        last = out.stdout;
+        if last.windows(7).any(|w| w == b"colorme") {
+            break;
+        }
+        if attempt < 19 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+    last
+}
+
+/// `--color` is documented in `ls --help`. No endpoint needed; fully blocking.
+#[test]
+fn color_flag_in_help() {
+    rs5cmd()
+        .args(["ls", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("--color"));
+}
+
+/// Default (auto) output is piped under assert_cmd (non-tty), so no ANSI escape
+/// may appear in `ls` stdout — guards byte-identical default output. (#88)
+#[test]
+fn ls_auto_color_has_no_escape_when_piped() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&[]);
+    assert!(
+        !out.contains(&0x1b),
+        "ls stdout must contain no ANSI escape when stdout is not a tty"
+    );
+}
+
+/// `--color never` never emits ANSI escapes. (#88)
+#[test]
+fn ls_color_never_has_no_escape() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&["--color", "never"]);
+    assert!(
+        !out.contains(&0x1b),
+        "ls stdout must contain no ANSI escape with --color never"
+    );
+}
+
+/// `--color always` forces ANSI escapes even on a non-tty stdout. (#88)
+#[test]
+fn ls_color_always_has_escape() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&["--color", "always"]);
+    assert!(
+        out.contains(&0x1b),
+        "ls stdout must contain an ANSI escape with --color always"
+    );
+}
+
+/// `--json` keeps output clean even when `--color always` is requested. (#88)
+#[test]
+fn ls_json_suppresses_color() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let out = color_seed_and_ls(&["--json", "--color", "always"]);
+    assert!(
+        !out.contains(&0x1b),
+        "json ls stdout must contain no ANSI escape even with --color always"
+    );
+}
+
+/// `tree` lists objects under a prefix recursively and renders them as a
+/// hierarchy with box-drawing connectors. For keys `a/b/c.txt`, `a/d.txt`,
+/// `e.txt` the directories `a` and `b` and the leaves `c.txt`, `d.txt`, `e.txt`
+/// must all appear, with at least one `├──`/`└──` connector. (upstream #489)
+///
+/// A bounded retry on the listing absorbs MinIO propagation so the deepest leaf
+/// (`c.txt`) is reliably present; this uses `.output()` and never hangs.
+#[test]
+fn tree_renders_hierarchy_with_connectors() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+
+    let tmp = tempfile::tempdir().unwrap();
+    let local = tmp.path().join("payload.txt");
+    std::fs::write(&local, b"x").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    // Upload a small hierarchy: a/b/c.txt, a/d.txt, e.txt.
+    for key in ["a/b/c.txt", "a/d.txt", "e.txt"] {
+        rs5cmd()
+            .args(["cp", local.to_str().unwrap(), &s3(&format!("/{key}"))])
+            .assert()
+            .success();
+    }
+
+    // Run `tree` and retry until every directory and leaf has propagated.
+    let mut stdout = String::new();
+    for attempt in 0..20 {
+        let out = rs5cmd()
+            .args(["tree", &s3("/")])
+            .output()
+            .expect("failed to run rs5cmd tree");
+        assert!(
+            out.status.success(),
+            "tree failed: stderr={}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        if ["a", "b", "c.txt", "d.txt", "e.txt"]
+            .iter()
+            .all(|name| stdout.contains(name))
+        {
+            break;
+        }
+        if attempt < 19 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+    }
+
+    // Box-drawing connectors must be rendered for the hierarchy (├── or └──).
+    assert!(
+        stdout.contains('\u{251c}') || stdout.contains('\u{2514}'),
+        "expected tree connectors, stdout was:\n{stdout}"
+    );
+    // Every directory and recursive leaf must appear (order-independent).
+    for name in ["a", "b", "c.txt", "d.txt", "e.txt"] {
+        assert!(
+            stdout.contains(name),
+            "expected `{name}` in tree output, stdout was:\n{stdout}"
+        );
+    }
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
