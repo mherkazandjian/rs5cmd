@@ -1920,6 +1920,48 @@ impl S3 {
         r
     }
 
+    /// Cross-client streaming copy: downloads `src` through *this* (source)
+    /// client and uploads it to `dst` through `dst_client`. Used when the two
+    /// sides of a remote→remote copy resolve to different regions/endpoints, so
+    /// a single server-side `CopyObject` (which one client issues against one
+    /// endpoint) cannot bridge them (#858/#816/#514/#702/#700/#671). The
+    /// source's content-type is carried over unless `metadata` overrides it.
+    ///
+    /// Mechanically identical to [`Self::client_copy`] except the upload runs on
+    /// a second client; reuses the same `download` + `upload` machinery.
+    pub async fn client_copy_to(
+        &self,
+        dst_client: &S3,
+        src: &Url,
+        dst: &Url,
+        metadata: &Metadata,
+    ) -> anyhow::Result<()> {
+        if self.dry_run || dst_client.dry_run {
+            return Ok(());
+        }
+        let n = CLIENT_COPY_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = std::env::temp_dir().join(format!("rs5cmd-cc-{}-{}", std::process::id(), n));
+
+        // Download from the source-side client.
+        self.download(src, &tmp).await?;
+
+        // Preserve the source content-type unless the caller set one.
+        let owned;
+        let upload_meta = if metadata.content_type.as_deref().unwrap_or("").is_empty() {
+            let mut m = metadata.clone();
+            m.content_type = self.head_content_type(src).await.ok().flatten();
+            owned = m;
+            &owned
+        } else {
+            metadata
+        };
+
+        // Upload to the destination-side client.
+        let r = dst_client.upload(&tmp, dst, upload_meta).await;
+        let _ = std::fs::remove_file(&tmp);
+        r
+    }
+
     /// Returns the source object's content-type via HeadObject, if any.
     async fn head_content_type(&self, src: &Url) -> anyhow::Result<Option<String>> {
         let mut req = self

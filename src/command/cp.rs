@@ -218,21 +218,44 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         eprintln!("warning: --fast ignored (built without the `fast` feature); using default path");
     }
 
-    // Build the S3 client ONCE and share it across all transfers. (A single cp
+    // Build the S3 client(s) ONCE and share across all transfers. (A single cp
     // invocation has one direction, so one client — from whichever side is
     // remote — serves every object. Re-creating it per object would reload the
     // whole AWS config + credential chain each time.)
-    let s3: Option<Arc<S3>> = if any_src_remote || dst_remote {
-        // Anchor the client config on whichever side is remote: prefer a remote
-        // source pair, otherwise the destination.
-        let anchor = pairs
-            .iter()
-            .find(|(s, _)| s.is_remote())
-            .map(|(s, _)| s)
-            .unwrap_or(&dst);
-        Some(Arc::new(S3::new(anchor, &opts).await?))
+    //
+    // Per-side region/endpoint support (#858/#816/#514/#702/#700/#671): when the
+    // source and destination resolve to different regions/endpoints we build TWO
+    // clients — one anchored on the source side, one on the destination side —
+    // so an s3->s3 copy can bridge them via a download+upload streaming copy.
+    // When the sides are identical (the common case, and always so when no
+    // per-side flags are given) we keep the single-client fast path so behavior
+    // and cost are unchanged.
+    let sides_differ = opts.sides_differ();
+    let (s3, s3_dst): (Option<Arc<S3>>, Option<Arc<S3>>) = if any_src_remote || dst_remote {
+        if sides_differ {
+            // Source-anchored client: prefer a remote source pair, else dst.
+            let src_anchor = pairs
+                .iter()
+                .find(|(s, _)| s.is_remote())
+                .map(|(s, _)| s)
+                .unwrap_or(&dst);
+            let src_opts = opts.for_side(crate::storage::Side::Source);
+            let dst_opts = opts.for_side(crate::storage::Side::Destination);
+            let src_client = Arc::new(S3::new(src_anchor, &src_opts).await?);
+            let dst_client = Arc::new(S3::new(&dst, &dst_opts).await?);
+            (Some(src_client), Some(dst_client))
+        } else {
+            // Single shared client (fast path). Anchor on whichever side is
+            // remote: prefer a remote source pair, otherwise the destination.
+            let anchor = pairs
+                .iter()
+                .find(|(s, _)| s.is_remote())
+                .map(|(s, _)| s)
+                .unwrap_or(&dst);
+            (Some(Arc::new(S3::new(anchor, &opts).await?)), None)
+        }
     } else {
-        None
+        (None, None)
     };
 
     let opts = Arc::new(opts);
@@ -259,9 +282,20 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         let opts = Arc::clone(&opts);
         let metadata = Arc::clone(&metadata);
         let s3 = s3.clone();
+        let s3_dst = s3_dst.clone();
         let links = args.links;
         set.spawn(async move {
-            let r = copy_one(&s, &d, s3.as_deref(), &opts, &metadata, is_move, links).await;
+            let r = copy_one(
+                &s,
+                &d,
+                s3.as_deref(),
+                s3_dst.as_deref(),
+                &opts,
+                &metadata,
+                is_move,
+                links,
+            )
+            .await;
             (s, d, r)
         });
     }
@@ -450,6 +484,7 @@ async fn copy_one(
     src: &Url,
     dst: &Url,
     s3: Option<&S3>,
+    s3_dst: Option<&S3>,
     opts: &Options,
     metadata: &Metadata,
     is_move: bool,
@@ -464,7 +499,7 @@ async fn copy_one(
         // local -> remote: source is a symlink => store placeholder.
         if !src.is_remote() && dst.is_remote() {
             if is_symlink_path(&src.absolute()) {
-                let s3 = s3.expect("upload requires an S3 client");
+                let s3 = s3_dst.or(s3).expect("upload requires an S3 client");
                 upload_symlink(s3, src, dst, opts).await?;
                 if is_move && !opts.dry_run {
                     std::fs::remove_file(src.absolute())?;
@@ -485,10 +520,16 @@ async fn copy_one(
 
     match (src.is_remote(), dst.is_remote()) {
         // remote -> remote: server-side copy, or client-side (download+upload)
-        // streaming when --client-copy is set.
+        // streaming when --client-copy is set or when the two sides resolve to
+        // different regions/endpoints (a single CopyObject cannot bridge two
+        // endpoints, so we download from the source client and upload to the
+        // destination client) (#858/#816/#514/#702/#700/#671).
         (true, true) => {
             let s3 = s3.expect("remote copy requires an S3 client");
-            if opts.client_copy {
+            if let Some(dst_s3) = s3_dst {
+                // Per-side clients: cross-client streaming copy.
+                s3.client_copy_to(dst_s3, src, dst, metadata).await?;
+            } else if opts.client_copy {
                 s3.client_copy(src, dst, metadata).await?;
             } else {
                 s3.copy(src, dst, metadata).await?;
@@ -505,9 +546,12 @@ async fn copy_one(
                 s3.delete(src).await?;
             }
         }
-        // local -> remote: upload.
+        // local -> remote: upload. When per-side clients exist, the destination
+        // client is the one anchored on the destination's region/endpoint.
         (false, true) => {
-            let s3 = s3.expect("upload requires an S3 client");
+            let s3 = s3_dst
+                .or(s3)
+                .expect("upload requires an S3 client");
             s3.upload(&PathBuf::from(src.absolute()), dst, metadata)
                 .await?;
             if is_move && !opts.dry_run {

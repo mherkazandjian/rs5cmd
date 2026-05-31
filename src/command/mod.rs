@@ -62,6 +62,29 @@ pub struct GlobalOpts {
     #[arg(long, global = true, env = "AWS_REGION")]
     pub region: Option<String>,
 
+    /// AWS region for the SOURCE side of a copy/move/sync. Overrides `--region`
+    /// for the source client only; falls back to `--region` when unset. Lets a
+    /// single copy span two regions (upstream #858/#816/#514/#702/#700/#671).
+    #[arg(long, global = true)]
+    pub source_region: Option<String>,
+
+    /// AWS region for the DESTINATION side of a copy/move/sync. Overrides
+    /// `--region` for the destination client only; falls back to `--region`.
+    #[arg(long, global = true)]
+    pub destination_region: Option<String>,
+
+    /// Endpoint URL for the SOURCE side of a copy/move/sync (e.g. a different
+    /// S3-compatible server than the destination). Overrides `--endpoint-url`
+    /// for the source client only; falls back to `--endpoint-url` when unset.
+    #[arg(long, global = true)]
+    pub source_endpoint_url: Option<String>,
+
+    /// Endpoint URL for the DESTINATION side of a copy/move/sync. Overrides
+    /// `--endpoint-url` for the destination client only; falls back to
+    /// `--endpoint-url` when unset.
+    #[arg(long, global = true)]
+    pub destination_endpoint_url: Option<String>,
+
     /// AWS named profile.
     #[arg(long, global = true)]
     pub profile: Option<String>,
@@ -142,6 +165,10 @@ impl GlobalOpts {
             no_verify_ssl: self.no_verify_ssl,
             use_list_objects_v1: self.use_list_objects_v1,
             region: self.region.clone(),
+            source_region: self.source_region.clone(),
+            destination_region: self.destination_region.clone(),
+            source_endpoint: self.source_endpoint_url.clone(),
+            destination_endpoint: self.destination_endpoint_url.clone(),
             profile: self.profile.clone(),
             proxy: self.proxy.clone(),
             addressing_style: self.addressing_style.clone(),

@@ -163,15 +163,21 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
     let excludes = super::filters::patterns_with_files(&args.exclude, &args.exclude_from)?;
     let filters = Filters::new(&includes, &excludes)?;
 
+    // Per-side options for listing: each side lists against its own resolved
+    // region/endpoint (#858/#816/#514/#702/#700/#671). With no per-side flags
+    // these are identical to `opts`, so behavior is unchanged.
+    let src_side_opts = opts.for_side(crate::storage::Side::Source);
+    let dst_side_opts = opts.for_side(crate::storage::Side::Destination);
+
     // Determine whether the source expands to multiple objects ("batch"), which
     // governs how relative keys are derived (mirrors Go's `isBatch`).
-    let is_batch = is_source_batch(&src, &opts).await?;
+    let is_batch = is_source_batch(&src, &src_side_opts).await?;
 
     // Build the keyed source and destination maps.
     let source_objects =
         collect_source_objects(
             &src,
-            &opts,
+            &src_side_opts,
             args.follow_symlinks,
             is_batch,
             &filters,
@@ -179,7 +185,7 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
             args.force_glacier_transfer,
         )
         .await?;
-    let dest_objects = collect_dest_objects(&dst, &opts, &filters).await?;
+    let dest_objects = collect_dest_objects(&dst, &dst_side_opts, &filters).await?;
 
     // Partition into copy / common / delete groups.
     let mut to_copy: Vec<(Url, Url)> = Vec::new();
@@ -231,13 +237,30 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Build the S3 client once; share across all transfers/deletes.
-    let s3: Option<Arc<S3>> = if src.is_remote() || dst.is_remote() {
-        let anchor = if src.is_remote() { &src } else { &dst };
-        Some(Arc::new(S3::new(anchor, &opts).await?))
-    } else {
-        None
-    };
+    // Build the S3 client(s); share across all transfers/deletes. Per-side
+    // region/endpoint support (#858/#816/#514/#702/#700/#671): when the source
+    // and destination resolve to different regions/endpoints, build TWO clients
+    // (one per side) so an s3->s3 sync bridges them via a download+upload copy.
+    // Otherwise keep the single-client fast path (always so without per-side
+    // flags). The source client serves listing/reads/deletes; the destination
+    // client serves uploads and destination deletes.
+    let sides_differ = opts.sides_differ();
+    let (s3, s3_dst): (Option<Arc<S3>>, Option<Arc<S3>>) =
+        if src.is_remote() || dst.is_remote() {
+            if sides_differ {
+                let src_anchor = if src.is_remote() { &src } else { &dst };
+                let src_opts = opts.for_side(crate::storage::Side::Source);
+                let dst_opts = opts.for_side(crate::storage::Side::Destination);
+                let src_client = Arc::new(S3::new(src_anchor, &src_opts).await?);
+                let dst_client = Arc::new(S3::new(&dst, &dst_opts).await?);
+                (Some(src_client), Some(dst_client))
+            } else {
+                let anchor = if src.is_remote() { &src } else { &dst };
+                (Some(Arc::new(S3::new(anchor, &opts).await?)), None)
+            }
+        } else {
+            (None, None)
+        };
 
     let opts = Arc::new(opts);
     let metadata = Arc::new(metadata);
@@ -282,8 +305,9 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
         let opts = Arc::clone(&opts);
         let metadata = Arc::clone(&metadata);
         let s3 = s3.clone();
+        let s3_dst = s3_dst.clone();
         set.spawn(async move {
-            let r = copy_one(&s, &d, s3.as_deref(), &opts, &metadata).await;
+            let r = copy_one(&s, &d, s3.as_deref(), s3_dst.as_deref(), &opts, &metadata).await;
             (s, d, r)
         });
     }
@@ -325,7 +349,9 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
             break;
         }
         let opts = Arc::clone(&opts);
-        let s3 = s3.clone();
+        // Sync deletes remove DESTINATION objects, so use the destination-side
+        // client when per-side clients exist; otherwise the shared client.
+        let s3 = s3_dst.clone().or_else(|| s3.clone());
         dset.spawn(async move {
             let r = delete_one(&u, s3.as_deref(), &opts).await;
             (u, r)
@@ -600,23 +626,33 @@ async fn copy_one(
     src: &Url,
     dst: &Url,
     s3: Option<&S3>,
+    s3_dst: Option<&S3>,
     opts: &Options,
     metadata: &Metadata,
 ) -> anyhow::Result<()> {
     match (src.is_remote(), dst.is_remote()) {
-        // remote -> remote: server-side copy.
+        // remote -> remote: server-side copy, or a cross-client download+upload
+        // when the two sides resolve to different regions/endpoints
+        // (#858/#816/#514/#702/#700/#671).
         (true, true) => {
-            s3.expect("remote copy requires S3 client").copy(src, dst, metadata).await?;
+            let s3 = s3.expect("remote copy requires S3 client");
+            if let Some(dst_s3) = s3_dst {
+                s3.client_copy_to(dst_s3, src, dst, metadata).await?;
+            } else {
+                s3.copy(src, dst, metadata).await?;
+            }
         }
-        // remote -> local: download.
+        // remote -> local: download (source-side client).
         (true, false) => {
             s3.expect("download requires S3 client")
                 .download(src, &PathBuf::from(dst.absolute()))
                 .await?;
         }
-        // local -> remote: upload.
+        // local -> remote: upload (destination-side client when present).
         (false, true) => {
-            s3.expect("upload requires S3 client")
+            s3_dst
+                .or(s3)
+                .expect("upload requires S3 client")
                 .upload(&PathBuf::from(src.absolute()), dst, metadata)
                 .await?;
         }
