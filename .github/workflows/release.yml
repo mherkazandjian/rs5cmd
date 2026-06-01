@@ -207,4 +207,3 @@ jobs:
             dist/*.rpm
             dist/*.pkg.tar.zst
           fail_on_unmatched_files: true
-          fail_on_unmatched_files: true
