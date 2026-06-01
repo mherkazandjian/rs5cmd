@@ -100,13 +100,14 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 ## Install
 
 Prebuilt binaries are attached to each [GitHub Release](../../releases) for
-Linux (`x86_64`/`aarch64`, statically linked against musl — no libc dependency)
+Linux (`x86_64`/`aarch64`, linked against glibc 2.17+ — runs on virtually any
+Linux distro from the last decade)
 and macOS (`x86_64`/`aarch64`). Download the archive for your platform, verify,
 and drop the binary on your `PATH`:
 
 ```bash
 # Example: Linux x86_64
-tar xzf rs5cmd-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+tar xzf rs5cmd-v0.1.0-x86_64-unknown-linux-gnu.tar.gz
 sudo install rs5cmd-*/rs5cmd /usr/local/bin/
 rs5cmd --help
 ```

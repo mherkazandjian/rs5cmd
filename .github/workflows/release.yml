@@ -1,18 +1,20 @@
 name: release
 
-# Build static (Linux/musl) and self-contained (macOS) release binaries for
+# Build portable Linux (glibc) and self-contained (macOS) release binaries for
 # x86_64 and aarch64, and attach them to the GitHub Release.
 #
 # Triggered by pushing a version tag (e.g. `git tag v0.1.0 && git push --tags`),
 # or manually via the Actions tab (workflow_dispatch) for a dry run that just
 # uploads artifacts.
 #
-# Linux uses cargo-zigbuild: the default build links aws-lc-sys (C, via the AWS
-# SDK's crypto) which is otherwise painful to cross-compile and statically link
-# against musl — zig provides the C cross-toolchain that makes it Just Work.
-# macOS builds run natively on a per-arch runner (macos-13 = Intel, macos-14 =
-# Apple Silicon) so there is no C cross-compilation at all. The io_uring `fast`
-# feature is Linux-only, so it is enabled on the Linux targets only.
+# Linux uses cargo-zigbuild targeting an old glibc (2.17, CentOS 7 era) so the
+# binaries run on virtually any Linux from the last decade. zig provides the C
+# cross-toolchain that builds aws-lc-sys (C, via the AWS SDK's crypto) and pins
+# the glibc version. A fully-static musl build is not possible here: the io_uring
+# `fast` runtime (monoio) only compiles against glibc, not musl.
+# macOS builds run natively on a per-arch runner (macos-15-intel = Intel,
+# macos-14 = Apple Silicon) so there is no C cross-compilation at all. The
+# io_uring `fast` feature is Linux-only, so it is enabled on the Linux targets.
 
 on:
   push:
@@ -36,13 +38,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-unknown-linux-musl
+          - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             build: zigbuild
+            zigtarget: x86_64-unknown-linux-gnu.2.17
             features: fast
-          - target: aarch64-unknown-linux-musl
+          - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
             build: zigbuild
+            zigtarget: aarch64-unknown-linux-gnu.2.17
             features: fast
           - target: x86_64-apple-darwin
             os: macos-15-intel
@@ -75,13 +79,13 @@ jobs:
       # (mlugg/setup-zig puts the zig binary on PATH, which cargo-zigbuild
       # picks up). Pin zig 0.13.x: zig 0.15+ needs clang 18+ for the bindgen
       # used by aws-lc-sys, which the runners don't have.
-      - name: Install zig (Linux musl)
+      - name: Install zig (Linux)
         if: matrix.build == 'zigbuild'
         uses: mlugg/setup-zig@v2
         with:
           version: 0.13.0
 
-      - name: Install cargo-zigbuild (Linux musl)
+      - name: Install cargo-zigbuild (Linux)
         if: matrix.build == 'zigbuild'
         uses: taiki-e/install-action@v2
         with:
@@ -92,11 +96,13 @@ jobs:
         shell: bash
         run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      - name: Build (Linux, static musl via zigbuild)
+      # Build with the glibc-pinned target (e.g. x86_64-unknown-linux-gnu.2.17);
+      # the binary still lands under the base triple dir (matrix.target).
+      - name: Build (Linux, glibc-pinned via zigbuild)
         if: matrix.build == 'zigbuild'
         run: |
           FEAT="${{ matrix.features }}"
-          cargo zigbuild --release --locked --target ${{ matrix.target }} \
+          cargo zigbuild --release --locked --target ${{ matrix.zigtarget }} \
             ${FEAT:+--features "$FEAT"}
 
       - name: Build (macOS, native)
@@ -112,7 +118,7 @@ jobs:
         run: |
           set -euo pipefail
           bin=target/${{ matrix.target }}/release/rs5cmd
-          # Linux musl binaries are statically linked; confirm and strip.
+          # Strip the release binary (works for both Linux ELF and macOS).
           strip "$bin" || true
           stage="rs5cmd-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
           mkdir -p "$stage"
