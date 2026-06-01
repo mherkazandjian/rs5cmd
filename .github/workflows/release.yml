@@ -40,12 +40,12 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             build: zigbuild
             zigtarget: x86_64-unknown-linux-gnu.2.28
             features: fast
           - target: aarch64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-24.04
             build: zigbuild
             zigtarget: aarch64-unknown-linux-gnu.2.28
             features: fast
@@ -59,7 +59,7 @@ jobs:
             features: ''
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -67,7 +67,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             ~/.cargo/registry
@@ -97,7 +97,7 @@ jobs:
         shell: bash
         run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
-      # Build with the glibc-pinned target (e.g. x86_64-unknown-linux-gnu.2.17);
+      # Build with the glibc-pinned target (e.g. x86_64-unknown-linux-gnu.2.28);
       # the binary still lands under the base triple dir (matrix.target).
       - name: Build (Linux, glibc-pinned via zigbuild)
         if: matrix.build == 'zigbuild'
@@ -132,7 +132,7 @@ jobs:
           echo "checksum=$stage.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifacts (every run)
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: rs5cmd-${{ matrix.target }}
           path: |
@@ -141,7 +141,7 @@ jobs:
 
       - name: Attach to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             ${{ steps.package.outputs.archive }}
@@ -154,10 +154,10 @@ jobs:
   package:
     name: package (deb/rpm/arch)
     needs: build
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Resolve release tag
         id: tag
@@ -165,7 +165,7 @@ jobs:
         run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Download Linux build artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: rs5cmd-*-unknown-linux-gnu
           path: artifacts
@@ -200,7 +200,7 @@ jobs:
           bash packaging/build-packages.sh "$ver" stage dist
 
       - name: Attach packages to GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             dist/*.deb
