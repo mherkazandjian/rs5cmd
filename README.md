@@ -97,6 +97,24 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   dualstack and genuine cross-region/endpoint copies are wired but not exercised
   by the single-region MinIO test suite.)*
 
+## Install
+
+Prebuilt binaries are attached to each [GitHub Release](../../releases) for
+Linux (`x86_64`/`aarch64`, statically linked against musl — no libc dependency)
+and macOS (`x86_64`/`aarch64`). Download the archive for your platform, verify,
+and drop the binary on your `PATH`:
+
+```bash
+# Example: Linux x86_64
+tar xzf rs5cmd-v0.1.0-x86_64-unknown-linux-musl.tar.gz
+sudo install rs5cmd-*/rs5cmd /usr/local/bin/
+rs5cmd --help
+```
+
+The Linux builds bundle the io_uring `--fast` path (`fast` feature). Releases are
+produced by `.github/workflows/release.yml` on a `v*` tag push. To build from
+source instead, see [Develop & test](#develop--test-docker).
+
 ## Usage
 
 ```
@@ -170,6 +188,34 @@ efficiency win holds.)
 docker compose run --rm -e STUB=1 -e RS5CMD_FEATURES=fast \
   -e VARIANTS="s5cmd rs5cmd rs5cmd-fast" bench
 ```
+
+#### Larger objects: 50,000 × 1 MiB vs a local MinIO
+
+A bigger, throughput-oriented workload (`--numworkers 256`, best of 2, same MinIO
+for all three; every variant verified 50000/50000 byte-complete round-trips). At
+1 MiB, req/s ≈ MiB/s:
+
+| client | op | wall(s) | MiB/s | CPU(s) | peak RSS |
+|---|---|---:|---:|---:|---:|
+| Go s5cmd          | upload   | 53.58 |   933 | 636 |    73 MB |
+| rs5cmd (tokio)    | upload   | **39.26** | **1274** | 120 |  1552 MB |
+| rs5cmd `--fast`   | upload   | 44.77 |  1117 | **99** |   944 MB |
+| Go s5cmd          | download | 40.18 |  1244 | 583 |   100 MB |
+| rs5cmd (tokio)    | download | 26.61 |  1879 | 320 |   738 MB |
+| rs5cmd `--fast`   | download | **21.65** | **2309** | **273** |  1181 MB |
+
+- **Download:** `--fast` is **1.86× faster** (2309 vs 1244 MiB/s) at ~2× less CPU;
+  the tokio path also clearly wins (26.6 s).
+- **Upload:** rs5cmd is faster than Go s5cmd (tokio 39.3 s, fast 44.8 s vs 53.6 s)
+  and moves the data for **5–6× less CPU** (99–120 vs 636 CPU-s). At 1 MiB the
+  io_uring path no longer beats the tokio path on upload — its wall-clock edge is
+  sharpest on *small* objects and on *download*.
+- **Tradeoff — memory:** rs5cmd buffers each object fully in RAM across 256 workers,
+  so peak RSS is **0.9–1.6 GB** vs Go s5cmd's streaming **73–100 MB**. Lower
+  `--numworkers` to trade throughput for memory.
+- **Caveat:** storage here is NVMe (not the bottleneck); MinIO peaked at ~16 of 32
+  cores serving PUTs, so the *upload* gap partly reflects how efficiently each
+  client drives a busy server, not a pure client ceiling.
 
 `--no-verify-ssl` is honored on **both** paths (skips TLS certificate verification
 for self-signed HTTPS endpoints): the `--fast` path uses a no-verify rustls config;

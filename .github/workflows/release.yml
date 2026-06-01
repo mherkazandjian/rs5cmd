@@ -1,0 +1,132 @@
+name: release
+
+# Build static (Linux/musl) and self-contained (macOS) release binaries for
+# x86_64 and aarch64, and attach them to the GitHub Release.
+#
+# Triggered by pushing a version tag (e.g. `git tag v0.1.0 && git push --tags`),
+# or manually via the Actions tab (workflow_dispatch) for a dry run that just
+# uploads artifacts.
+#
+# Linux uses cargo-zigbuild: the default build links aws-lc-sys (C, via the AWS
+# SDK's crypto) which is otherwise painful to cross-compile and statically link
+# against musl — zig provides the C cross-toolchain that makes it Just Work.
+# macOS builds run natively on a per-arch runner (macos-13 = Intel, macos-14 =
+# Apple Silicon) so there is no C cross-compilation at all. The io_uring `fast`
+# feature is Linux-only, so it is enabled on the Linux targets only.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to name the artifacts (e.g. v0.1.0)'
+        required: false
+        default: 'dev'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            build: zigbuild
+            features: fast
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            build: zigbuild
+            features: fast
+          - target: x86_64-apple-darwin
+            os: macos-13
+            build: cargo
+            features: ''
+          - target: aarch64-apple-darwin
+            os: macos-14
+            build: cargo
+            features: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Cache cargo registry and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: ${{ matrix.target }}-cargo-
+
+      - name: Install cargo-zigbuild + zig (Linux musl)
+        if: matrix.build == 'zigbuild'
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-zigbuild,zig
+
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build (Linux, static musl via zigbuild)
+        if: matrix.build == 'zigbuild'
+        run: |
+          FEAT="${{ matrix.features }}"
+          cargo zigbuild --release --locked --target ${{ matrix.target }} \
+            ${FEAT:+--features "$FEAT"}
+
+      - name: Build (macOS, native)
+        if: matrix.build == 'cargo'
+        run: |
+          FEAT="${{ matrix.features }}"
+          cargo build --release --locked --target ${{ matrix.target }} \
+            ${FEAT:+--features "$FEAT"}
+
+      - name: Package
+        id: package
+        shell: bash
+        run: |
+          set -euo pipefail
+          bin=target/${{ matrix.target }}/release/rs5cmd
+          # Linux musl binaries are statically linked; confirm and strip.
+          strip "$bin" || true
+          stage="rs5cmd-${{ steps.tag.outputs.tag }}-${{ matrix.target }}"
+          mkdir -p "$stage"
+          cp "$bin" "$stage/"
+          cp README.md LICENSE "$stage/" 2>/dev/null || cp README.md "$stage/"
+          tar -czf "$stage.tar.gz" "$stage"
+          # Checksum (shasum is present on both Linux and macOS runners).
+          shasum -a 256 "$stage.tar.gz" > "$stage.tar.gz.sha256"
+          echo "archive=$stage.tar.gz" >> "$GITHUB_OUTPUT"
+          echo "checksum=$stage.tar.gz.sha256" >> "$GITHUB_OUTPUT"
+
+      - name: Upload workflow artifacts (every run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: rs5cmd-${{ matrix.target }}
+          path: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+
+      - name: Attach to GitHub Release (tag pushes only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ steps.package.outputs.archive }}
+            ${{ steps.package.outputs.checksum }}
+          fail_on_unmatched_files: true

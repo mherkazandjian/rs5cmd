@@ -1,5 +1,4 @@
 /target
-Cargo.lock
 
 # Self-signed TLS test certs for the `minio-tls` service — regenerate locally
 # with `bench/gen-certs.sh` (never commit private keys).
