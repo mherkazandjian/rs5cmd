@@ -80,6 +80,9 @@ jobs:
       # (mlugg/setup-zig puts the zig binary on PATH, which cargo-zigbuild
       # picks up). Pin zig 0.13.x: zig 0.15+ needs clang 18+ for the bindgen
       # used by aws-lc-sys, which the runners don't have.
+      # NB: setup-zig stays on v2 — its latest release is still a Node 20
+      # action; bump once a Node 24 release ships (it's the last Node 20
+      # holdout here). All other actions are already on Node 24.
       - name: Install zig (Linux)
         if: matrix.build == 'zigbuild'
         uses: mlugg/setup-zig@v2
