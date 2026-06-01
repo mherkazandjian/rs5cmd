@@ -100,8 +100,8 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 ## Install
 
 Prebuilt binaries are attached to each [GitHub Release](../../releases) for
-Linux (`x86_64`/`aarch64`, linked against glibc 2.17+ — runs on virtually any
-Linux distro from the last decade)
+Linux (`x86_64`/`aarch64`, linked against glibc 2.28+ — runs on RHEL 8,
+Debian 10, Ubuntu 18.10, and any newer Linux)
 and macOS (`x86_64`/`aarch64`). Download the archive for your platform, verify,
 and drop the binary on your `PATH`:
 
