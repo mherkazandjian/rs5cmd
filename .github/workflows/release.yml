@@ -45,7 +45,7 @@ jobs:
             build: zigbuild
             features: fast
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-15-intel
             build: cargo
             features: ''
           - target: aarch64-apple-darwin
@@ -71,11 +71,21 @@ jobs:
           key: ${{ matrix.target }}-cargo-${{ hashFiles('Cargo.lock') }}
           restore-keys: ${{ matrix.target }}-cargo-
 
-      - name: Install cargo-zigbuild + zig (Linux musl)
+      # taiki-e/install-action no longer ships zig; install it separately
+      # (mlugg/setup-zig puts the zig binary on PATH, which cargo-zigbuild
+      # picks up). Pin zig 0.13.x: zig 0.15+ needs clang 18+ for the bindgen
+      # used by aws-lc-sys, which the runners don't have.
+      - name: Install zig (Linux musl)
+        if: matrix.build == 'zigbuild'
+        uses: mlugg/setup-zig@v2
+        with:
+          version: 0.13.0
+
+      - name: Install cargo-zigbuild (Linux musl)
         if: matrix.build == 'zigbuild'
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-zigbuild,zig
+          tool: cargo-zigbuild
 
       - name: Resolve release tag
         id: tag
