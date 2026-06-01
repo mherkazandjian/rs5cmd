@@ -112,6 +112,16 @@ sudo install rs5cmd-*/rs5cmd /usr/local/bin/
 rs5cmd --help
 ```
 
+Native distro packages (`.deb`, `.rpm`, Arch `.pkg.tar.zst`) are also attached
+to each release — see [`packaging/`](packaging/) for the install one-liners and
+distro coverage:
+
+```bash
+sudo dpkg -i rs5cmd_0.1.0-1_amd64.deb            # Debian / Ubuntu
+sudo rpm -i  rs5cmd-0.1.0-1.x86_64.rpm           # Rocky / Alma / RHEL
+sudo pacman -U rs5cmd-0.1.0-1-x86_64.pkg.tar.zst # Arch
+```
+
 The Linux builds bundle the io_uring `--fast` path (`fast` feature). Releases are
 produced by `.github/workflows/release.yml` on a `v*` tag push. To build from
 source instead, see [Develop & test](#develop--test-docker).

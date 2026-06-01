@@ -1,0 +1,26 @@
+# Maintainer: Mher Kazandjian <mherkazandjian@gmail.com>
+#
+# Arch Linux (AUR) package for rs5cmd, installing the prebuilt release binary.
+# Update pkgver and the sha256sums_* below on each new release.
+pkgname=rs5cmd-bin
+_pkgname=rs5cmd
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Fast S3 + filesystem CLI (s5cmd-compatible) with an optional io_uring fast path"
+arch=('x86_64' 'aarch64')
+url="https://github.com/mherkazandjian/rs5cmd"
+license=('MIT')
+provides=('rs5cmd')
+conflicts=('rs5cmd')
+depends=('glibc')
+source_x86_64=("$_pkgname-$pkgver-x86_64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-v$pkgver-x86_64-unknown-linux-gnu.tar.gz")
+source_aarch64=("$_pkgname-$pkgver-aarch64.tar.gz::$url/releases/download/v$pkgver/$_pkgname-v$pkgver-aarch64-unknown-linux-gnu.tar.gz")
+sha256sums_x86_64=('7f449bb9f4937a22b6f41694c73f6ed4e29fd7739929935af1426ed6c583c676')
+sha256sums_aarch64=('854d4bdc29742c83f17757aa14b466feba5d07addc00d287fe527374103f0dae')
+
+package() {
+  cd "$srcdir/$_pkgname-v$pkgver-$CARCH-unknown-linux-gnu"
+  install -Dm755 rs5cmd "$pkgdir/usr/bin/rs5cmd"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$_pkgname/LICENSE"
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$_pkgname/README.md"
+}

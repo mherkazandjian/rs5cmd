@@ -1,0 +1,42 @@
+# nfpm config for building rs5cmd distro packages (.deb / .rpm / Arch) from a
+# prebuilt Linux binary. Driven by build-packages.sh, which sets the env vars
+# below once per architecture. See https://nfpm.goreleaser.com for the schema.
+#
+# The released Linux binaries are linked against glibc 2.28, so a single .deb
+# covers Debian 10+/Ubuntu 18.10+ and a single .rpm covers RHEL/Rocky/Alma 8+.
+name: rs5cmd
+arch: ${ARCH}            # nfpm GOARCH-style: amd64 -> deb amd64 / rpm x86_64
+version: ${VERSION}
+version_schema: none     # VERSION is already a bare semver (no leading v)
+release: "1"
+maintainer: Mher Kazandjian <mherkazandjian@gmail.com>
+vendor: Mher Kazandjian
+homepage: https://github.com/mherkazandjian/rs5cmd
+license: MIT
+section: utils
+priority: optional
+description: |
+  Fast S3 and filesystem command-line tool (s5cmd-compatible) with an optional
+  io_uring fast path on Linux. Drop-in CLI for high-throughput object copies,
+  syncs, and listings against S3-compatible storage.
+
+contents:
+  - src: ${BINARY}
+    dst: /usr/bin/rs5cmd
+    file_info:
+      mode: 0755
+  - src: ${DOCDIR}/README.md
+    dst: /usr/share/doc/rs5cmd/README.md
+  - src: ${DOCDIR}/LICENSE
+    dst: /usr/share/doc/rs5cmd/LICENSE
+
+overrides:
+  deb:
+    depends:
+      - libc6 (>= 2.28)
+  rpm:
+    depends:
+      - glibc >= 2.28
+  archlinux:
+    depends:
+      - glibc
