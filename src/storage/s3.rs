@@ -13,6 +13,7 @@ use aws_sdk_s3::Client;
 use futures::stream::{self, StreamExt};
 use tokio::sync::mpsc;
 
+use super::partial::PartialFile;
 use super::url::Url;
 use super::{
     Bucket, Metadata, NoObjectFound, Object, ObjectNotFound, ObjectType, Options, StorageClass,
@@ -62,6 +63,26 @@ fn map_conditional_write_error(e: anyhow::Error, dst: &Url) -> anyhow::Error {
     } else {
         e
     }
+}
+
+/// Streams a response body into `file` from `offset`, chunk by chunk as it arrives (E2: no
+/// buffer of a whole part), pacing each received chunk through the download limiter (F05).
+/// Returns the offset after the last byte written.
+async fn write_body(
+    mut body: ByteStream,
+    file: &std::fs::File,
+    mut offset: u64,
+    limiter: Option<&RateLimiter>,
+) -> anyhow::Result<u64> {
+    use std::os::unix::fs::FileExt;
+    while let Some(chunk) = body.try_next().await? {
+        if let Some(limiter) = limiter {
+            limiter.acquire(chunk.len() as u64).await;
+        }
+        file.write_all_at(&chunk, offset)?;
+        offset += chunk.len() as u64;
+    }
+    Ok(offset)
 }
 
 /// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
@@ -905,9 +926,13 @@ impl S3 {
             Err(e) => return Err(e.into()),
         };
 
+        // A 200 without Content-Range: the server ignored the Range header and sent the whole
+        // object, so there is nothing more to fetch.
+        let ranged = resp.content_range().is_some();
         let total = parse_content_range_total(resp.content_range())
             .or_else(|| resp.content_length().map(|l| l.max(0) as u64))
             .unwrap_or(0);
+
         // With --preserve-timestamps, capture the stored mtime metadata before
         // the body is consumed, to restore it after the file is written.
         let mtime_value = if self.preserve_timestamps {
@@ -917,25 +942,17 @@ impl S3 {
         } else {
             None
         };
-        let first = resp.body.collect().await?.into_bytes();
-        // Throttle the download to the aggregate cap, if configured (#433).
-        if let Some(limiter) = &self.download_limiter {
-            limiter.acquire(first.len() as u64).await;
-        }
 
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(dst)?;
+        // Written under a temporary name and renamed over `dst` once complete (F03); on any
+        // error or cancellation the guard removes it and an existing `dst` stays as it was.
+        let (partial, file) = PartialFile::create(dst)?;
         file.set_len(total)?;
-        {
-            use std::os::unix::fs::FileExt;
-            file.write_all_at(&first, 0)?;
-        }
+        let file = std::sync::Arc::new(file);
+        let first_len = if ranged { part_size.min(total) } else { total };
+        let end = write_body(resp.body, &file, 0, self.download_limiter.as_deref()).await?;
+        anyhow::ensure!(end == first_len, "{src}: got {end} of {first_len} bytes");
 
-        // Small object: the first part was the whole object.
-        if total > part_size {
+        if ranged && total > part_size {
             // Large object: fetch parts 1..n concurrently into the file.
             self.download_remaining_parts(src, file, total, part_size).await?;
         }
@@ -943,42 +960,36 @@ impl S3 {
         // Restore the preserved mtime, if any (best-effort: a malformed value or
         // an unsupported filesystem must not fail the otherwise-complete copy).
         if let Some(v) = mtime_value {
-            if let Err(e) = set_file_mtime_from_value(dst, &v) {
+            if let Err(e) = set_file_mtime_from_value(partial.path(), &v) {
                 eprintln!("warning: could not restore mtime on {}: {e:#}", dst.display());
             }
         }
+        partial.commit()?;
         Ok(())
     }
 
     /// Single streaming GET to a file. Used as the zero-byte / range-error
     /// fallback for `download`.
     async fn download_single(&self, src: &Url, dst: &Path) -> anyhow::Result<()> {
-        let mut body = self.read(src).await?;
-        let mut file = tokio::fs::File::create(dst).await?;
-        use tokio::io::AsyncWriteExt;
-        while let Some(chunk) = body.try_next().await? {
-            // Throttle the download to the aggregate cap, if configured (#433).
-            if let Some(limiter) = &self.download_limiter {
-                limiter.acquire(chunk.len() as u64).await;
-            }
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
+        let body = self.read(src).await?;
+        let (partial, file) = PartialFile::create(dst)?;
+        write_body(body, &file, 0, self.download_limiter.as_deref()).await?;
+        drop(file);
+        partial.commit()?;
         Ok(())
     }
 
     /// Fetches parts `1..n` (part 0 is already written) as concurrent ranged
-    /// GETs written at their offsets into the preallocated file.
+    /// GETs, each streamed into the preallocated file at its offset.
     async fn download_remaining_parts(
         &self,
         src: &Url,
-        file: std::fs::File,
+        file: std::sync::Arc<std::fs::File>,
         total: u64,
         part_size: u64,
     ) -> anyhow::Result<()> {
-        let file = std::sync::Arc::new(file);
+        use futures::TryStreamExt;
         let n_parts = total.div_ceil(part_size);
-
         let tasks = (1..n_parts).map(|i| {
             let offset = i * part_size;
             let len = part_size.min(total - offset);
@@ -993,34 +1004,29 @@ impl S3 {
                 let range = format!("bytes={}-{}", offset, offset + len - 1);
                 let mut req = client
                     .get_object()
-                    .bucket(bucket)
-                    .key(key)
+                    .bucket(&bucket)
+                    .key(&key)
                     .range(range)
                     .set_request_payer(rp);
                 if !vid.is_empty() {
                     req = req.version_id(vid);
                 }
                 let resp = req.send().await?;
-                let data = resp.body.collect().await?.into_bytes();
-                // Throttle this part to the aggregate download cap (#433).
-                if let Some(limiter) = &limiter {
-                    limiter.acquire(data.len() as u64).await;
-                }
-                tokio::task::spawn_blocking(move || {
-                    use std::os::unix::fs::FileExt;
-                    file.write_all_at(&data, offset)
-                })
-                .await??;
+                let end = write_body(resp.body, &file, offset, limiter.as_deref()).await?;
+                anyhow::ensure!(
+                    end == offset + len,
+                    "s3://{bucket}/{key}: part at {offset} got {} of {len} bytes",
+                    end - offset
+                );
                 anyhow::Ok(())
             }
         });
-
+        // Stop at the first failed part; the parts still in flight are dropped (F04). With
+        // collect(), a part that failed for good still let every other part download first.
         stream::iter(tasks)
             .buffer_unordered(self.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .try_collect::<Vec<()>>()
+            .await?;
         Ok(())
     }
 

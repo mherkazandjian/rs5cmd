@@ -1,6 +1,7 @@
 //! Storage abstraction over local filesystem and S3.
 
 pub mod fs;
+pub(crate) mod partial;
 pub mod s3;
 pub mod url;
 pub(crate) mod upload_body;
