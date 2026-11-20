@@ -2132,3 +2132,37 @@ fn sync_delete_bare_prefix_keeps_subdirectories() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn no_region_configured_skips_instance_metadata() {
+    // #20: with no region set anywhere, the SDK's region chain probed EC2 instance metadata and
+    // waited about 3 s for it to time out. Now the region is us-east-1 or the bucket's own.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    rs5cmd().args(["mb", &format!("s3://{bucket}")]).assert().success();
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("a.txt");
+    std::fs::write(&f, b"a").unwrap();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &format!("s3://{bucket}/a.txt")])
+        .assert()
+        .success();
+    let none = tmp.path().join("none");
+    let start = std::time::Instant::now();
+    rs5cmd()
+        .env_remove("AWS_REGION")
+        .env_remove("AWS_DEFAULT_REGION")
+        .env_remove("AWS_PROFILE")
+        .env("AWS_CONFIG_FILE", &none)
+        .env("AWS_SHARED_CREDENTIALS_FILE", &none)
+        .args(["ls", &format!("s3://{bucket}/")])
+        .assert()
+        .success();
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_millis(1500), "took {took:?}");
+    rs5cmd().args(["rm", &format!("s3://{bucket}/*")]).assert().success();
+    rs5cmd().args(["rb", &format!("s3://{bucket}")]).assert().success();
+}
