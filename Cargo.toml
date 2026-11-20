@@ -29,7 +29,9 @@ async-trait = "0.1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 aws-smithy-runtime-api = "1"
-aws-smithy-types = "1"
+aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
+bytes = "1"
+http-body = "1"
 aws-credential-types = "1"
 
 # Custom no-verify HTTP client for the default SDK path (`--no-verify-ssl`):
@@ -77,13 +79,13 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Gated behind the `fast` feature so the default build is unaffected and still
 # compiles on non-Linux / without io_uring.
 [features]
-fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:bytes", "dep:sha2", "dep:hex", "dep:core_affinity"]
+fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:sha2", "dep:hex", "dep:core_affinity"]
 # FUSE mount (`rs5cmd mount`): rclone-style local mount of a remote S3 path.
 # Linux mounts via libfuse3's `fusermount3` helper at runtime — the `fuse3`
 # crate speaks the FUSE protocol in pure Rust, so no libfuse dev headers are
 # needed to BUILD; macOS uses macFUSE. Opt-in so the default build stays free of
 # FUSE deps, mirroring the `fast` precedent.
-mount = ["dep:fuse3", "dep:libc", "dep:bytes"]
+mount = ["dep:fuse3", "dep:libc"]
 # Builds the s3stub benchmark target (uses only tokio).
 bench-stub = []
 
@@ -119,10 +121,6 @@ optional = true
 version = "1"
 optional = true
 features = ["sign-http"]
-
-[dependencies.bytes]
-version = "1"
-optional = true
 
 [dependencies.sha2]
 version = "0.10"
