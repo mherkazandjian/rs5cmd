@@ -61,6 +61,7 @@ pub async fn run(global: &GlobalOpts, args: CatArgs) -> anyhow::Result<()> {
         let s3 = S3::new(&url, &opts).await?;
         let mut body = s3.read(&url).await?;
         while let Some(chunk) = body.try_next().await? {
+            s3.pace_download(chunk.len()).await;
             stdout.write_all(&chunk).await.map_err(crate::output::stdout_error)?;
         }
     } else {
@@ -135,6 +136,7 @@ async fn cat_expanded(
             .await
             .map_err(|e| anyhow::anyhow!("cat {src}: {e:#}"))?
         {
+            s3.pace_download(chunk.len()).await;
             stdout.write_all(&chunk).await.map_err(crate::output::stdout_error)?;
         }
     }
