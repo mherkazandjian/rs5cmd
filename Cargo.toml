@@ -22,7 +22,6 @@ clap_complete = "4"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 futures = "0.3"
 async-trait = "0.1"
 
@@ -141,3 +140,11 @@ optional = true
 tempfile = "3"
 assert_cmd = "2"
 predicates = "3"
+
+# Measured in the optimization review (docs/OPTIMIZATION-REVIEW.md, E5): fat LTO with one codegen
+# unit uses about 11 % less CPU on every workload tried and makes the binary about 24 % smaller.
+# `panic = "abort"` waits until a closed stdout pipe exits cleanly (#7).
+[profile.release]
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
