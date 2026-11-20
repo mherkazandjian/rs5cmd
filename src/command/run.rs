@@ -2,7 +2,6 @@
 //! execute them concurrently, dispatching each line back through the main CLI.
 
 use clap::{Args, Parser};
-use futures::stream::{FuturesUnordered, StreamExt};
 
 use super::GlobalOpts;
 
@@ -12,7 +11,17 @@ pub struct RunArgs {
     pub file: Option<String>,
 }
 
-pub async fn run(global: &GlobalOpts, args: RunArgs) -> anyhow::Result<()> {
+/// The dispatcher reaches `run` again through each line (`Command::Run`). A named, boxed `Send`
+/// future here breaks that cycle: an `async fn` would leave an opaque type the compiler cannot
+/// prove `Send` while it is still computing it, and the lines are spawned as tasks.
+pub fn run(
+    global: &GlobalOpts,
+    args: RunArgs,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + '_>> {
+    Box::pin(run_lines(global, args))
+}
+
+async fn run_lines(global: &GlobalOpts, args: RunArgs) -> anyhow::Result<()> {
     let content = match &args.file {
         Some(path) => {
             std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("opening {path}: {e}"))?
@@ -38,24 +47,24 @@ pub async fn run(global: &GlobalOpts, args: RunArgs) -> anyhow::Result<()> {
     let workers = global.numworkers.max(1);
     let mut had_error = false;
 
-    // Drive lines concurrently with a bounded FuturesUnordered. We do NOT use
-    // tokio::spawn: the dispatched command future is not `Send` (the fast path
-    // holds thread-local io_uring state), and spawning isn't needed — each
-    // dispatched command parallelizes its own work across cores internally.
-    // FuturesUnordered drives many lines on this task with no `Send` bound, and
-    // borrowing `global` by reference avoids per-line clones.
-    let mut inflight = FuturesUnordered::new();
+    // Lines run as tasks on the multi-threaded runtime, at most `numworkers` at a time. (Polling
+    // them all inside this one task kept a 10k-line file on about one core.) Every line shares
+    // the process's SDK config and HTTP client (S3::new), so connections are reused across lines.
+    let global = std::sync::Arc::new(global.clone());
+    let mut inflight = tokio::task::JoinSet::new();
     let mut iter = lines.into_iter();
-    for _ in 0..workers {
-        match iter.next() {
-            Some((lineno, line)) => inflight.push(run_one(global, line, lineno)),
-            None => break,
+    loop {
+        while inflight.len() < workers {
+            let Some((lineno, line)) = iter.next() else { break };
+            inflight.spawn(run_one(std::sync::Arc::clone(&global), line, lineno));
         }
-    }
-    while let Some((line, r)) = inflight.next().await {
-        report(&line, r, &mut had_error);
-        if let Some((lineno, line)) = iter.next() {
-            inflight.push(run_one(global, line, lineno));
+        let Some(done) = inflight.join_next().await else { break };
+        match done {
+            Ok((line, r)) => report(&line, r, &mut had_error),
+            Err(e) => {
+                eprintln!("ERROR run: a line's task failed: {e}");
+                had_error = true;
+            }
         }
     }
 
@@ -66,8 +75,12 @@ pub async fn run(global: &GlobalOpts, args: RunArgs) -> anyhow::Result<()> {
 }
 
 /// Runs one line, returning it alongside its result for reporting.
-async fn run_one(global: &GlobalOpts, line: String, lineno: usize) -> (String, anyhow::Result<()>) {
-    let r = run_line(global, &line, lineno).await;
+async fn run_one(
+    global: std::sync::Arc<GlobalOpts>,
+    line: String,
+    lineno: usize,
+) -> (String, anyhow::Result<()>) {
+    let r = run_line(&global, &line, lineno).await;
     (line, r)
 }
 
@@ -89,9 +102,8 @@ async fn run_line(global: &GlobalOpts, line: &str, lineno: usize) -> anyhow::Res
         anyhow::bail!("nested run is not supported (line {lineno})");
     }
 
-    // `super::run` is async and we are inside it; box the recursive future to
-    // break the otherwise infinitely-sized future type.
-    Box::pin(super::run(cli)).await
+    // `run` (below `super::run`) returns a boxed future, so this one has a finite size.
+    super::run(cli).await
 }
 
 /// Reconstructs argv for one line: program name, the run invocation's global
