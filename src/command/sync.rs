@@ -212,9 +212,16 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
         }
     }
 
-    // Whatever is left in `dest_objects` is only in the destination.
+    // Whatever is left in `dest_objects` is only in the destination. A bare remote prefix or
+    // bucket source is listed one level deep while the destination is listed recursively, so
+    // only destination entries at that depth were compared and can be extra. Deleting
+    // `sub/x` because the source listing never descended into `sub/` lost data (#3).
+    let src_shallow = src.is_remote() && is_batch && !src.delimiter.is_empty();
     if args.delete {
-        for (_, dst_obj) in dest_objects {
+        for (key, dst_obj) in dest_objects {
+            if src_shallow && key.contains('/') {
+                continue;
+            }
             if let Some(u) = dst_obj.url {
                 to_delete.push(u);
             }

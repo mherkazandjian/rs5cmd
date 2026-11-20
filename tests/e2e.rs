@@ -2100,3 +2100,35 @@ fn rm_dry_run_lists_objects() {
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
+
+#[test]
+fn sync_delete_bare_prefix_keeps_subdirectories() {
+    // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
+    // file in a subdirectory although its counterpart existed in the source.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("t.txt"), b"t").unwrap();
+    std::fs::write(tmp.path().join("b.log"), b"b").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let t = tmp.path().join("t.txt");
+    let b = tmp.path().join("b.log");
+    rs5cmd().args(["cp", t.to_str().unwrap(), &s3("/p/top.txt")]).assert().success();
+    rs5cmd().args(["cp", b.to_str().unwrap(), &s3("/p/sub/b.log")]).assert().success();
+    let mirror = tmp.path().join("mirror");
+    let m = format!("{}/", mirror.to_str().unwrap());
+    rs5cmd().args(["cp", &s3("/p/*"), &m]).assert().success();
+    assert!(mirror.join("sub/b.log").exists());
+    // An extra file at the top level is still deleted.
+    std::fs::write(mirror.join("extra.txt"), b"e").unwrap();
+    rs5cmd().args(["sync", "--delete", &s3("/p/"), &m]).assert().success();
+    assert!(mirror.join("sub/b.log").exists(), "sub/b.log was deleted");
+    assert!(mirror.join("top.txt").exists());
+    assert!(!mirror.join("extra.txt").exists(), "extra.txt was kept");
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
