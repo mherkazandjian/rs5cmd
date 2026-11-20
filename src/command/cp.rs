@@ -692,9 +692,9 @@ fn prune_empty_dirs(src: &Url) {
 
 use crate::storage::Storage as _;
 
-/// Resolves AWS credentials + region via the default provider chain (env →
-/// profile → SSO → IMDS), honoring `--region`/`--profile`. Returns
-/// (access_key, secret_key, session_token, region).
+/// Resolves AWS credentials via the default provider chain (env → profile → SSO → IMDS) and the
+/// region via `configured_region` (env → profile, no instance metadata), honoring `--region` and
+/// `--profile`. Returns (access_key, secret_key, session_token, region).
 #[cfg(feature = "fast")]
 async fn resolve_credentials(
     global: &GlobalOpts,
@@ -702,10 +702,13 @@ async fn resolve_credentials(
     use aws_config::BehaviorVersion;
     use aws_credential_types::provider::ProvideCredentials;
 
-    let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(r) = &global.region {
-        loader = loader.region(aws_sdk_s3::config::Region::new(r.clone()));
-    }
+    // A fixed region, so neither the region nor the credentials chain probes instance metadata
+    // (#20); us-east-1 when none is configured.
+    let region =
+        crate::storage::s3::configured_region(global.region.as_deref(), global.profile.as_deref())
+            .await
+            .unwrap_or_else(|| aws_sdk_s3::config::Region::new("us-east-1"));
+    let mut loader = aws_config::defaults(BehaviorVersion::latest()).region(region);
     if let Some(p) = &global.profile {
         loader = loader.profile_name(p);
     }

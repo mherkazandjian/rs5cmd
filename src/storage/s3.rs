@@ -140,6 +140,58 @@ fn load_ca_bundle(path: &str) -> anyhow::Result<Vec<rustls::pki_types::Certifica
 /// verification). We assemble a hyper + hyper-rustls connector — optionally
 /// wrapping a `ProxyConnector` — and adapt it to the smithy `HttpClient` trait
 /// that `aws_sdk_s3::config::Builder::http_client` accepts.
+/// The SDK's default region chain without its last step, the EC2 instance-metadata probe: the
+/// environment, then the profile file (`--profile` or AWS_PROFILE). Outside EC2 the probe waited
+/// about 3 s for a timeout on every invocation that had no region configured (#20). s5cmd never
+/// asks instance metadata either; it detects the bucket's region (see `bucket_region`).
+pub(crate) fn region_chain(profile: Option<&str>) -> aws_config::meta::region::RegionProviderChain {
+    use aws_config::environment::region::EnvironmentVariableRegionProvider;
+    use aws_config::meta::region::RegionProviderChain;
+    use aws_config::profile::region::ProfileFileRegionProvider;
+    let mut from_profile = ProfileFileRegionProvider::builder();
+    if let Some(name) = profile {
+        from_profile = from_profile.profile_name(name);
+    }
+    RegionProviderChain::first_try(EnvironmentVariableRegionProvider::new())
+        .or_else(from_profile.build())
+}
+
+/// The configured region: `--region`, else the environment, else the profile file; `None` when
+/// none is set. Config loaders get the result as a fixed region (us-east-1 when `None`): given
+/// no region, the SDK's default credentials chain resolves one itself, instance metadata
+/// included, which cost two 1 s timeouts outside EC2 (#20).
+pub(crate) async fn configured_region(
+    region: Option<&str>,
+    profile: Option<&str>,
+) -> Option<Region> {
+    match region {
+        Some(r) => Some(Region::new(r.to_string())),
+        None => region_chain(profile).region().await,
+    }
+}
+
+/// The region a bucket reports in its `x-amz-bucket-region` header (HeadBucket answers with it on
+/// success, and on the 301/400/403 a wrong-region or unauthorized request gets). Asked once per
+/// (endpoint, bucket) for the process; `None` when the request fails without the header.
+async fn bucket_region(client: &Client, endpoint: &str, bucket: &str) -> Option<String> {
+    static CACHE: tokio::sync::Mutex<Vec<((String, String), Option<String>)>> =
+        tokio::sync::Mutex::const_new(Vec::new());
+    let key = (endpoint.to_string(), bucket.to_string());
+    let mut cache = CACHE.lock().await;
+    if let Some((_, r)) = cache.iter().find(|(k, _)| *k == key) {
+        return r.clone();
+    }
+    let r = match client.head_bucket().bucket(bucket).send().await {
+        Ok(out) => out.bucket_region().map(str::to_owned),
+        Err(e) => e
+            .raw_response()
+            .and_then(|resp| resp.headers().get("x-amz-bucket-region"))
+            .map(str::to_owned),
+    };
+    cache.push((key, r.clone()));
+    r
+}
+
 /// One HTTP client for the whole process, built exactly like the SDK's default (hyper 1, rustls
 /// on aws-lc, the platform's trust store, proxy settings from the environment). The SDK builds
 /// its default client per `Client`, so every S3 client a command made (one per `run` line, two
@@ -617,28 +669,30 @@ impl S3 {
     /// `opts.endpoint` or the `AWS_ENDPOINT_URL`/`S3_ENDPOINT_URL` env vars,
     /// switching to path-style addressing in that case.
     pub async fn new(_u: &Url, opts: &Options) -> anyhow::Result<S3> {
-        let mut loader = aws_config::defaults(BehaviorVersion::latest());
-        if let Some(region) = &opts.region {
-            loader = loader.region(Region::new(region.clone()));
-        }
-        if let Some(profile) = &opts.profile {
-            loader = loader.profile_name(profile);
-        }
-        // One config load (region chain, credentials provider and its cache) per (region,
-        // profile) for the whole process, however many S3 clients the command builds (F09). The
-        // loader reads nothing else from `opts`. The HTTP client is shared separately below.
-        static SHARED: tokio::sync::Mutex<
-            Vec<((Option<String>, Option<String>), aws_config::SdkConfig)>,
-        > = tokio::sync::Mutex::const_new(Vec::new());
+        // One config load (region, credentials provider and its cache) per (region, profile) for
+        // the whole process, however many S3 clients the command builds (F09). The loader reads
+        // nothing else from `opts`. The HTTP client is shared separately below. Cached with it:
+        // whether no region was configured at all (then the bucket's region is asked below).
+        type Loaded = (aws_config::SdkConfig, bool);
+        static SHARED: tokio::sync::Mutex<Vec<((Option<String>, Option<String>), Loaded)>> =
+            tokio::sync::Mutex::const_new(Vec::new());
         let key = (opts.region.clone(), opts.profile.clone());
-        let shared = {
+        let (shared, region_unset) = {
             let mut cache = SHARED.lock().await;
             match cache.iter().find(|(k, _)| *k == key) {
                 Some((_, c)) => c.clone(),
                 None => {
+                    let configured =
+                        configured_region(opts.region.as_deref(), opts.profile.as_deref()).await;
+                    let unset = configured.is_none();
+                    let mut loader = aws_config::defaults(BehaviorVersion::latest())
+                        .region(configured.unwrap_or_else(|| Region::new("us-east-1")));
+                    if let Some(profile) = &opts.profile {
+                        loader = loader.profile_name(profile);
+                    }
                     let c = loader.load().await;
-                    cache.push((key, c.clone()));
-                    c
+                    cache.push((key, (c.clone(), unset)));
+                    (c, unset)
                 }
             }
         };
@@ -664,6 +718,7 @@ impl S3 {
             .or_else(|| std::env::var("AWS_ENDPOINT_URL").ok())
             .or_else(|| std::env::var("S3_ENDPOINT_URL").ok());
 
+        let endpoint_key = endpoint.clone().unwrap_or_default();
         if let Some(ep) = endpoint {
             builder = builder.endpoint_url(ep);
             // Default to path-style for custom endpoints (MinIO and most
@@ -680,11 +735,6 @@ impl S3 {
             // default is virtual-host style.
             builder = builder.force_path_style(style == "path");
         }
-        // Default region fallback so requests against MinIO don't fail config.
-        if shared.region().is_none() && opts.region.is_none() {
-            builder = builder.region(Region::new("us-east-1"));
-        }
-
         // `--use-dualstack-endpoint` (#719): resolve the dual-stack (IPv4+IPv6)
         // S3 endpoint so traffic can use IPv6. `--use-fips-endpoint`: resolve the
         // FIPS endpoint. Both feed the SDK endpoint-resolver via the config
@@ -724,8 +774,18 @@ impl S3 {
                 .with_max_attempts(opts.max_retries.saturating_add(1)),
         );
 
+        let mut client = Client::from_conf(builder.clone().build());
+        // No region configured: like s5cmd, ask the bucket where it lives (x-amz-bucket-region)
+        // and use that region, else keep us-east-1.
+        if region_unset && !_u.bucket.is_empty() {
+            if let Some(r) = bucket_region(&client, &endpoint_key, &_u.bucket).await {
+                if r != "us-east-1" {
+                    client = Client::from_conf(builder.region(Region::new(r)).build());
+                }
+            }
+        }
         Ok(S3 {
-            client: Client::from_conf(builder.build()),
+            client,
             dry_run: opts.dry_run,
             use_list_objects_v1: opts.use_list_objects_v1,
             request_payer_str: opts.request_payer.clone(),
