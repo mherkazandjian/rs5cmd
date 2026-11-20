@@ -3,6 +3,7 @@
 pub mod fs;
 pub mod s3;
 pub mod url;
+pub(crate) mod upload_body;
 
 use std::fmt;
 use std::sync::Arc;

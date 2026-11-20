@@ -10,7 +10,6 @@ use aws_sdk_s3::types::{
     CompletedMultipartUpload, CompletedPart, Delete, EncodingType, ObjectIdentifier,
 };
 use aws_sdk_s3::Client;
-use aws_smithy_types::byte_stream::Length;
 use futures::stream::{self, StreamExt};
 use tokio::sync::mpsc;
 
@@ -938,7 +937,8 @@ impl S3 {
         let body = if size <= Self::INLINE_BODY_MAX {
             ByteStream::from(tokio::fs::read(src).await?)
         } else {
-            ByteStream::from_path(src).await?
+            let len = tokio::fs::metadata(src).await?.len();
+            super::upload_body::file_range(src, 0, len)
         };
         let content_type = metadata
             .content_type
@@ -1070,12 +1070,7 @@ impl S3 {
                 if let Some(limiter) = &limiter {
                     limiter.acquire(len).await;
                 }
-                let body = ByteStream::read_from()
-                    .path(&src)
-                    .offset(offset)
-                    .length(Length::Exact(len))
-                    .build()
-                    .await?;
+                let body = super::upload_body::file_range(&src, offset, len);
                 let resp = client
                     .upload_part()
                     .bucket(bucket)
