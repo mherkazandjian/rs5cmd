@@ -20,6 +20,7 @@ mod sync_strategy;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use clap::Args;
@@ -338,37 +339,85 @@ pub async fn run(global: &GlobalOpts, args: SyncArgs) -> anyhow::Result<()> {
         anyhow::bail!("one or more sync operations failed");
     }
 
-    // Execute deletes the same way, with their own count progress bar.
+    // Execute deletes with their own count progress bar.
     let dpb = crate::progress::Progress::new(to_delete.len() as u64, "sync-rm");
-    let mut dset = tokio::task::JoinSet::new();
-    for u in to_delete.into_iter() {
-        while dset.len() >= workers {
-            let (u, r) = dset.join_next().await.unwrap().expect("sync delete task panicked");
-            fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
-            dpb.inc(1);
-            // Same fast-fail as the copy phase: stop on --exit-on-error or on
-            // any fatal error, draining the remaining in-flight deletes.
+    // Deletes remove DESTINATION objects, so use the destination-side client when per-side
+    // clients exist; otherwise the shared client.
+    let dst_s3 = s3_dst.clone().or_else(|| s3.clone());
+    match dst_s3 {
+        // A remote destination deletes in DeleteObjects batches of up to 1000 keys through
+        // multi_delete, as `rm` does, instead of one DeleteObject request per key (F26). After
+        // an --exit-on-error failure or a fatal error no further keys are queued; batches
+        // already sent finish.
+        Some(client) if dst.is_remote() => {
+            let stop = Arc::new(AtomicBool::new(false));
+            let (utx, urx) = tokio::sync::mpsc::channel::<Url>(1024);
+            let mut results = client.multi_delete(urx);
+            let feeder = {
+                let stop = Arc::clone(&stop);
+                tokio::spawn(async move {
+                    for u in to_delete {
+                        if stop.load(Ordering::Relaxed) || utx.send(u).await.is_err() {
+                            break;
+                        }
+                    }
+                })
+            };
+            while let Some(obj) = results.recv().await {
+                match obj.url {
+                    Some(u) => {
+                        let r = obj.err.map_or(Ok(()), Err);
+                        fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
+                        dpb.inc(1);
+                    }
+                    // The whole DeleteObjects request failed.
+                    None => {
+                        if let Some(e) = obj.err {
+                            had_error = true;
+                            fatal_seen |= is_fatal(&e);
+                            let msg = crate::error::format_error(&e);
+                            crate::output::op_error("rm", &dst.to_string(), None, &msg);
+                        }
+                    }
+                }
+                if (exit_on_error && had_error) || fatal_seen {
+                    stop.store(true, Ordering::Relaxed);
+                }
+            }
+            let _ = feeder.await;
+        }
+        _ => {
+        let mut dset = tokio::task::JoinSet::new();
+        for u in to_delete.into_iter() {
+            while dset.len() >= workers {
+                let (u, r) = dset.join_next().await.unwrap().expect("sync delete task panicked");
+                fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
+                dpb.inc(1);
+                // Same fast-fail as the copy phase: stop on --exit-on-error or on
+                // any fatal error, draining the remaining in-flight deletes.
+                if (exit_on_error && had_error) || fatal_seen {
+                    break;
+                }
+            }
             if (exit_on_error && had_error) || fatal_seen {
                 break;
             }
+            let opts = Arc::clone(&opts);
+            // Sync deletes remove DESTINATION objects, so use the destination-side
+            // client when per-side clients exist; otherwise the shared client.
+            let s3 = s3_dst.clone().or_else(|| s3.clone());
+            dset.spawn(async move {
+                let r = delete_one(&u, s3.as_deref(), &opts).await;
+                (u, r)
+            });
         }
-        if (exit_on_error && had_error) || fatal_seen {
-            break;
+        // Drain all in-flight delete tasks so none are leaked.
+        while let Some(joined) = dset.join_next().await {
+            let (u, r) = joined.expect("sync delete task panicked");
+            fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
+            dpb.inc(1);
         }
-        let opts = Arc::clone(&opts);
-        // Sync deletes remove DESTINATION objects, so use the destination-side
-        // client when per-side clients exist; otherwise the shared client.
-        let s3 = s3_dst.clone().or_else(|| s3.clone());
-        dset.spawn(async move {
-            let r = delete_one(&u, s3.as_deref(), &opts).await;
-            (u, r)
-        });
-    }
-    // Drain all in-flight delete tasks so none are leaked.
-    while let Some(joined) = dset.join_next().await {
-        let (u, r) = joined.expect("sync delete task panicked");
-        fatal_seen |= report_rm(&u, r, &mut had_error, &mut deleted);
-        dpb.inc(1);
+        }
     }
     dpb.finish();
 
