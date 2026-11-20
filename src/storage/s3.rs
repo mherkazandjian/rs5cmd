@@ -1213,16 +1213,27 @@ impl S3 {
         let (tx, rx) = mpsc::channel::<Object>(128);
         let this = self.clone();
         tokio::spawn(async move {
+            // Up to DELETE_BATCHES_IN_FLIGHT DeleteObjects requests at once (s5cmd runs 10).
+            const DELETE_BATCHES_IN_FLIGHT: usize = 10;
+            let mut set = tokio::task::JoinSet::new();
             let mut batch: Vec<Url> = Vec::with_capacity(DELETE_CHUNK_SIZE);
+            let flush = |batch: Vec<Url>, set: &mut tokio::task::JoinSet<()>| {
+                let (this, tx) = (this.clone(), tx.clone());
+                set.spawn(async move { this.delete_chunk(batch, &tx).await });
+            };
             while let Some(u) = urls.recv().await {
                 batch.push(u);
                 if batch.len() >= DELETE_CHUNK_SIZE {
-                    this.delete_chunk(std::mem::take(&mut batch), &tx).await;
+                    while set.len() >= DELETE_BATCHES_IN_FLIGHT {
+                        let _ = set.join_next().await;
+                    }
+                    flush(std::mem::take(&mut batch), &mut set);
                 }
             }
             if !batch.is_empty() {
-                this.delete_chunk(batch, &tx).await;
+                flush(batch, &mut set);
             }
+            while set.join_next().await.is_some() {}
         });
         rx
     }
