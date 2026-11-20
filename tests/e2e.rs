@@ -1388,16 +1388,15 @@ fn rb_force_dry_run_deletes_nothing() {
         .args(["cp", f.to_str().unwrap(), &s3("/a.txt")])
         .assert()
         .success();
-    // Dry-run deletes nothing. rs5cmd's S3 listing path short-circuits under
-    // --dry-run, so the force-empty loop sees no objects and emits no per-object
-    // would-delete lines; remove_bucket is also a no-op under dry-run. The
-    // command still succeeds and prints the final "rb <url>" line. The real
-    // guarantee -- that nothing is deleted -- is verified by the follow-up ls.
+    // Dry-run deletes nothing: one "(dry-run) rm" line per object, no DeleteObjects
+    // request, and remove_bucket is a no-op. The follow-up ls checks that nothing
+    // was deleted.
     rs5cmd()
         .args(["--dry-run", "rb", "--force", &s3("")])
         .assert()
         .success()
-        .stdout(predicate::str::contains("rb "));
+        .stdout(predicate::str::contains("rb "))
+        .stdout(predicate::str::contains("a.txt"));
     // Object still present and bucket still exists: dry-run deleted nothing.
     rs5cmd()
         .args(["ls", &s3("/")])
@@ -2056,6 +2055,48 @@ fn tree_renders_hierarchy_with_connectors() {
         );
     }
 
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn rm_dry_run_lists_objects() {
+    // #5: `--dry-run rm` with a wildcard printed nothing.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["x1", "x2", "x3"] {
+        std::fs::write(tmp.path().join(f), b"x").unwrap();
+    }
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", tmp.path().to_str().unwrap());
+    rs5cmd().args(["cp", &pattern, &s3("/p/")]).assert().success();
+    let out = rs5cmd()
+        .args(["--dry-run", "rm", &s3("/p/*")])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for f in ["x1", "x2", "x3"] {
+        let line = format!("rm {}", s3(&format!("/p/{f}")));
+        assert!(stdout.contains(&line), "missing {line:?} in {stdout:?}");
+    }
+    rs5cmd()
+        .args(["--json", "--dry-run", "rm", &s3("/p/*")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"dryRun\":true"));
+    // Nothing was deleted.
+    rs5cmd()
+        .args(["ls", &s3("/p/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("x1"))
+        .stdout(predicate::str::contains("x3"));
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }

@@ -1245,11 +1245,16 @@ impl S3 {
         let bucket = urls[0].bucket.clone();
 
         if self.dry_run {
+            // One "(dry-run) rm" line per object that would be deleted; no DeleteObjects call.
+            // (The send was not awaited, so nothing reached the printer: #5.)
             for u in urls {
-                let _ = tx.send(Object {
+                let sent = tx.send(Object {
                     url: Some(u),
                     ..Default::default()
                 });
+                if sent.await.is_err() {
+                    return;
+                }
             }
             return;
         }
