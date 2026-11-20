@@ -53,6 +53,6 @@ fn emit(url: &Url, status: &str, did_set: bool) {
         }
         crate::output::json_line(v);
     } else {
-        println!("{url} {status}");
+        crate::outln!("{url} {status}");
     }
 }

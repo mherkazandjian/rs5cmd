@@ -303,10 +303,10 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
         } else if args.show_fullpath {
             // Only the absolute s3:// path, one per line (no columns).
             if let Some(u) = &obj.url {
-                println!("{}", u.absolute());
+                crate::outln!("{}", u.absolute());
             }
         } else {
-            println!("{}", format_object(&obj, &args));
+            crate::outln!("{}", format_object(&obj, &args));
         }
     }
 
@@ -318,7 +318,7 @@ pub async fn run(global: &GlobalOpts, args: LsArgs) -> anyhow::Result<()> {
                 "total_size": total_size,
             }));
         } else {
-            println!("{}", format_summary(total_objects, total_size, args.humanize));
+            crate::outln!("{}", format_summary(total_objects, total_size, args.humanize));
         }
     }
 
@@ -406,7 +406,7 @@ async fn list_buckets(global: &GlobalOpts, prefix: &str, local: bool) -> anyhow:
             .creation_date
             .map(|t| format_time(t, local))
             .unwrap_or_else(|| " ".repeat(placeholder));
-        println!("{date}  s3://{}", b.name);
+        crate::outln!("{date}  s3://{}", b.name);
     }
     Ok(())
 }

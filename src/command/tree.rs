@@ -158,7 +158,7 @@ pub async fn run(global: &GlobalOpts, args: TreeArgs) -> anyhow::Result<()> {
     }
 
     // The root label is the target URL itself (e.g. `s3://bucket/` or a path).
-    println!("{}", display_url);
+    crate::outln!("{}", display_url);
     print_children(&root, "", args.size);
     Ok(())
 }
@@ -171,7 +171,7 @@ fn print_children(node: &Node, prefix: &str, show_size: bool) {
         let last = i + 1 == n;
         let connector = if last { "└── " } else { "├── " };
         let line = format_node(name, child, show_size);
-        println!("{prefix}{connector}{line}");
+        crate::outln!("{prefix}{connector}{line}");
         let child_prefix = format!("{prefix}{}", if last { "    " } else { "│   " });
         print_children(child, &child_prefix, show_size);
     }

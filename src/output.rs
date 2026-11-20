@@ -113,12 +113,12 @@ pub fn op_success(op: &str, src: &str, dst: Option<&str>) {
         if dry {
             v["dryRun"] = serde_json::Value::Bool(true);
         }
-        println!("{v}");
+        line(format_args!("{v}"));
     } else {
         let marker = if dry { "(dry-run) " } else { "" };
         match dst {
-            Some(d) => println!("{marker}{op} {src} {d}"),
-            None => println!("{marker}{op} {src}"),
+            Some(d) => line(format_args!("{marker}{op} {src} {d}")),
+            None => line(format_args!("{marker}{op} {src}")),
         }
     }
 }
@@ -136,17 +136,123 @@ pub fn op_error(op: &str, src: &str, dst: Option<&str>, err: &str) {
         if let Some(d) = dst {
             v["destination"] = serde_json::Value::String(d.to_string());
         }
-        println!("{v}");
+        line(format_args!("{v}"));
     } else {
         let prefix = paint_error("ERROR");
         match dst {
-            Some(d) => eprintln!("{prefix} {op} {src} {d}: {err}"),
-            None => eprintln!("{prefix} {op} {src}: {err}"),
+            Some(d) => err_line(format_args!("{prefix} {op} {src} {d}: {err}")),
+            None => err_line(format_args!("{prefix} {op} {src}: {err}")),
         }
     }
 }
 
 /// Emits a pre-built JSON value as one line (used by `ls`/`du` in JSON mode).
 pub fn json_line(v: serde_json::Value) {
-    println!("{v}");
+    line(format_args!("{v}"));
+}
+
+/// `println!` for result lines: see [`line`].
+#[macro_export]
+macro_rules! outln {
+    () => {
+        $crate::output::line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::output::line(format_args!($($arg)*))
+    };
+}
+
+/// All result lines share one buffered stdout writer: one write(2) per 64 KiB instead of one per
+/// line. It is flushed after every line when stdout is a terminal, before any line written with
+/// [`err_line`], and before the process exits ([`flush`]).
+static OUT: std::sync::OnceLock<std::sync::Mutex<Out>> = std::sync::OnceLock::new();
+
+struct Out {
+    w: std::io::BufWriter<std::io::Stdout>,
+    tty: bool,
+}
+
+/// Writes one result line to stdout. A closed stdout pipe ends the process quietly (#7).
+pub fn line(args: std::fmt::Arguments<'_>) {
+    use std::io::{IsTerminal, Write};
+    let m = OUT.get_or_init(|| {
+        std::sync::Mutex::new(Out {
+            w: std::io::BufWriter::with_capacity(64 * 1024, std::io::stdout()),
+            tty: std::io::stdout().is_terminal(),
+        })
+    });
+    let mut out = m.lock().unwrap_or_else(|e| e.into_inner());
+    let mut r = out.w.write_fmt(args).and_then(|()| out.w.write_all(b"\n"));
+    if r.is_ok() && out.tty {
+        r = out.w.flush();
+    }
+    if let Err(e) = r {
+        stdout_failed(e);
+    }
+}
+
+/// Writes buffered result lines out. Call before exiting.
+pub fn flush() {
+    use std::io::Write;
+    if let Some(m) = OUT.get() {
+        let r = m.lock().unwrap_or_else(|e| e.into_inner()).w.flush();
+        if let Err(e) = r {
+            stdout_failed(e);
+        }
+    }
+}
+
+/// Flushes what it can from a panic hook, without waiting for the writer's lock (the panic may
+/// have happened while it was held) and ignoring errors.
+pub fn flush_after_panic() {
+    use std::io::Write;
+    if let Some(Ok(mut out)) = OUT.get().map(|m| m.try_lock()) {
+        let _ = out.w.flush();
+    }
+}
+
+/// Writes one line to stderr after flushing the buffered result lines, so the two keep their
+/// order on a terminal or a shared pipe (`2>&1`). A closed stderr pipe ends the process quietly.
+pub fn err_line(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    flush();
+    let mut err = std::io::stderr().lock();
+    if let Err(e) = err.write_fmt(args).and_then(|()| err.write_all(b"\n")) {
+        if e.kind() == std::io::ErrorKind::BrokenPipe {
+            die_of_broken_pipe();
+        }
+    }
+}
+
+/// Maps an error from writing data to stdout (`cat`, `select`): a closed pipe ends the process
+/// quietly, anything else is returned.
+pub fn stdout_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        die_of_broken_pipe();
+    }
+    anyhow::Error::new(e).context("writing to stdout")
+}
+
+fn stdout_failed(e: std::io::Error) -> ! {
+    if e.kind() == std::io::ErrorKind::BrokenPipe {
+        die_of_broken_pipe();
+    }
+    let _ = std::io::Write::write_fmt(
+        &mut std::io::stderr(),
+        format_args!("ERROR writing to stdout: {e}\n"),
+    );
+    std::process::exit(1)
+}
+
+/// The reader of stdout (or stderr) went away. End the process the way s5cmd (a Go program) and
+/// other Unix tools end, killed by SIGPIPE (exit status 141 in a shell), with no message (#7).
+/// Rust ignores SIGPIPE, so a write to a closed pipe returns EPIPE and `println!` panicked.
+pub fn die_of_broken_pipe() -> ! {
+    #[cfg(unix)]
+    // SAFETY: restoring a signal's default disposition and raising it in this thread.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+        libc::raise(libc::SIGPIPE);
+    }
+    std::process::exit(141)
 }

@@ -127,7 +127,7 @@ pub async fn run(global: &GlobalOpts, args: HeadArgs) -> anyhow::Result<()> {
                 "bucket": url.to_string(),
             }));
         } else {
-            println!("{url}  exists");
+            crate::outln!("{url}  exists");
         }
         return Ok(());
     }
@@ -137,7 +137,7 @@ pub async fn run(global: &GlobalOpts, args: HeadArgs) -> anyhow::Result<()> {
     if crate::output::is_json() {
         crate::output::json_line(object_json(&object, &metadata));
     } else {
-        println!("{}", format_object(&object, &metadata));
+        crate::outln!("{}", format_object(&object, &metadata));
     }
     Ok(())
 }

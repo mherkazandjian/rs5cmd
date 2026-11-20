@@ -46,7 +46,7 @@ pub fn run(args: ImportS3cfgArgs) -> anyhow::Result<()> {
     };
     std::fs::write(&out, t.to_rs5cmd_ini())
         .map_err(|e| anyhow::anyhow!("writing {}: {e}", out.display()))?;
-    println!("wrote rs5cmd config to {}", out.display());
+    crate::outln!("wrote rs5cmd config to {}", out.display());
 
     // 2) Credentials -> ~/.aws/credentials (mode 0600), unless suppressed.
     if !args.no_credentials {
@@ -54,7 +54,7 @@ pub fn run(args: ImportS3cfgArgs) -> anyhow::Result<()> {
             (Some(ak), Some(sk)) => {
                 let path =
                     write_aws_credentials(&args.profile, ak, sk, t.session_token.as_deref())?;
-                println!(
+                crate::outln!(
                     "wrote AWS credentials to {} [profile {}] (mode 0600)",
                     path.display(),
                     args.profile
@@ -67,7 +67,7 @@ pub fn run(args: ImportS3cfgArgs) -> anyhow::Result<()> {
         }
     }
 
-    println!("done. rs5cmd now works against this endpoint without --s3cfg.");
+    crate::outln!("done. rs5cmd now works against this endpoint without --s3cfg.");
     Ok(())
 }
 
