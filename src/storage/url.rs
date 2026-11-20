@@ -10,7 +10,6 @@ use crate::strutil;
 const GLOB_CHARACTERS: &str = "?*";
 const S3_SCHEME: &str = "s3://";
 const S3_SEPARATOR: &str = "/";
-const MATCH_ALL_RE: &str = ".*";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlType {
@@ -34,8 +33,17 @@ pub struct Url {
 
     relative_path: String,
     filter: String,
-    filter_regex: Option<Regex>,
+    filter_regex: Filter,
     raw: bool,
+}
+
+/// How `matches` tests a key. A non-wildcard URL's pattern `(?s)^<prefix>.*$` is exactly a
+/// prefix test, so only wildcard URLs compile a regex.
+#[derive(Debug, Clone)]
+enum Filter {
+    None,
+    Prefix,
+    Regex(Regex),
 }
 
 /// Options applied at construction time (mirrors the Go functional options).
@@ -65,7 +73,7 @@ impl Url {
                     start_after: opts.start_after.clone().unwrap_or_default(),
                     relative_path: String::new(),
                     filter: String::new(),
-                    filter_regex: None,
+                    filter_regex: Filter::None,
                     raw: opts.raw,
                 };
                 url.set_prefix_and_filter()?;
@@ -100,7 +108,7 @@ impl Url {
                     start_after: opts.start_after.clone().unwrap_or_default(),
                     relative_path: String::new(),
                     filter: String::new(),
-                    filter_regex: None,
+                    filter_regex: Filter::None,
                     raw: opts.raw,
                 };
                 url.set_prefix_and_filter()?;
@@ -231,16 +239,16 @@ impl Url {
             }
         }
 
-        let mut filter_regex = if self.filter.is_empty() {
-            MATCH_ALL_RE.to_string()
-        } else {
-            strutil::wildcard_to_regexp(&self.filter)
-        };
+        if self.filter.is_empty() {
+            self.filter_regex = Filter::Prefix;
+            return Ok(());
+        }
+        let mut filter_regex = strutil::wildcard_to_regexp(&self.filter);
         filter_regex = format!("{}{}", regex::escape(&self.prefix), filter_regex);
         filter_regex = strutil::match_from_start_to_end(&filter_regex);
         filter_regex = strutil::add_newline_flag(&filter_regex);
         let r = Regex::new(&filter_regex).map_err(|e| e.to_string())?;
-        self.filter_regex = Some(r);
+        self.filter_regex = Filter::Regex(r);
         Ok(())
     }
 
@@ -261,10 +269,12 @@ impl Url {
 
     /// Whether the given key matches the object's filter; updates relative path.
     pub fn matches(&mut self, key: &str) -> bool {
-        let Some(re) = &self.filter_regex else {
-            return false;
+        let hit = match &self.filter_regex {
+            Filter::None => false,
+            Filter::Prefix => key.starts_with(&self.prefix),
+            Filter::Regex(re) => re.is_match(key),
         };
-        if !re.is_match(key) {
+        if !hit {
             return false;
         }
         let is_batch = !self.filter.is_empty();
