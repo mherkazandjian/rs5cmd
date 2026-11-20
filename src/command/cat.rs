@@ -61,13 +61,13 @@ pub async fn run(global: &GlobalOpts, args: CatArgs) -> anyhow::Result<()> {
         let s3 = S3::new(&url, &opts).await?;
         let mut body = s3.read(&url).await?;
         while let Some(chunk) = body.try_next().await? {
-            stdout.write_all(&chunk).await?;
+            stdout.write_all(&chunk).await.map_err(crate::output::stdout_error)?;
         }
     } else {
         let data = tokio::fs::read(url.absolute()).await?;
-        stdout.write_all(&data).await?;
+        stdout.write_all(&data).await.map_err(crate::output::stdout_error)?;
     }
-    stdout.flush().await?;
+    stdout.flush().await.map_err(crate::output::stdout_error)?;
     Ok(())
 }
 
@@ -120,10 +120,10 @@ async fn cat_expanded(
             .await
             .map_err(|e| anyhow::anyhow!("cat {src}: {e:#}"))?
         {
-            stdout.write_all(&chunk).await?;
+            stdout.write_all(&chunk).await.map_err(crate::output::stdout_error)?;
         }
     }
-    stdout.flush().await?;
+    stdout.flush().await.map_err(crate::output::stdout_error)?;
     Ok(())
 }
 

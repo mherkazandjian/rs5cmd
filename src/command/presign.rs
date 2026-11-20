@@ -92,7 +92,7 @@ pub async fn run(global: &GlobalOpts, args: PresignArgs) -> anyhow::Result<()> {
     if crate::output::is_json() {
         crate::output::json_line(serde_json::json!({ "url": presigned }));
     } else {
-        println!("{presigned}");
+        crate::outln!("{presigned}");
     }
     Ok(())
 }

@@ -377,7 +377,7 @@ pub async fn run(mut cli: Cli) -> anyhow::Result<()> {
         // No subcommand: show help (like `--help`) and exit success.
         use clap::CommandFactory;
         Cli::command().print_help()?;
-        println!();
+        crate::outln!();
         return Ok(());
     };
     match command {
@@ -524,26 +524,26 @@ fn install_completion() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&comp_path, script.as_bytes())?;
-    println!("wrote completion script to {}", comp_path.display());
+    crate::outln!("wrote completion script to {}", comp_path.display());
 
     if let Some(rc) = rc_path {
         let source_line = format!("source \"{}\"", comp_path.display());
         let existing = std::fs::read_to_string(&rc).unwrap_or_default();
         if existing.contains(&source_line) {
-            println!("{} already sources it; nothing to do", rc.display());
+            crate::outln!("{} already sources it; nothing to do", rc.display());
         } else {
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&rc)?;
             writeln!(f, "\n# rs5cmd shell completion\n{source_line}")?;
-            println!(
+            crate::outln!(
                 "added completion to {} (restart your shell or `source` it)",
                 rc.display()
             );
         }
     } else {
-        println!("fish will auto-load it on next shell start");
+        crate::outln!("fish will auto-load it on next shell start");
     }
     Ok(())
 }

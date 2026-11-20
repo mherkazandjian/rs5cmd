@@ -467,7 +467,7 @@ pub async fn run(global: &GlobalOpts, args: PipeArgs) -> anyhow::Result<()> {
     s3.put_multipart_reader(&mut stdin, &dst, &metadata, part_size, concurrency)
         .await?;
 
-    println!("pipe {dst}");
+    crate::outln!("pipe {dst}");
     Ok(())
 }
 

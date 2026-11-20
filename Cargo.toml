@@ -88,7 +88,7 @@ fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-ru
 # crate speaks the FUSE protocol in pure Rust, so no libfuse dev headers are
 # needed to BUILD; macOS uses macFUSE. Opt-in so the default build stays free of
 # FUSE deps, mirroring the `fast` precedent.
-mount = ["dep:fuse3", "dep:libc"]
+mount = ["dep:fuse3"]
 # Builds the s3stub benchmark target (uses only tokio).
 bench-stub = []
 
@@ -100,9 +100,9 @@ default-features = false
 # enables rootless mounting via the setuid `fusermount3` helper (rclone-style).
 features = ["tokio-runtime", "unprivileged"]
 
+# Also used outside `mount`: a closed stdout pipe ends the process by SIGPIPE (src/output.rs).
 [dependencies.libc]
 version = "0.2"
-optional = true
 
 [dependencies.monoio]
 version = "0.2"

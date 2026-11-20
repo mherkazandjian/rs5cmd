@@ -21,6 +21,24 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
+    // `println!`/`eprintln!` panic when their pipe is closed. Result lines don't use them (see
+    // rs5cmd::output), but any other such write ends the process as quietly as a result line
+    // does (#7). Other panics first flush the result lines they can.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let p = info.payload();
+        let msg = p
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| p.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.starts_with("failed printing to std") && msg.contains("Broken pipe") {
+            rs5cmd::output::die_of_broken_pipe();
+        }
+        rs5cmd::output::flush_after_panic();
+        default_hook(info);
+    }));
+
     let cli = Cli::parse();
 
     // Best-effort: raise the open-file soft limit and warn if it is likely too
@@ -31,22 +49,25 @@ async fn main() -> ExitCode {
     // Race the command against termination signals so that a Ctrl-C (SIGINT) or
     // SIGTERM cancels the in-flight work and exits with code 130 instead of
     // hanging or returning an arbitrary status.
-    tokio::select! {
+    let code = tokio::select! {
         biased;
 
         _ = wait_for_signal() => {
-            eprintln!("interrupted");
+            rs5cmd::output::err_line(format_args!("interrupted"));
             ExitCode::from(interrupt_exit_code())
         }
 
         res = command::run(cli) => match res {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                rs5cmd::output::err_line(format_args!("error: {e:#}"));
                 ExitCode::FAILURE
             }
         }
-    }
+    };
+    // Result lines are buffered (rs5cmd::output::line).
+    rs5cmd::output::flush();
+    code
 }
 
 /// Resolves when the process receives a termination signal. Handles Ctrl-C

@@ -119,7 +119,7 @@ pub async fn run(global: &GlobalOpts, args: DuArgs) -> anyhow::Result<()> {
         if json {
             crate::output::json_line(size_json(&source, None, total));
         } else {
-            println!("{}", size_message(&source, None, total, args.humanize));
+            crate::outln!("{}", size_message(&source, None, total, args.humanize));
         }
         return Ok(());
     }
@@ -128,7 +128,7 @@ pub async fn run(global: &GlobalOpts, args: DuArgs) -> anyhow::Result<()> {
         if json {
             crate::output::json_line(size_json(&source, Some(class), *sc));
         } else {
-            println!("{}", size_message(&source, Some(class), *sc, args.humanize));
+            crate::outln!("{}", size_message(&source, Some(class), *sc, args.humanize));
         }
     }
     Ok(())
