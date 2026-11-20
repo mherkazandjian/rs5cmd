@@ -463,8 +463,16 @@ fn rel_path(base: &Path, target: &Path) -> Option<PathBuf> {
     if base == target {
         return Some(PathBuf::from("."));
     }
-    let base_segs: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
-    let target_segs: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+    // "." is the current directory, not a path element: `go_dir("data")` is ".", and counting
+    // it as one turned the relative path of `data/a.txt` into `../data/a.txt`, which joins back
+    // onto the source itself (#2).
+    let segs = |p: &str| -> Vec<String> {
+        p.split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .map(str::to_string)
+            .collect()
+    };
+    let (base_segs, target_segs) = (segs(&base), segs(&target));
 
     let mut i = 0;
     while i < base_segs.len() && i < target_segs.len() && base_segs[i] == target_segs[i] {
@@ -475,7 +483,7 @@ fn rel_path(base: &Path, target: &Path) -> Option<PathBuf> {
     for _ in 0..ups {
         parts.push("..".to_string());
     }
-    parts.extend(target_segs[i..].iter().map(|s| s.to_string()));
+    parts.extend(target_segs[i..].iter().cloned());
     if parts.is_empty() {
         Some(PathBuf::from("."))
     } else {
@@ -601,6 +609,33 @@ mod tests {
         let mut matched = Url::parse("/tmp/data/1.txt").unwrap();
         matched.set_relative(&base);
         assert_eq!(matched.relative(), "1.txt");
+    }
+
+    #[test]
+    fn set_relative_against_bare_relative_dir() {
+        // `cp data out/` and `cp ./data out/`: the files keep the directory name, like with an
+        // absolute or nested source, and never map back onto themselves (#2).
+        for src in ["data", "./data"] {
+            let base = Url::parse(src).unwrap();
+            let mut matched = Url::parse("data/a.txt").unwrap();
+            matched.set_relative(&base);
+            assert_eq!(matched.relative(), "data/a.txt", "source {src}");
+        }
+        let base = Url::parse("../data").unwrap();
+        let mut matched = Url::parse("../data/sub/b.txt").unwrap();
+        matched.set_relative(&base);
+        assert_eq!(matched.relative(), "data/sub/b.txt");
+    }
+
+    #[test]
+    fn non_wildcard_url_matches_by_prefix() {
+        // A non-wildcard URL compiles no regex; its prefix test accepts what `(?s)^prefix.*$` did,
+        // including keys with newlines and regex metacharacters.
+        let mut u = Url::parse("s3://b/a.b+c/").unwrap();
+        assert!(u.matches("a.b+c/x\ny"));
+        assert!(u.matches("a.b+c/"));
+        assert!(!u.matches("aXb+c/x"));
+        assert!(!u.matches("a.b+"));
     }
 
     #[test]

@@ -104,8 +104,34 @@ impl Storage for Filesystem {
         if !dir.is_empty() && dir != "." {
             fs::create_dir_all(&dir)?;
         }
+        // `fs::copy` onto the source itself truncates it first, and `mv` would then delete it
+        // (#2). Refuse instead; the caller reports the error and keeps the source.
+        if same_file(Path::new(&src.absolute()), Path::new(&dst.absolute())) {
+            anyhow::bail!(
+                "source and destination are the same file: {}",
+                src.absolute()
+            );
+        }
         fs::copy(src.absolute(), dst.absolute())?;
         Ok(())
+    }
+}
+
+/// Whether two paths name the same existing file (device and inode on Unix, so hard links and
+/// different spellings of one path count too).
+fn same_file(a: &Path, b: &Path) -> bool {
+    match (fs::metadata(a), fs::metadata(b)) {
+        #[cfg(unix)]
+        (Ok(x), Ok(y)) => {
+            use std::os::unix::fs::MetadataExt;
+            x.dev() == y.dev() && x.ino() == y.ino()
+        }
+        #[cfg(not(unix))]
+        (Ok(_), Ok(_)) => match (fs::canonicalize(a), fs::canonicalize(b)) {
+            (Ok(x), Ok(y)) => x == y,
+            _ => false,
+        },
+        _ => false,
     }
 }
 
