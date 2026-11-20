@@ -29,6 +29,9 @@ async-trait = "0.1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 aws-smithy-runtime-api = "1"
+# The SDK's own default HTTP client, built once per process (S3::new): same crate and features as
+# the SDK's default-https-client.
+aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
 aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 bytes = "1"
 http-body = "1"

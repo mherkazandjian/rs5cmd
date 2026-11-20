@@ -140,6 +140,54 @@ fn load_ca_bundle(path: &str) -> anyhow::Result<Vec<rustls::pki_types::Certifica
 /// verification). We assemble a hyper + hyper-rustls connector — optionally
 /// wrapping a `ProxyConnector` — and adapt it to the smithy `HttpClient` trait
 /// that `aws_sdk_s3::config::Builder::http_client` accepts.
+/// One HTTP client for the whole process, built exactly like the SDK's default (hyper 1, rustls
+/// on aws-lc, the platform's trust store, proxy settings from the environment). The SDK builds
+/// its default client per `Client`, so every S3 client a command made (one per `run` line, two
+/// in `rm`) had its own connection pool: 10,001 connections for a 10k-line run file (#19).
+fn shared_default_http_client() -> aws_smithy_runtime_api::client::http::SharedHttpClient {
+    use aws_smithy_http_client::{proxy::ProxyConfig, tls, Builder, ConnectorBuilder};
+    use aws_smithy_runtime_api::client::http::SharedHttpClient;
+    static CLIENT: std::sync::OnceLock<SharedHttpClient> = std::sync::OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Builder::new().build_with_connector_fn(|settings, components| {
+                let mut conn = ConnectorBuilder::default().tls_provider(tls::Provider::Rustls(
+                    tls::rustls_provider::CryptoMode::AwsLc,
+                ));
+                conn.set_connector_settings(settings.cloned());
+                if let Some(components) = components {
+                    conn.set_sleep_impl(components.sleep_impl());
+                }
+                conn.set_proxy_config(Some(ProxyConfig::from_env()));
+                conn.build()
+            })
+        })
+        .clone()
+}
+
+/// `build_sdk_http_client`, once per distinct (no-verify, proxy, CA bundle) for the process, so
+/// those clients share their connection pools too.
+fn cached_custom_http_client(
+    no_verify: bool,
+    proxy: Option<ProxyConfig>,
+    ca_certs: Option<&str>,
+) -> anyhow::Result<aws_smithy_runtime_api::client::http::SharedHttpClient> {
+    use aws_smithy_runtime_api::client::http::SharedHttpClient;
+    static CACHE: std::sync::Mutex<Vec<(String, SharedHttpClient)>> =
+        std::sync::Mutex::new(Vec::new());
+    let key = format!("{no_verify}\u{0}{proxy:?}\u{0}{ca_certs:?}");
+    if let Some((_, c)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
+        return Ok(c.clone());
+    }
+    let client = build_sdk_http_client(no_verify, proxy, ca_certs)?;
+    let mut cache = CACHE.lock().unwrap();
+    if let Some((_, c)) = cache.iter().find(|(k, _)| *k == key) {
+        return Ok(c.clone());
+    }
+    cache.push((key, client.clone()));
+    Ok(client)
+}
+
 fn build_sdk_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
@@ -576,7 +624,24 @@ impl S3 {
         if let Some(profile) = &opts.profile {
             loader = loader.profile_name(profile);
         }
-        let shared = loader.load().await;
+        // One config load (region chain, credentials provider and its cache) per (region,
+        // profile) for the whole process, however many S3 clients the command builds (F09). The
+        // loader reads nothing else from `opts`. The HTTP client is shared separately below.
+        static SHARED: tokio::sync::Mutex<
+            Vec<((Option<String>, Option<String>), aws_config::SdkConfig)>,
+        > = tokio::sync::Mutex::const_new(Vec::new());
+        let key = (opts.region.clone(), opts.profile.clone());
+        let shared = {
+            let mut cache = SHARED.lock().await;
+            match cache.iter().find(|(k, _)| *k == key) {
+                Some((_, c)) => c.clone(),
+                None => {
+                    let c = loader.load().await;
+                    cache.push((key, c.clone()));
+                    c
+                }
+            }
+        };
 
         let mut builder = aws_sdk_s3::config::Builder::from(&shared);
 
@@ -644,12 +709,20 @@ impl S3 {
         // leave the SDK's default client in place.
         let proxy_cfg = effective_proxy(opts)?;
         if opts.no_verify_ssl || proxy_cfg.is_some() || opts.ca_certs_file.is_some() {
-            builder = builder.http_client(build_sdk_http_client(
+            builder = builder.http_client(cached_custom_http_client(
                 opts.no_verify_ssl,
                 proxy_cfg,
                 opts.ca_certs_file.as_deref(),
             )?);
+        } else {
+            builder = builder.http_client(shared_default_http_client());
         }
+        // `--retry-count` (default 10, like s5cmd) is the number of retries after the first
+        // attempt. It never reached the SDK, which then gave up after 3 attempts (F02, #17).
+        builder = builder.retry_config(
+            aws_config::retry::RetryConfig::standard()
+                .with_max_attempts(opts.max_retries.saturating_add(1)),
+        );
 
         Ok(S3 {
             client: Client::from_conf(builder.build()),
