@@ -1166,8 +1166,9 @@ impl S3 {
                 Ok(())
             }
             Err(e) => {
-                // Best-effort abort so we don't leak an incomplete upload.
-                let _ = self
+                // Best-effort abort so we don't leak an incomplete upload; say so if it fails,
+                // because the parts then stay billed until a lifecycle rule removes them.
+                let aborted = self
                     .client
                     .abort_multipart_upload()
                     .bucket(&dst.bucket)
@@ -1176,6 +1177,12 @@ impl S3 {
                     .set_request_payer(self.request_payer())
                     .send()
                     .await;
+                if let Err(ae) = aborted {
+                    eprintln!(
+                        "warning: could not abort multipart upload {upload_id} of {dst}: {}",
+                        crate::error::format_error(&anyhow::Error::from(ae))
+                    );
+                }
                 Err(e)
             }
         }
@@ -1188,6 +1195,7 @@ impl S3 {
         upload_id: &str,
         size: u64,
     ) -> anyhow::Result<Vec<CompletedPart>> {
+        use futures::TryStreamExt;
         let part_size = self.part_size;
         let n_parts = size.div_ceil(part_size) as i32;
         let src = src.to_path_buf();
@@ -1231,10 +1239,9 @@ impl S3 {
 
         let mut parts: Vec<CompletedPart> = stream::iter(tasks)
             .buffer_unordered(self.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            // Stop at the first failed part and drop the rest (F04).
+            .try_collect::<Vec<_>>()
+            .await?;
         // CompleteMultipartUpload requires parts in ascending part-number order.
         parts.sort_by_key(|p| p.part_number().unwrap_or(0));
         Ok(parts)
@@ -2049,8 +2056,9 @@ impl S3 {
                 Ok(())
             }
             Err(e) => {
-                // Best-effort abort so we don't leak an incomplete upload.
-                let _ = self
+                // Best-effort abort so we don't leak an incomplete upload; say so if it fails,
+                // because the parts then stay billed until a lifecycle rule removes them.
+                let aborted = self
                     .client
                     .abort_multipart_upload()
                     .bucket(&dst.bucket)
@@ -2059,6 +2067,12 @@ impl S3 {
                     .set_request_payer(self.request_payer())
                     .send()
                     .await;
+                if let Err(ae) = aborted {
+                    eprintln!(
+                        "warning: could not abort multipart upload {upload_id} of {dst}: {}",
+                        crate::error::format_error(&anyhow::Error::from(ae))
+                    );
+                }
                 Err(e)
             }
         }
@@ -2073,6 +2087,7 @@ impl S3 {
         upload_id: &str,
         size: u64,
     ) -> anyhow::Result<Vec<CompletedPart>> {
+        use futures::TryStreamExt;
         // Grow the part size if needed so the part count stays within the S3
         // 10,000-part limit (a 5 TB object with the default 50 MiB part size
         // would otherwise need 100k parts).
@@ -2117,10 +2132,9 @@ impl S3 {
 
         let mut parts: Vec<CompletedPart> = stream::iter(tasks)
             .buffer_unordered(self.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            // Stop at the first failed part and drop the rest (F04).
+            .try_collect::<Vec<_>>()
+            .await?;
         parts.sort_by_key(|p| p.part_number().unwrap_or(0));
         Ok(parts)
     }
