@@ -37,6 +37,13 @@ impl Progress {
         }
     }
 
+    /// Grows the total by `n` items (for work that is discovered while it runs).
+    pub fn inc_length(&self, n: u64) {
+        if let Some(p) = &self.0 {
+            p.inc_length(n);
+        }
+    }
+
     /// Clears the bar from the terminal.
     pub fn finish(&self) {
         if let Some(p) = &self.0 {
