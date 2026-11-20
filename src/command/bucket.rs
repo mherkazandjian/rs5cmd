@@ -49,10 +49,9 @@ pub async fn run_rb(global: &GlobalOpts, args: RbArgs) -> anyhow::Result<()> {
 
     if args.force {
         // List the whole bucket (paginated) and batch-delete via the same
-        // chunked multi-delete `rm` uses. `--dry-run` is honored end-to-end with
-        // no special-casing: the S3 listing path short-circuits under dry-run
-        // (so the loop below sees no objects and deletes nothing), and
-        // `remove_bucket` is itself a no-op under dry-run.
+        // chunked multi-delete `rm` uses. Under `--dry-run`, multi-delete emits
+        // one "(dry-run) rm" line per listed object and sends no DeleteObjects
+        // request, and `remove_bucket` is a no-op.
         //
         // Note: `list_v2` does not surface object versions / delete-markers, so
         // on a versioning-enabled bucket that still holds versions,
