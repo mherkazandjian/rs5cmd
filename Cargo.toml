@@ -144,8 +144,10 @@ predicates = "3"
 
 # Measured in the optimization review (docs/OPTIMIZATION-REVIEW.md, E5): fat LTO with one codegen
 # unit uses about 11 % less CPU on every workload tried and makes the binary about 24 % smaller.
-# `panic = "abort"` waits until a closed stdout pipe exits cleanly (#7).
+# `panic = "abort"`: no unwinding tables or landing pads. Nothing catches a panic (a panic in a
+# task already ended the command), and a closed stdout pipe no longer panics (#7).
 [profile.release]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
+panic = "abort"
