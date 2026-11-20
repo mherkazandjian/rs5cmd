@@ -10,7 +10,6 @@ use crate::strutil;
 const GLOB_CHARACTERS: &str = "?*";
 const S3_SCHEME: &str = "s3://";
 const S3_SEPARATOR: &str = "/";
-const MATCH_ALL_RE: &str = ".*";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UrlType {
@@ -34,8 +33,17 @@ pub struct Url {
 
     relative_path: String,
     filter: String,
-    filter_regex: Option<Regex>,
+    filter_regex: Filter,
     raw: bool,
+}
+
+/// How `matches` tests a key. A non-wildcard URL's pattern `(?s)^<prefix>.*$` is exactly a
+/// prefix test, so only wildcard URLs compile a regex.
+#[derive(Debug, Clone)]
+enum Filter {
+    None,
+    Prefix,
+    Regex(Regex),
 }
 
 /// Options applied at construction time (mirrors the Go functional options).
@@ -65,7 +73,7 @@ impl Url {
                     start_after: opts.start_after.clone().unwrap_or_default(),
                     relative_path: String::new(),
                     filter: String::new(),
-                    filter_regex: None,
+                    filter_regex: Filter::None,
                     raw: opts.raw,
                 };
                 url.set_prefix_and_filter()?;
@@ -100,7 +108,7 @@ impl Url {
                     start_after: opts.start_after.clone().unwrap_or_default(),
                     relative_path: String::new(),
                     filter: String::new(),
-                    filter_regex: None,
+                    filter_regex: Filter::None,
                     raw: opts.raw,
                 };
                 url.set_prefix_and_filter()?;
@@ -231,16 +239,16 @@ impl Url {
             }
         }
 
-        let mut filter_regex = if self.filter.is_empty() {
-            MATCH_ALL_RE.to_string()
-        } else {
-            strutil::wildcard_to_regexp(&self.filter)
-        };
+        if self.filter.is_empty() {
+            self.filter_regex = Filter::Prefix;
+            return Ok(());
+        }
+        let mut filter_regex = strutil::wildcard_to_regexp(&self.filter);
         filter_regex = format!("{}{}", regex::escape(&self.prefix), filter_regex);
         filter_regex = strutil::match_from_start_to_end(&filter_regex);
         filter_regex = strutil::add_newline_flag(&filter_regex);
         let r = Regex::new(&filter_regex).map_err(|e| e.to_string())?;
-        self.filter_regex = Some(r);
+        self.filter_regex = Filter::Regex(r);
         Ok(())
     }
 
@@ -261,10 +269,12 @@ impl Url {
 
     /// Whether the given key matches the object's filter; updates relative path.
     pub fn matches(&mut self, key: &str) -> bool {
-        let Some(re) = &self.filter_regex else {
-            return false;
+        let hit = match &self.filter_regex {
+            Filter::None => false,
+            Filter::Prefix => key.starts_with(&self.prefix),
+            Filter::Regex(re) => re.is_match(key),
         };
-        if !re.is_match(key) {
+        if !hit {
             return false;
         }
         let is_batch = !self.filter.is_empty();
@@ -453,8 +463,16 @@ fn rel_path(base: &Path, target: &Path) -> Option<PathBuf> {
     if base == target {
         return Some(PathBuf::from("."));
     }
-    let base_segs: Vec<&str> = base.split('/').filter(|s| !s.is_empty()).collect();
-    let target_segs: Vec<&str> = target.split('/').filter(|s| !s.is_empty()).collect();
+    // "." is the current directory, not a path element: `go_dir("data")` is ".", and counting
+    // it as one turned the relative path of `data/a.txt` into `../data/a.txt`, which joins back
+    // onto the source itself (#2).
+    let segs = |p: &str| -> Vec<String> {
+        p.split('/')
+            .filter(|s| !s.is_empty() && *s != ".")
+            .map(str::to_string)
+            .collect()
+    };
+    let (base_segs, target_segs) = (segs(&base), segs(&target));
 
     let mut i = 0;
     while i < base_segs.len() && i < target_segs.len() && base_segs[i] == target_segs[i] {
@@ -465,7 +483,7 @@ fn rel_path(base: &Path, target: &Path) -> Option<PathBuf> {
     for _ in 0..ups {
         parts.push("..".to_string());
     }
-    parts.extend(target_segs[i..].iter().map(|s| s.to_string()));
+    parts.extend(target_segs[i..].iter().cloned());
     if parts.is_empty() {
         Some(PathBuf::from("."))
     } else {
@@ -591,6 +609,33 @@ mod tests {
         let mut matched = Url::parse("/tmp/data/1.txt").unwrap();
         matched.set_relative(&base);
         assert_eq!(matched.relative(), "1.txt");
+    }
+
+    #[test]
+    fn set_relative_against_bare_relative_dir() {
+        // `cp data out/` and `cp ./data out/`: the files keep the directory name, like with an
+        // absolute or nested source, and never map back onto themselves (#2).
+        for src in ["data", "./data"] {
+            let base = Url::parse(src).unwrap();
+            let mut matched = Url::parse("data/a.txt").unwrap();
+            matched.set_relative(&base);
+            assert_eq!(matched.relative(), "data/a.txt", "source {src}");
+        }
+        let base = Url::parse("../data").unwrap();
+        let mut matched = Url::parse("../data/sub/b.txt").unwrap();
+        matched.set_relative(&base);
+        assert_eq!(matched.relative(), "data/sub/b.txt");
+    }
+
+    #[test]
+    fn non_wildcard_url_matches_by_prefix() {
+        // A non-wildcard URL compiles no regex; its prefix test accepts what `(?s)^prefix.*$` did,
+        // including keys with newlines and regex metacharacters.
+        let mut u = Url::parse("s3://b/a.b+c/").unwrap();
+        assert!(u.matches("a.b+c/x\ny"));
+        assert!(u.matches("a.b+c/"));
+        assert!(!u.matches("aXb+c/x"));
+        assert!(!u.matches("a.b+"));
     }
 
     #[test]
