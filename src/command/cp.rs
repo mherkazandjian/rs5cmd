@@ -199,10 +199,10 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
 
     // Pairs stream from a listing task through a bounded channel while transfers run (F13);
     // collecting them all first held every (source, destination) pair in memory at once.
-    // (`--fast` may swap both for the pairs it collected and declined.)
+    // (`--fast` may replace them with the pairs it collected and declined.)
     #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
-    let (mut pairs, mut expander) =
-        spawn_expander(srcs.clone(), dst.clone(), opts.clone(), args.follow_symlinks, filters);
+    let mut pairs =
+        Pairs::new(srcs.clone(), dst.clone(), opts.clone(), args.follow_symlinks, filters);
 
     // Any remote side present means we need an S3 client. Use the first source
     // (or the destination) that is remote as the config anchor.
@@ -218,24 +218,15 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         {
             // The fast path shards a complete list, so it still collects first.
             let mut all = Vec::new();
-            while let Some(p) = pairs.recv().await {
+            while let Some(p) = pairs.next().await {
                 all.push(p);
             }
-            expander.await.expect("listing task panicked")?;
+            pairs.finish().await?;
             if let Some(r) = try_fast_path(global, &all, is_move, op).await? {
                 return r;
             }
             // Declined (a local->local pair): run the collected pairs on the default path.
-            let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
-            pairs = rx;
-            expander = tokio::spawn(async move {
-                for p in all {
-                    if tx.send(p).await.is_err() {
-                        break;
-                    }
-                }
-                anyhow::Ok(())
-            });
+            pairs = Pairs::Known(all.into_iter());
         }
         #[cfg(not(feature = "fast"))]
         eprintln!("warning: --fast ignored (built without the `fast` feature); using default path");
@@ -287,7 +278,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // The total grows as the listing yields pairs.
     let pb = crate::progress::Progress::new(0, op);
     let mut set = tokio::task::JoinSet::new();
-    while let Some((s, d)) = pairs.recv().await {
+    while let Some((s, d)) = pairs.next().await {
         pb.inc_length(1);
         while set.len() >= workers {
             let (s, d, r) = set.join_next().await.unwrap().expect("transfer task panicked");
@@ -322,7 +313,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     pb.finish();
     // A listing that failed ends the run with its error, after the transfers it already
     // yielded have finished.
-    expander.await.expect("listing task panicked")?;
+    pairs.finish().await?;
 
     if had_error {
         anyhow::bail!("one or more {op} operations failed");
@@ -333,29 +324,79 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
 /// How many listed (source, destination) pairs may wait for a transfer slot.
 const PAIRS_QUEUED: usize = 1024;
 
-/// Lists every source on a task of its own and sends the (source, destination) pairs through a
-/// bounded channel, in source order. The task's result is the first listing error, if any; it
-/// stops early once the receiver is gone.
-fn spawn_expander(
-    srcs: Vec<Url>,
-    dst: Url,
-    opts: Options,
-    follow_symlinks: bool,
-    filters: Filters,
-) -> (
-    tokio::sync::mpsc::Receiver<(Url, Url)>,
-    tokio::task::JoinHandle<anyhow::Result<()>>,
-) {
-    let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
-    let task = tokio::spawn(async move {
-        for src in &srcs {
-            if !expand_sources(src, &dst, &opts, follow_symlinks, &filters, &tx).await? {
-                break;
+/// The (source, destination) pairs of a cp or mv, in source order.
+enum Pairs {
+    /// No source expands (one key or file each, as on most lines of a `run` file): the pairs
+    /// are known at once. A listing task and its channel per command made glibc hand memory back
+    /// and fault it in again (+11 % on a 10k-line `run` file).
+    Known(std::vec::IntoIter<(Url, Url)>),
+    /// Listed by a task of its own, through a bounded channel. The task's result is the first
+    /// listing error, if any; it stops early once the receiver is gone.
+    Listed {
+        rx: tokio::sync::mpsc::Receiver<(Url, Url)>,
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    },
+}
+
+impl Pairs {
+    fn new(
+        srcs: Vec<Url>,
+        dst: Url,
+        opts: Options,
+        follow_symlinks: bool,
+        filters: Filters,
+    ) -> Pairs {
+        if !srcs.iter().any(expands) {
+            let known: Vec<(Url, Url)> = srcs
+                .iter()
+                .map(|s| (s.clone(), resolve_single_dest(s, &dst)))
+                .collect();
+            return Pairs::Known(known.into_iter());
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
+        let task = tokio::spawn(async move {
+            for src in &srcs {
+                if !expand_sources(src, &dst, &opts, follow_symlinks, &filters, &tx).await? {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        Pairs::Listed { rx, task }
+    }
+
+    async fn next(&mut self) -> Option<(Url, Url)> {
+        match self {
+            Pairs::Known(pairs) => pairs.next(),
+            Pairs::Listed { rx, .. } => rx.recv().await,
+        }
+    }
+
+    /// The listing's result: its first error, if any.
+    async fn finish(self) -> anyhow::Result<()> {
+        match self {
+            Pairs::Known(_) => Ok(()),
+            Pairs::Listed { rx, task } => {
+                drop(rx);
+                task.await.expect("listing task panicked")
             }
         }
-        Ok(())
-    });
-    (rx, task)
+    }
+}
+
+/// Whether a source expands into several (source, destination) pairs: a wildcard, a bucket or
+/// prefix, a local directory, or every version of a key.
+fn expands(src: &Url) -> bool {
+    if src.is_wildcard() {
+        true
+    } else if src.is_remote() {
+        src.all_versions || src.is_bucket() || src.is_prefix()
+    } else {
+        // Local: a directory expands.
+        std::fs::metadata(src.absolute())
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+    }
 }
 
 /// Prints the per-transfer result line, tracking whether any failed.
@@ -387,6 +428,10 @@ async fn expand_sources(
     filters: &Filters,
     out: &tokio::sync::mpsc::Sender<(Url, Url)>,
 ) -> anyhow::Result<bool> {
+    if !expands(src) {
+        let dst_url = resolve_single_dest(src, dst);
+        return Ok(out.send((src.clone(), dst_url)).await.is_ok());
+    }
     let client = new_client(src, opts).await?;
 
     // `--all-versions` against a single remote key: route the source through the
@@ -401,22 +446,6 @@ async fn expand_sources(
             }
         }
         return Ok(true);
-    }
-
-    let is_multi = if src.is_wildcard() {
-        true
-    } else if src.is_remote() {
-        src.is_bucket() || src.is_prefix()
-    } else {
-        // Local: a directory expands.
-        std::fs::metadata(src.absolute())
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-    };
-
-    if !is_multi {
-        let dst_url = resolve_single_dest(src, dst);
-        return Ok(out.send((src.clone(), dst_url)).await.is_ok());
     }
 
     // Expand by listing.
