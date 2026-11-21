@@ -69,12 +69,27 @@ pub fn is_emfile(_err: &anyhow::Error) -> bool {
     false
 }
 
+/// The next step for a profile that needs SSO in a build without the `sso` feature: aws-config's
+/// error names only the cargo feature.
+pub const SSO_HINT: &str = "this build of rs5cmd has no SSO support: export the profile's \
+     credentials first, with \
+     eval \"$(aws configure export-credentials --profile NAME --format env)\", \
+     or build rs5cmd with `--features sso`";
+
+/// Whether aws-config refused a profile because the build lacks the `sso` feature.
+fn needs_sso_feature(msg: &str) -> bool {
+    msg.contains("cargo feature(s) enabled: sso")
+}
+
 /// Formats an error for display (`{e:#}`), appending the RLIMIT_NOFILE hint when
-/// the cause is a raw `EMFILE` so the user gets an actionable next step (#390).
+/// the cause is a raw `EMFILE` so the user gets an actionable next step (#390), and
+/// `SSO_HINT` when the profile needs SSO and the build has none.
 pub fn format_error(err: &anyhow::Error) -> String {
     let base = format!("{err:#}");
     if is_emfile(err) {
         format!("{base} ({})", crate::rlimit::EMFILE_HINT)
+    } else if needs_sso_feature(&base) {
+        format!("{} ({SSO_HINT})", base.trim_end())
     } else {
         base
     }
@@ -94,6 +109,19 @@ mod tests {
             err: anyhow::anyhow!("boom"),
         };
         assert_eq!(e.full_command(), "cp s3://b/k /tmp/k");
+    }
+
+    #[test]
+    fn an_sso_profile_without_the_feature_gets_the_next_step() {
+        let e = anyhow::anyhow!(
+            "the credentials provider was not properly configured: ProfileFile provider could \
+             not be built: This behavior requires following cargo feature(s) enabled: sso. "
+        );
+        let msg = format_error(&e);
+        assert!(msg.ends_with(&format!("enabled: sso. ({SSO_HINT})")), "{msg}");
+        assert!(SSO_HINT.contains("aws configure export-credentials"));
+        assert!(SSO_HINT.contains("--features sso"));
+        assert_eq!(format_error(&anyhow::anyhow!("boom")), "boom");
     }
 
     #[test]

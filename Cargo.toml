@@ -26,8 +26,8 @@ futures = "0.3"
 async-trait = "0.1"
 
 # AWS S3
-# The default features less `sso`, which is rs5cmd's own feature `sso` (on by default), so a
-# build can leave out the SSO and SSO-OIDC clients.
+# The default features less `sso`, which is rs5cmd's own feature `sso` (off by default), so
+# builds leave out the SSO and SSO-OIDC clients unless asked.
 aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process"] }
 # Without the default features: every S3 client gets rs5cmd's HTTP client (`build_http_client`),
 # and the default `rustls` feature linked the SDK's legacy client in as well (hyper 0.14,
@@ -88,11 +88,12 @@ mimalloc = { version = "0.1.52", optional = true, default-features = false }
 # Gated behind the `fast` feature so the default build is unaffected and still
 # compiles on non-Linux / without io_uring.
 [features]
-default = ["sso", "mimalloc"]
+default = ["mimalloc"]
 # mimalloc as the global allocator (src/main.rs). Without it, the system allocator.
 mimalloc = ["dep:mimalloc"]
 # Credentials from AWS IAM Identity Center (SSO) profiles: `sso_session` / `sso_start_url` in
-# ~/.aws/config, as `aws sso login` sets up. Without it such a profile yields no credentials.
+# ~/.aws/config, as `aws sso login` sets up. Off by default (release builds leave it out):
+# without it such a profile fails with an error that names the feature.
 sso = ["aws-config/sso"]
 fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:sha2", "dep:hex", "dep:core_affinity"]
 # FUSE mount (`rs5cmd mount`): rclone-style local mount of a remote S3 path.

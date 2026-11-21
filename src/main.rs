@@ -97,7 +97,8 @@ async fn main() -> ExitCode {
         res = command::run(cli) => match res {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                rs5cmd::output::err_line(format_args!("error: {e:#}"));
+                let msg = rs5cmd::error::format_error(&e);
+                rs5cmd::output::err_line(format_args!("error: {msg}"));
                 ExitCode::FAILURE
             }
         }

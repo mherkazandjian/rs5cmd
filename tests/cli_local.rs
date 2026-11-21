@@ -54,3 +54,39 @@ fn copying_a_file_onto_itself_fails_and_keeps_it() {
         assert_eq!(fs::read(tmp.path().join("a.txt")).unwrap(), b"hello", "{cmd}");
     }
 }
+
+/// Without the `sso` feature (the default), a profile that needs IAM Identity Center fails at
+/// once with an error that names the feature, instead of falling through to other credentials.
+#[cfg(not(feature = "sso"))]
+#[test]
+fn sso_profile_without_the_sso_feature_names_the_feature() {
+    let tmp = tempfile::tempdir().unwrap();
+    let config = tmp.path().join("config");
+    fs::write(
+        &config,
+        "[profile sso-test]\nsso_session = s\nsso_account_id = 111122223333\n\
+         sso_role_name = r\nregion = us-east-1\n\n[sso-session s]\n\
+         sso_start_url = https://example.invalid/start\nsso_region = us-east-1\n",
+    )
+    .unwrap();
+    let out = rs5cmd()
+        .env("HOME", tmp.path())
+        .env("AWS_CONFIG_FILE", &config)
+        .env("AWS_SHARED_CREDENTIALS_FILE", tmp.path().join("credentials"))
+        .env("AWS_EC2_METADATA_DISABLED", "true")
+        .env_remove("AWS_ACCESS_KEY_ID")
+        .env_remove("AWS_SECRET_ACCESS_KEY")
+        .env_remove("AWS_SESSION_TOKEN")
+        .env_remove("AWS_PROFILE")
+        .env_remove("AWS_ENDPOINT_URL")
+        .args(["--profile", "sso-test", "--endpoint-url", "http://127.0.0.1:9"])
+        .args(["--retry-count", "0", "ls", "s3://bucket/"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("sso") && stderr.contains("feature"), "{stderr}");
+    // ... and says what to do instead (rs5cmd::error::SSO_HINT).
+    let hint = "aws configure export-credentials";
+    assert!(stderr.contains("error: ") && stderr.contains(hint), "{stderr}");
+}
