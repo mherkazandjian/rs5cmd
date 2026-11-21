@@ -29,20 +29,18 @@ async-trait = "0.1"
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-s3 = "1"
 aws-smithy-runtime-api = "1"
-# The SDK's own default HTTP client, built once per process (S3::new): same crate and features as
-# the SDK's default-https-client.
-aws-smithy-http-client = { version = "1", features = ["rustls-aws-lc"] }
 aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 bytes = "1"
 http-body = "1"
 aws-credential-types = "1"
 
-# Custom no-verify HTTP client for the default SDK path (`--no-verify-ssl`):
-# we build a hyper + hyper-rustls connector with a dangerous cert verifier and
-# adapt it to the smithy `HttpClient` trait. These are non-optional so the
-# default build can express no-verify. `rustls`/`http` are also used by `fast`.
+# rs5cmd's HTTP client for S3 (src/storage/s3.rs `build_http_client`): hyper + hyper-rustls,
+# HTTP/1.1 only (#14), adapted to the smithy `HttpClient` trait; it also carries
+# `--no-verify-ssl`, `--proxy` and `--ca-certs-file`. `rustls`/`http` are also used by `fast`.
 # `ring` provider matches the fast path's crypto backend.
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", features = ["ring", "aws_lc_rs"] }
+# The platform's trust store (with SSL_CERT_FILE / SSL_CERT_DIR), as the SDK's client used.
+rustls-native-certs = "0.8"
 # Parse a custom CA bundle (`--ca-certs-file`) into rustls certificates.
 rustls-pemfile = "2"
 hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "native-tokio"] }

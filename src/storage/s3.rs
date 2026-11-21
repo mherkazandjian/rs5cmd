@@ -13,6 +13,7 @@ use aws_sdk_s3::Client;
 use futures::stream::{self, StreamExt};
 use tokio::sync::mpsc;
 
+use super::partial::PartialFile;
 use super::url::Url;
 use super::{
     Bucket, Metadata, NoObjectFound, Object, ObjectNotFound, ObjectType, Options, StorageClass,
@@ -62,6 +63,26 @@ fn map_conditional_write_error(e: anyhow::Error, dst: &Url) -> anyhow::Error {
     } else {
         e
     }
+}
+
+/// Streams a response body into `file` from `offset`, chunk by chunk as it arrives (E2: no
+/// buffer of a whole part), pacing each received chunk through the download limiter (F05).
+/// Returns the offset after the last byte written.
+async fn write_body(
+    mut body: ByteStream,
+    file: &std::fs::File,
+    mut offset: u64,
+    limiter: Option<&RateLimiter>,
+) -> anyhow::Result<u64> {
+    use std::os::unix::fs::FileExt;
+    while let Some(chunk) = body.try_next().await? {
+        if let Some(limiter) = limiter {
+            limiter.acquire(chunk.len() as u64).await;
+        }
+        file.write_all_at(&chunk, offset)?;
+        offset += chunk.len() as u64;
+    }
+    Ok(offset)
 }
 
 /// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
@@ -133,13 +154,6 @@ fn load_ca_bundle(path: &str) -> anyhow::Result<Vec<rustls::pki_types::Certifica
     Ok(certs)
 }
 
-/// Builds a custom HTTP client for the AWS SDK when we need behavior the
-/// bundled connector can't express: `--no-verify-ssl` (skip TLS verification
-/// for self-signed endpoints), `--proxy` (route through a SOCKS5 or HTTP proxy),
-/// and/or `--ca-certs-file` (trust a private/self-signed CA without disabling
-/// verification). We assemble a hyper + hyper-rustls connector — optionally
-/// wrapping a `ProxyConnector` — and adapt it to the smithy `HttpClient` trait
-/// that `aws_sdk_s3::config::Builder::http_client` accepts.
 /// The SDK's default region chain without its last step, the EC2 instance-metadata probe: the
 /// environment, then the profile file (`--profile` or AWS_PROFILE). Outside EC2 the probe waited
 /// about 3 s for a timeout on every invocation that had no region configured (#20). s5cmd never
@@ -192,34 +206,10 @@ async fn bucket_region(client: &Client, endpoint: &str, bucket: &str) -> Option<
     r
 }
 
-/// One HTTP client for the whole process, built exactly like the SDK's default (hyper 1, rustls
-/// on aws-lc, the platform's trust store, proxy settings from the environment). The SDK builds
-/// its default client per `Client`, so every S3 client a command made (one per `run` line, two
-/// in `rm`) had its own connection pool: 10,001 connections for a 10k-line run file (#19).
-fn shared_default_http_client() -> aws_smithy_runtime_api::client::http::SharedHttpClient {
-    use aws_smithy_http_client::{proxy::ProxyConfig, tls, Builder, ConnectorBuilder};
-    use aws_smithy_runtime_api::client::http::SharedHttpClient;
-    static CLIENT: std::sync::OnceLock<SharedHttpClient> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            Builder::new().build_with_connector_fn(|settings, components| {
-                let mut conn = ConnectorBuilder::default().tls_provider(tls::Provider::Rustls(
-                    tls::rustls_provider::CryptoMode::AwsLc,
-                ));
-                conn.set_connector_settings(settings.cloned());
-                if let Some(components) = components {
-                    conn.set_sleep_impl(components.sleep_impl());
-                }
-                conn.set_proxy_config(Some(ProxyConfig::from_env()));
-                conn.build()
-            })
-        })
-        .clone()
-}
-
-/// `build_sdk_http_client`, once per distinct (no-verify, proxy, CA bundle) for the process, so
-/// those clients share their connection pools too.
-fn cached_custom_http_client(
+/// The HTTP client of every S3 client in the process, one per distinct (no-verify, proxy, CA
+/// bundle), so they share connection pools: the SDK builds its default client per S3 client, which
+/// opened 10,001 connections for a 10k-line `run` file (#19).
+fn cached_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
     ca_certs: Option<&str>,
@@ -231,7 +221,7 @@ fn cached_custom_http_client(
     if let Some((_, c)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Ok(c.clone());
     }
-    let client = build_sdk_http_client(no_verify, proxy, ca_certs)?;
+    let client = build_http_client(no_verify, proxy, ca_certs)?;
     let mut cache = CACHE.lock().unwrap();
     if let Some((_, c)) = cache.iter().find(|(k, _)| *k == key) {
         return Ok(c.clone());
@@ -240,21 +230,36 @@ fn cached_custom_http_client(
     Ok(client)
 }
 
-fn build_sdk_http_client(
+/// rs5cmd's HTTP client for S3 requests: hyper 1 over rustls (ring).
+///
+/// - HTTP/1.1 only, as S3 itself and s5cmd's Go transport. The SDK's client also offers HTTP/2,
+///   and behind an HTTP/2 front end hyper then sends every request to the endpoint over one
+///   connection: one TCP flow and one thread for all parts of a download, which capped a 100 GB
+///   download at ~700 MB/s where s5cmd did 1.6 GB/s (#14).
+/// - Trust: the platform's roots, `SSL_CERT_FILE` and `SSL_CERT_DIR` included, as the SDK's
+///   client (read on the first TLS handshake: `platform_trust`); with a proxy or
+///   `--ca-certs-file`, the bundled webpki roots plus the bundle;
+///   `--no-verify-ssl` verifies nothing (no hostname check either: the intended effect).
+/// - As the SDK's client: TCP_NODELAY, the SDK's connect timeout (3.1 s unless configured; TLS
+///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
+///   retries the same ones (`connector_error`).
+/// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record.
+/// - Crypto: aws-lc-rs, as the SDK's client: it offers post-quantum hybrid key exchange
+///   (X25519MLKEM768) first, and its AES-GCM costs less CPU than ring's.
+fn build_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
     ca_certs: Option<&str>,
 ) -> anyhow::Result<aws_smithy_runtime_api::client::http::SharedHttpClient> {
     use aws_smithy_runtime_api::client::http::SharedHttpClient;
     use hyper_rustls::HttpsConnectorBuilder;
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
+    use hyper_util::client::legacy::connect::HttpConnector;
     use std::sync::Arc;
 
     // Process-wide default crypto provider (idempotent; the fast path may also
     // install one). Ignore the error if it's already installed.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 
     let tls = if no_verify {
         // Verification disabled — a custom CA bundle would be moot, so skip it.
@@ -263,6 +268,14 @@ fn build_sdk_http_client(
             .expect("rustls safe default protocol versions")
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(danger::NoVerify(provider)))
+            .with_no_client_auth()
+    } else if proxy.is_none() && ca_certs.is_none() {
+        // What the SDK's client trusted, loaded on the first TLS handshake.
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("rustls safe default protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(platform_trust::Verifier::new(provider)))
             .with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
@@ -283,68 +296,118 @@ fn build_sdk_http_client(
             .with_no_client_auth()
     };
 
-    match proxy {
+    // HTTP/1.1 alone: hyper-rustls then offers no ALPN, so no server can choose HTTP/2.
+    let https = HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_or_http()
+        .enable_http1();
+    Ok(match proxy {
         None => {
-            let https = HttpsConnectorBuilder::new()
-                .with_tls_config(tls)
-                .https_or_http()
-                .enable_http1()
-                .enable_http2()
-                .build();
-            let client: Client<_, aws_smithy_types::body::SdkBody> =
-                Client::builder(TokioExecutor::new()).build(https);
-            Ok(SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) }))
+            let mut tcp = HttpConnector::new();
+            tcp.enforce_http(false);
+            tcp.set_nodelay(true);
+            SharedHttpClient::new(SdkHyperClient::new(https.wrap_connector(tcp)))
         }
-        Some(p) => {
-            let https = HttpsConnectorBuilder::new()
-                .with_tls_config(tls)
-                .https_or_http()
-                .enable_http1()
-                .enable_http2()
-                .wrap_connector(ProxyConnector { proxy: p });
-            let client: Client<_, aws_smithy_types::body::SdkBody> =
-                Client::builder(TokioExecutor::new()).build(https);
-            Ok(SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) }))
+        Some(p) => SharedHttpClient::new(SdkHyperClient::new(
+            https.wrap_connector(ProxyConnector { proxy: p }),
+        )),
+    })
+}
+
+/// A smithy `HttpClient` over a pooled hyper-util client on connector `C` (direct or through a
+/// proxy). The connect timeout comes with the SDK's settings, so the client is built when the
+/// SDK first asks for a connector: one per distinct timeout, one in practice.
+struct SdkHyperClient<C> {
+    connector: C,
+    clients: std::sync::Mutex<
+        Vec<(
+            Option<std::time::Duration>,
+            aws_smithy_runtime_api::client::http::SharedHttpConnector,
+        )>,
+    >,
+}
+
+impl<C> SdkHyperClient<C> {
+    fn new(connector: C) -> Self {
+        SdkHyperClient {
+            connector,
+            clients: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
 
-/// A smithy `HttpClient` backed by a hyper-util legacy `Client` over connector
-/// `C` (generic so it serves both the proxy and non-proxy connector types).
-#[derive(Debug, Clone)]
-struct SdkHyperClient<C: Clone> {
-    client: std::sync::Arc<
-        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
-    >,
+impl<C> std::fmt::Debug for SdkHyperClient<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdkHyperClient")
+    }
 }
 
 impl<C> aws_smithy_runtime_api::client::http::HttpClient for SdkHyperClient<C>
 where
-    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+    C: tower_service::Service<http::Uri> + Clone + Send + Sync + 'static,
+    C::Response: hyper::rt::Read
+        + hyper::rt::Write
+        + hyper_util::client::legacy::connect::Connection
+        + Send
+        + Unpin
+        + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
 {
     fn http_connector(
         &self,
-        _settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
+        settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
         _components: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
     ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector {
-        aws_smithy_runtime_api::client::http::SharedHttpConnector::new(SdkHyperConnector {
-            client: self.client.clone(),
-        })
+        use aws_smithy_runtime_api::client::http::SharedHttpConnector;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::{TokioExecutor, TokioTimer};
+
+        let timeout = settings.connect_timeout();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, c)) = clients.iter().find(|(t, _)| *t == timeout) {
+            return c.clone();
+        }
+        let mut builder = Client::builder(TokioExecutor::new());
+        // With a timer the pool closes connections idle for 90 s (hyper-util's default).
+        builder.pool_timer(TokioTimer::new());
+        let client = builder.build(ConnectTimeout {
+            inner: self.connector.clone(),
+            timeout,
+        });
+        let c = SharedHttpConnector::new(SdkHyperConnector {
+            client: std::sync::Arc::new(client),
+        });
+        clients.push((timeout, c.clone()));
+        c
     }
 }
 
 /// Adapts a hyper 1.x legacy `Client` to the smithy `HttpConnector` trait,
 /// mirroring `aws-smithy-http-client`'s internal `Adapter`.
-#[derive(Debug, Clone)]
-struct SdkHyperConnector<C: Clone> {
+struct SdkHyperConnector<C> {
     client: std::sync::Arc<
-        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
+        hyper_util::client::legacy::Client<ConnectTimeout<C>, aws_smithy_types::body::SdkBody>,
     >,
+}
+
+impl<C> std::fmt::Debug for SdkHyperConnector<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdkHyperConnector")
+    }
 }
 
 impl<C> aws_smithy_runtime_api::client::http::HttpConnector for SdkHyperConnector<C>
 where
-    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+    C: tower_service::Service<http::Uri> + Clone + Send + Sync + 'static,
+    C::Response: hyper::rt::Read
+        + hyper::rt::Write
+        + hyper_util::client::legacy::connect::Connection
+        + Send
+        + Unpin
+        + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
 {
     fn call(
         &self,
@@ -361,15 +424,244 @@ where
         };
         let client = self.client.clone();
         HttpConnectorFuture::new(async move {
-            let response = client
-                .request(request)
-                .await
-                .map_err(|e| ConnectorError::other(e.into(), None))?;
+            let response = client.request(request).await.map_err(connector_error)?;
             let (parts, body) = response.into_parts();
             let body = SdkBody::from_body_1_x(body);
             HttpResponse::try_from(http::Response::from_parts(parts, body))
                 .map_err(|err| ConnectorError::other(err.into(), None))
         })
+    }
+}
+
+/// The SDK's connect timeout around a connector, TLS handshake included (as the SDK's client
+/// times it). Without one a connection to an unreachable host waited for the kernel's SYN
+/// retries, about two minutes. Its connections read as `FillingReads`.
+#[derive(Clone)]
+struct ConnectTimeout<C> {
+    inner: C,
+    timeout: Option<std::time::Duration>,
+}
+
+#[derive(Debug)]
+struct ConnectTimedOut(std::time::Duration);
+
+impl std::fmt::Display for ConnectTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no connection within {:?}", self.0)
+    }
+}
+
+impl std::error::Error for ConnectTimedOut {}
+
+impl<C> tower_service::Service<http::Uri> for ConnectTimeout<C>
+where
+    C: tower_service::Service<http::Uri>,
+    C::Response: Send + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
+{
+    type Response = FillingReads<C::Response>;
+    type Error = BoxError;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Self::Response, BoxError>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), BoxError>> {
+        self.inner.poll_ready(cx).map_err(Into::into)
+    }
+
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let fill = uri.scheme() == Some(&http::uri::Scheme::HTTPS);
+        let connect = self.inner.call(uri);
+        let timeout = self.timeout;
+        Box::pin(async move {
+            let io = match timeout {
+                None => connect.await.map_err(Into::into)?,
+                Some(d) => match tokio::time::timeout(d, connect).await {
+                    Ok(r) => r.map_err(Into::into)?,
+                    Err(_) => return Err(Box::new(ConnectTimedOut(d)) as BoxError),
+                },
+            };
+            Ok(FillingReads {
+                io,
+                fill,
+                deferred: None,
+            })
+        })
+    }
+}
+
+/// A connection whose reads over TLS go on while more is ready, up to `FILL_LIMIT`. A TLS read
+/// returns one record (16 KiB at most) however much more has arrived, so a body came in 16 KiB
+/// chunks, each one write into the downloaded file under the file's lock; the runtime workers
+/// waiting on it left too few to decrypt (one 4 GiB object: 2.2 s, s5cmd 1.5 s). Plain
+/// connections pass through: their reads already return what is ready, and another read there
+/// would find nothing.
+struct FillingReads<T> {
+    io: T,
+    fill: bool,
+    /// An error met after some bytes were read: the next read returns it.
+    deferred: Option<std::io::Error>,
+}
+
+/// The most one read gathers over TLS: 64 KiB (four records). hyper's read buffer settles at
+/// twice what its reads return, so this also bounds each connection's buffer; reading up to
+/// hyper's whole buffer (~400 KiB) was faster still for one object but tripled the memory of
+/// downloads over many connections, and wrote data already gone from the CPU's cache.
+const FILL_LIMIT: usize = 64 << 10;
+
+impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        mut buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::pin::Pin;
+        use std::task::Poll;
+        let this = self.get_mut();
+        if let Some(e) = this.deferred.take() {
+            return Poll::Ready(Err(e));
+        }
+        let capacity = buf.remaining().min(FILL_LIMIT);
+        if !this.fill || capacity == 0 {
+            return Pin::new(&mut this.io).poll_read(cx, buf);
+        }
+        // SAFETY: the inner reader only writes into this unfilled part, and only the bytes it
+        // reports filled (so initialized) are advanced over below.
+        let mut part = hyper::rt::ReadBuf::uninit(unsafe { &mut buf.as_mut()[..capacity] });
+        let mut result = Poll::Pending;
+        loop {
+            let before = part.filled().len();
+            match Pin::new(&mut this.io).poll_read(cx, part.unfilled()) {
+                Poll::Ready(Ok(())) => {
+                    result = Poll::Ready(Ok(()));
+                    let now = part.filled().len();
+                    // End of stream, or the buffer is full.
+                    if now == before || now == capacity {
+                        break;
+                    }
+                }
+                Poll::Ready(Err(e)) => {
+                    if part.filled().is_empty() {
+                        result = Poll::Ready(Err(e));
+                    } else {
+                        this.deferred = Some(e);
+                    }
+                    break;
+                }
+                // Nothing more ready: return what was read, if anything (the inner reader has
+                // registered the waker either way).
+                Poll::Pending => break,
+            }
+        }
+        let n = part.filled().len();
+        // SAFETY: `n` bytes were filled by the inner reader.
+        unsafe { buf.advance(n) };
+        result
+    }
+}
+
+impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for FillingReads<T> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_write_vectored(cx, bufs)
+    }
+}
+
+impl<T> hyper_util::client::legacy::connect::Connection for FillingReads<T>
+where
+    T: hyper_util::client::legacy::connect::Connection,
+{
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        self.io.connected()
+    }
+}
+
+/// A hyper error as the SDK's retry policy needs it, classified as the SDK's own client does
+/// (`aws-smithy-http-client`): timeouts and I/O errors (a refused, reset or closed connection) are
+/// retried, a response cut short is transient, an error of the request body is not retried. All
+/// were "other" before, which the SDK does not retry: the `--no-verify-ssl`, `--proxy` and
+/// `--ca-certs-file` clients gave up on the first dropped connection.
+fn connector_error(
+    err: hyper_util::client::legacy::Error,
+) -> aws_smithy_runtime_api::client::result::ConnectorError {
+    use aws_smithy_runtime_api::client::result::ConnectorError;
+    use aws_smithy_types::retry::ErrorKind;
+    use std::error::Error;
+
+    fn find<'a, E: Error + 'static>(mut e: &'a (dyn Error + 'static)) -> Option<&'a E> {
+        loop {
+            if let Some(found) = e.downcast_ref::<E>() {
+                return Some(found);
+            }
+            e = e.source()?;
+        }
+    }
+    enum Kind {
+        Timeout,
+        Io,
+        User,
+        Transient,
+        Other,
+    }
+    let kind = if find::<ConnectTimedOut>(&err).is_some() {
+        Kind::Timeout
+    } else if let Some(h) = find::<hyper::Error>(&err) {
+        if h.is_timeout() {
+            Kind::Timeout
+        } else if h.is_user() {
+            Kind::User
+        } else if h.is_closed() || h.is_canceled() || find::<std::io::Error>(h).is_some() {
+            Kind::Io
+        } else if h.is_incomplete_message() {
+            Kind::Transient
+        } else {
+            Kind::Other
+        }
+    } else if err.is_connect() || find::<std::io::Error>(&err).is_some() {
+        Kind::Io
+    } else {
+        Kind::Other
+    };
+    let err: BoxError = err.into();
+    match kind {
+        Kind::Timeout => ConnectorError::timeout(err),
+        Kind::Io => ConnectorError::io(err),
+        Kind::User => ConnectorError::user(err),
+        Kind::Transient => ConnectorError::other(err, Some(ErrorKind::TransientError)),
+        Kind::Other => ConnectorError::other(err, None),
     }
 }
 
@@ -642,6 +934,97 @@ mod danger {
     }
 }
 
+/// Server certificates checked against the platform's trust store, as the SDK's client did, but
+/// with the store read on the first TLS handshake: loading it (a 220 KB bundle and ~300 files in
+/// the certificate directory, each parsed) cost ~5 ms per process, which commands against an
+/// http:// endpoint never need. Every check is the one `with_root_certificates` installs
+/// (rustls's `WebPkiServerVerifier`): certificates through it, handshake signatures with the
+/// provider's algorithms as it does.
+mod platform_trust {
+    use std::sync::{Arc, OnceLock};
+
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, RootCertStore, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct Verifier {
+        provider: Arc<CryptoProvider>,
+        roots: OnceLock<Result<Arc<WebPkiServerVerifier>, String>>,
+    }
+
+    impl Verifier {
+        pub fn new(provider: Arc<CryptoProvider>) -> Self {
+            Verifier {
+                provider,
+                roots: OnceLock::new(),
+            }
+        }
+
+        fn webpki(&self) -> Result<&WebPkiServerVerifier, Error> {
+            let built = self.roots.get_or_init(|| {
+                // Certificates that fail to parse are skipped, as the SDK's client did.
+                let mut roots = RootCertStore::empty();
+                roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+                WebPkiServerVerifier::builder_with_provider(Arc::new(roots), self.provider.clone())
+                    .build()
+                    .map_err(|e| format!("the platform's trust store: {e}"))
+            });
+            match built {
+                Ok(v) => Ok(v),
+                Err(e) => Err(Error::General(e.clone())),
+            }
+        }
+    }
+
+    impl ServerCertVerifier for Verifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            server_name: &ServerName<'_>,
+            ocsp: &[u8],
+            now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            self.webpki()?.verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.provider.signature_verification_algorithms.supported_schemes()
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct S3 {
     pub(crate) client: Client,
@@ -747,26 +1130,13 @@ impl S3 {
             builder = builder.use_fips(true);
         }
 
-        // `--no-verify-ssl`: swap in a custom HTTP client whose rustls config
-        // skips certificate verification, for self-signed HTTPS endpoints. The
-        // bundled `aws-smithy-http-client` TLS context can only ADD trust, not
-        // disable verification, so we build our own hyper + hyper-rustls
-        // connector with a dangerous `ServerCertVerifier` and hand it to the
-        // SDK via `http_client`. NOTE: this also disables hostname checking —
-        // that is the intended effect of the flag.
-        // A custom HTTP client is needed for `--no-verify-ssl` and/or `--proxy`
-        // (the bundled connector supports neither). When neither is requested we
-        // leave the SDK's default client in place.
-        let proxy_cfg = effective_proxy(opts)?;
-        if opts.no_verify_ssl || proxy_cfg.is_some() || opts.ca_certs_file.is_some() {
-            builder = builder.http_client(cached_custom_http_client(
-                opts.no_verify_ssl,
-                proxy_cfg,
-                opts.ca_certs_file.as_deref(),
-            )?);
-        } else {
-            builder = builder.http_client(shared_default_http_client());
-        }
+        // rs5cmd's own HTTP client for every configuration (`build_http_client`): HTTP/1.1 only,
+        // and the only way to express `--no-verify-ssl`, `--proxy` and `--ca-certs-file`.
+        builder = builder.http_client(cached_http_client(
+            opts.no_verify_ssl,
+            effective_proxy(opts)?,
+            opts.ca_certs_file.as_deref(),
+        )?);
         // `--retry-count` (default 10, like s5cmd) is the number of retries after the first
         // attempt. It never reached the SDK, which then gave up after 3 attempts (F02, #17).
         builder = builder.retry_config(
@@ -905,9 +1275,13 @@ impl S3 {
             Err(e) => return Err(e.into()),
         };
 
+        // A 200 without Content-Range: the server ignored the Range header and sent the whole
+        // object, so there is nothing more to fetch.
+        let ranged = resp.content_range().is_some();
         let total = parse_content_range_total(resp.content_range())
             .or_else(|| resp.content_length().map(|l| l.max(0) as u64))
             .unwrap_or(0);
+
         // With --preserve-timestamps, capture the stored mtime metadata before
         // the body is consumed, to restore it after the file is written.
         let mtime_value = if self.preserve_timestamps {
@@ -917,25 +1291,17 @@ impl S3 {
         } else {
             None
         };
-        let first = resp.body.collect().await?.into_bytes();
-        // Throttle the download to the aggregate cap, if configured (#433).
-        if let Some(limiter) = &self.download_limiter {
-            limiter.acquire(first.len() as u64).await;
-        }
 
-        let file = std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(true)
-            .open(dst)?;
+        // Written under a temporary name and renamed over `dst` once complete (F03); on any
+        // error or cancellation the guard removes it and an existing `dst` stays as it was.
+        let (partial, file) = PartialFile::create(dst)?;
         file.set_len(total)?;
-        {
-            use std::os::unix::fs::FileExt;
-            file.write_all_at(&first, 0)?;
-        }
+        let file = std::sync::Arc::new(file);
+        let first_len = if ranged { part_size.min(total) } else { total };
+        let end = write_body(resp.body, &file, 0, self.download_limiter.as_deref()).await?;
+        anyhow::ensure!(end == first_len, "{src}: got {end} of {first_len} bytes");
 
-        // Small object: the first part was the whole object.
-        if total > part_size {
+        if ranged && total > part_size {
             // Large object: fetch parts 1..n concurrently into the file.
             self.download_remaining_parts(src, file, total, part_size).await?;
         }
@@ -943,42 +1309,36 @@ impl S3 {
         // Restore the preserved mtime, if any (best-effort: a malformed value or
         // an unsupported filesystem must not fail the otherwise-complete copy).
         if let Some(v) = mtime_value {
-            if let Err(e) = set_file_mtime_from_value(dst, &v) {
+            if let Err(e) = set_file_mtime_from_value(partial.path(), &v) {
                 eprintln!("warning: could not restore mtime on {}: {e:#}", dst.display());
             }
         }
+        partial.commit()?;
         Ok(())
     }
 
     /// Single streaming GET to a file. Used as the zero-byte / range-error
     /// fallback for `download`.
     async fn download_single(&self, src: &Url, dst: &Path) -> anyhow::Result<()> {
-        let mut body = self.read(src).await?;
-        let mut file = tokio::fs::File::create(dst).await?;
-        use tokio::io::AsyncWriteExt;
-        while let Some(chunk) = body.try_next().await? {
-            // Throttle the download to the aggregate cap, if configured (#433).
-            if let Some(limiter) = &self.download_limiter {
-                limiter.acquire(chunk.len() as u64).await;
-            }
-            file.write_all(&chunk).await?;
-        }
-        file.flush().await?;
+        let body = self.read(src).await?;
+        let (partial, file) = PartialFile::create(dst)?;
+        write_body(body, &file, 0, self.download_limiter.as_deref()).await?;
+        drop(file);
+        partial.commit()?;
         Ok(())
     }
 
     /// Fetches parts `1..n` (part 0 is already written) as concurrent ranged
-    /// GETs written at their offsets into the preallocated file.
+    /// GETs, each streamed into the preallocated file at its offset.
     async fn download_remaining_parts(
         &self,
         src: &Url,
-        file: std::fs::File,
+        file: std::sync::Arc<std::fs::File>,
         total: u64,
         part_size: u64,
     ) -> anyhow::Result<()> {
-        let file = std::sync::Arc::new(file);
+        use futures::TryStreamExt;
         let n_parts = total.div_ceil(part_size);
-
         let tasks = (1..n_parts).map(|i| {
             let offset = i * part_size;
             let len = part_size.min(total - offset);
@@ -993,34 +1353,29 @@ impl S3 {
                 let range = format!("bytes={}-{}", offset, offset + len - 1);
                 let mut req = client
                     .get_object()
-                    .bucket(bucket)
-                    .key(key)
+                    .bucket(&bucket)
+                    .key(&key)
                     .range(range)
                     .set_request_payer(rp);
                 if !vid.is_empty() {
                     req = req.version_id(vid);
                 }
                 let resp = req.send().await?;
-                let data = resp.body.collect().await?.into_bytes();
-                // Throttle this part to the aggregate download cap (#433).
-                if let Some(limiter) = &limiter {
-                    limiter.acquire(data.len() as u64).await;
-                }
-                tokio::task::spawn_blocking(move || {
-                    use std::os::unix::fs::FileExt;
-                    file.write_all_at(&data, offset)
-                })
-                .await??;
+                let end = write_body(resp.body, &file, offset, limiter.as_deref()).await?;
+                anyhow::ensure!(
+                    end == offset + len,
+                    "s3://{bucket}/{key}: part at {offset} got {} of {len} bytes",
+                    end - offset
+                );
                 anyhow::Ok(())
             }
         });
-
+        // Stop at the first failed part; the parts still in flight are dropped (F04). With
+        // collect(), a part that failed for good still let every other part download first.
         stream::iter(tasks)
             .buffer_unordered(self.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            .try_collect::<Vec<()>>()
+            .await?;
         Ok(())
     }
 
@@ -1160,8 +1515,9 @@ impl S3 {
                 Ok(())
             }
             Err(e) => {
-                // Best-effort abort so we don't leak an incomplete upload.
-                let _ = self
+                // Best-effort abort so we don't leak an incomplete upload; say so if it fails,
+                // because the parts then stay billed until a lifecycle rule removes them.
+                let aborted = self
                     .client
                     .abort_multipart_upload()
                     .bucket(&dst.bucket)
@@ -1170,6 +1526,12 @@ impl S3 {
                     .set_request_payer(self.request_payer())
                     .send()
                     .await;
+                if let Err(ae) = aborted {
+                    eprintln!(
+                        "warning: could not abort multipart upload {upload_id} of {dst}: {}",
+                        crate::error::format_error(&anyhow::Error::from(ae))
+                    );
+                }
                 Err(e)
             }
         }
@@ -1182,6 +1544,7 @@ impl S3 {
         upload_id: &str,
         size: u64,
     ) -> anyhow::Result<Vec<CompletedPart>> {
+        use futures::TryStreamExt;
         let part_size = self.part_size;
         let n_parts = size.div_ceil(part_size) as i32;
         let src = src.to_path_buf();
@@ -1225,10 +1588,9 @@ impl S3 {
 
         let mut parts: Vec<CompletedPart> = stream::iter(tasks)
             .buffer_unordered(self.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            // Stop at the first failed part and drop the rest (F04).
+            .try_collect::<Vec<_>>()
+            .await?;
         // CompleteMultipartUpload requires parts in ascending part-number order.
         parts.sort_by_key(|p| p.part_number().unwrap_or(0));
         Ok(parts)
@@ -2043,8 +2405,9 @@ impl S3 {
                 Ok(())
             }
             Err(e) => {
-                // Best-effort abort so we don't leak an incomplete upload.
-                let _ = self
+                // Best-effort abort so we don't leak an incomplete upload; say so if it fails,
+                // because the parts then stay billed until a lifecycle rule removes them.
+                let aborted = self
                     .client
                     .abort_multipart_upload()
                     .bucket(&dst.bucket)
@@ -2053,6 +2416,12 @@ impl S3 {
                     .set_request_payer(self.request_payer())
                     .send()
                     .await;
+                if let Err(ae) = aborted {
+                    eprintln!(
+                        "warning: could not abort multipart upload {upload_id} of {dst}: {}",
+                        crate::error::format_error(&anyhow::Error::from(ae))
+                    );
+                }
                 Err(e)
             }
         }
@@ -2067,6 +2436,7 @@ impl S3 {
         upload_id: &str,
         size: u64,
     ) -> anyhow::Result<Vec<CompletedPart>> {
+        use futures::TryStreamExt;
         // Grow the part size if needed so the part count stays within the S3
         // 10,000-part limit (a 5 TB object with the default 50 MiB part size
         // would otherwise need 100k parts).
@@ -2111,10 +2481,9 @@ impl S3 {
 
         let mut parts: Vec<CompletedPart> = stream::iter(tasks)
             .buffer_unordered(self.concurrency)
-            .collect::<Vec<_>>()
-            .await
-            .into_iter()
-            .collect::<anyhow::Result<Vec<_>>>()?;
+            // Stop at the first failed part and drop the rest (F04).
+            .try_collect::<Vec<_>>()
+            .await?;
         parts.sort_by_key(|p| p.part_number().unwrap_or(0));
         Ok(parts)
     }
@@ -2269,6 +2638,112 @@ fn apply_put_metadata(
 #[cfg(test)]
 mod tests {
     use super::percent_decode;
+
+    /// A scripted connection for `FillingReads`: each step is one inner read's outcome.
+    enum Step {
+        Data(Vec<u8>),
+        Pending,
+        Fail,
+    }
+
+    struct Scripted(std::collections::VecDeque<Step>);
+
+    impl hyper::rt::Read for Scripted {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            mut buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            use std::task::Poll;
+            let steps = &mut self.get_mut().0;
+            match steps.pop_front() {
+                Some(Step::Data(mut d)) => {
+                    let n = d.len().min(buf.remaining());
+                    buf.put_slice(&d[..n]);
+                    if n < d.len() {
+                        steps.push_front(Step::Data(d.split_off(n)));
+                    }
+                    Poll::Ready(Ok(()))
+                }
+                Some(Step::Pending) => Poll::Pending,
+                Some(Step::Fail) => Poll::Ready(Err(std::io::Error::other("reset"))),
+                None => Poll::Ready(Ok(())), // end of stream
+            }
+        }
+    }
+
+    /// One `poll_read` of `r` into a buffer of `size`: the outcome and the bytes read.
+    fn read_once(
+        r: &mut super::FillingReads<Scripted>,
+        size: usize,
+    ) -> (std::task::Poll<std::io::Result<()>>, Vec<u8>) {
+        let mut mem = vec![std::mem::MaybeUninit::<u8>::uninit(); size];
+        let mut buf = hyper::rt::ReadBuf::uninit(&mut mem);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let poll = hyper::rt::Read::poll_read(std::pin::Pin::new(r), &mut cx, buf.unfilled());
+        (poll, buf.filled().to_vec())
+    }
+
+    fn filling(steps: Vec<Step>, fill: bool) -> super::FillingReads<Scripted> {
+        super::FillingReads {
+            io: Scripted(steps.into()),
+            fill,
+            deferred: None,
+        }
+    }
+
+    #[test]
+    fn filling_reads_gathers_what_is_ready() {
+        use std::task::Poll;
+        let mut r = filling(
+            vec![
+                Step::Data(vec![1; 10]),
+                Step::Data(vec![2; 20]),
+                Step::Pending,
+                Step::Data(vec![3; 5]),
+                Step::Fail,
+            ],
+            true,
+        );
+        // Two reads' worth, then nothing more ready: both are returned at once.
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert_eq!(got, [vec![1; 10], vec![2; 20]].concat());
+        // Bytes, then an error: the bytes now, the error on the next read.
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert_eq!(got, vec![3; 5]);
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Err(_))));
+        assert!(got.is_empty());
+        // End of stream reads as zero bytes.
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn filling_reads_stops_at_the_limit_and_passes_plain_reads_through() {
+        use std::task::Poll;
+        let limit = super::FILL_LIMIT;
+        let data: Vec<u8> = (0..3 * limit).map(|i| (i % 251) as u8).collect();
+        let chunks = data.chunks(16 << 10).map(|c| Step::Data(c.to_vec())).collect();
+        let mut r = filling(chunks, true);
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let (poll, part) = read_once(&mut r, 1 << 20);
+            assert!(matches!(poll, Poll::Ready(Ok(()))));
+            assert_eq!(part.len(), limit);
+            got.extend(part);
+        }
+        assert_eq!(got, data);
+        // Nothing ready on the first read: pending, as the inner reader is.
+        let mut r = filling(vec![Step::Pending], true);
+        assert!(read_once(&mut r, 1 << 20).0.is_pending());
+        // A plain connection reads once per call.
+        let mut r = filling(vec![Step::Data(vec![7; 10]), Step::Data(vec![8; 10])], false);
+        assert_eq!(read_once(&mut r, 1 << 20).1, vec![7; 10]);
+    }
 
     #[test]
     fn percent_decode_passthrough_plain() {
