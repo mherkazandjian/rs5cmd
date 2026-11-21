@@ -161,7 +161,8 @@ rs5cmd cp 'data/*' s3://bucket/data/
 rs5cmd cp 's3://bucket/data/*' ./restore/
 rs5cmd cp --exclude '*.tmp' --include '*.parquet' 'data/*' s3://bucket/data/
 
-# Large objects: multipart above --part-size MiB, --concurrency parts per object
+# Large objects: multipart above --part-size MiB (default 50), --concurrency parts per object
+# (default 5); the defaults are s5cmd's
 rs5cmd cp --part-size 64 --concurrency 16 big.bin s3://bucket/big.bin
 
 # Bucket to bucket (server-side copy), then a move
@@ -265,9 +266,9 @@ comparison follow s5cmd. Main differences between rs5cmd v0.1.0 and s5cmd v2.3:
   `--metadata`, `--metadata-directive`, `--show-progress`, `--no-follow-symlinks`.
 - Missing elsewhere: `rm --all-versions`, the global `--log` and `--stat`, the `-r` short flag,
   and the `version` command (use `--version`; set `RUST_LOG=debug` for logs).
-- Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. `cp`
-  defaults are `--part-size 8` and `--concurrency 8` (s5cmd: 50 and 5). Region and endpoint
-  per side are global flags.
+- Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. Region
+  and endpoint per side are global flags. `cp --fast` uses 8 MiB parts unless `--part-size` is
+  given (the default path uses s5cmd's 50).
 - Added: `tree`, `mount`, `import-s3cfg` and `--s3cfg`, `cp --fast`, several sources in one
   `cp`, `--if-none-match`, `--links`, `--client-copy`, `--preserve-timestamps`, `sync --checksum`
   and `--max-delete`, `rb --force`, `ls --newer-than` / `--older-than` / `--summarize`,

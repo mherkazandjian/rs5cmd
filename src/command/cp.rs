@@ -40,12 +40,13 @@ pub struct CpArgs {
     #[arg(long)]
     pub fast: bool,
 
-    /// Multipart part size in MiB for large objects (min 5).
-    #[arg(long, default_value_t = 8)]
-    pub part_size: u64,
+    /// Multipart part size in MiB for large objects (min 5) [default: 50, as s5cmd; with --fast:
+    /// 8, the largest object --fast transfers whole]
+    #[arg(long, value_name = "MIB")]
+    pub part_size: Option<u64>,
 
-    /// Concurrent parts per large object (multipart upload / ranged download).
-    #[arg(long, default_value_t = 8)]
+    /// Concurrent parts per large object (multipart upload / ranged download), as s5cmd.
+    #[arg(long, default_value_t = crate::storage::DEFAULT_CONCURRENCY)]
     pub concurrency: usize,
 
     /// Copy the given source object version id (single-object remote source).
@@ -140,7 +141,9 @@ impl CpArgs {
 
 pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Result<()> {
     let mut opts = global.storage_options();
-    opts.part_size = args.part_size.max(5).saturating_mul(1024 * 1024);
+    if let Some(mib) = args.part_size {
+        opts.part_size = mib.max(5).saturating_mul(1024 * 1024);
+    }
     opts.concurrency = args.concurrency.max(1);
     opts.preserve_timestamps = args.preserve_timestamps;
     opts.client_copy = args.client_copy;
@@ -224,7 +227,10 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
                 all.push(p);
             }
             pairs.finish().await?;
-            match try_fast_path(global, &mut all, opts.part_size, is_move, op).await? {
+            let fast_part = args
+                .part_size
+                .map_or(FAST_DEFAULT_PART_SIZE, |mib| mib.max(5).saturating_mul(1024 * 1024));
+            match try_fast_path(global, &mut all, fast_part, is_move, op).await? {
                 Some(r) if all.is_empty() => return r,
                 Some(r) => fast_failed = r.is_err(),
                 None => {}
@@ -831,6 +837,12 @@ async fn resolve_credentials(
 #[cfg(feature = "fast")]
 const FAST_PART_MAX: u64 = 1 << 30;
 
+/// The fast path's part without --part-size: 8 MiB, not the default path's 50 MiB (s5cmd's
+/// default), since the fast path holds a whole part in memory per transfer in flight (up to
+/// --numworkers of them): files up to this size go to it, and downloads come in ranges of it.
+#[cfg(feature = "fast")]
+const FAST_DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
+
 /// Attempts to run the (src,dst) pairs on the io_uring fast path. Each pair is
 /// mapped independently to upload / download / server-side copy, so mixed sets
 /// are supported. Returns `Ok(Some(result))` if handled, or `Ok(None)` if the
@@ -975,4 +987,34 @@ async fn try_fast_path(
         return Ok(Some(Err(anyhow::anyhow!("one or more fast-path transfers failed"))));
     }
     Ok(Some(Ok(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::command::{Cli, Command};
+
+    fn cp_args(argv: &[&str]) -> super::CpArgs {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        match cli.command {
+            Some(Command::Cp(args)) => args,
+            other => panic!("not cp: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipart_defaults_are_s5cmds() {
+        let args = cp_args(&["rs5cmd", "cp", "a", "s3://b/a"]);
+        // No --part-size: the default path's part is the storage default (50 MiB), --fast's 8 MiB.
+        assert_eq!(args.part_size, None);
+        assert_eq!(args.concurrency, 5);
+        assert_eq!(crate::storage::Options::default().part_size, 50 << 20);
+        #[cfg(feature = "fast")]
+        assert_eq!(super::FAST_DEFAULT_PART_SIZE, 8 << 20);
+
+        let args = cp_args(&["rs5cmd", "cp", "--part-size", "16", "--concurrency", "3", "a", "b"]);
+        assert_eq!(args.part_size, Some(16));
+        assert_eq!(args.concurrency, 3);
+    }
 }

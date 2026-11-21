@@ -18,8 +18,8 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 - **Transfers** (`cp`/`mv`) in every direction — local↔S3 and S3↔S3 (server-side
   copy) — with wildcard, prefix, and recursive expansion over a concurrency-limited
   worker pool. Large objects use concurrent **multipart upload** and **ranged
-  parallel download** (`--part-size <MiB>`, `--concurrency <N>`); small objects use
-  a single PUT/GET. Server-side S3→S3 copies of objects over the 5 GiB
+  parallel download** (`--part-size <MiB>`, default 50; `--concurrency <N>`, default 5,
+  as s5cmd); smaller objects use a single PUT/GET. Server-side S3→S3 copies of objects over the 5 GiB
   `CopyObject` limit transparently fall back to **multipart `UploadPartCopy`**;
   `--client-copy` streams a remote→remote copy through the client instead.
   `--preserve-timestamps` carries the file mtime across as object metadata.
@@ -158,8 +158,10 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   completion <bash|zsh|fish|powershell|elvish>     print a shell completion script
 ```
 
-Large-object knobs (`--part-size`, `--concurrency`) and version flags
-(`--version-id`, `--all-versions`) apply where relevant; see `--help`.
+Large-object knobs (`--part-size`, default 50 MiB, and `--concurrency`, default 5 parts per
+object, both s5cmd's defaults) and version flags (`--version-id`, `--all-versions`) apply where
+relevant; see `--help`. With `--fast`, the part is 8 MiB unless `--part-size` is given: the fast
+path holds a whole part in memory per transfer.
 
 ## io_uring fast path (`--fast`, Linux-only, `fast` feature)
 
