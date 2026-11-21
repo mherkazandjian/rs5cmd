@@ -172,3 +172,37 @@
 2026-11-21T14:51:37Z b-crc32c built /opt/bins/b-crc32c
 2026-11-21T14:56:17Z b-crc32c fast suite (D1 window): 235 passed, 0 failed
 2026-11-21T18:22:57Z w3 (perf/stage-b 293af6c) fast suite (D1 window): 228 passed, 0 failed
+2026-11-21T19:04:58Z c-mem rebased onto perf/stage-b: 90b1860 (1 commits)
+2026-11-21T19:05:18Z c-mem tests ok (217 passed, 0 failed) 
+bench/review/build.sh: line 218: t_c-mem: command not found
+2026-11-21T19:05:18Z c-mem BUILD FAILED
+2026-11-21T19:06:45Z c-mem rebased onto perf/stage-b: 35e50a5 (1 commits)
+2026-11-21T19:07:05Z c-mem tests ok (217 passed, 0 failed) 
+==> zigbuild c-mem from /src/wt/c-mem (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 16s
+  c-mem: 17,213,096 bytes
+==> done: c-mem
+2026-11-21T19:08:21Z c-mem built /opt/bins/c-mem
+==> zigbuild exp-plain128 from /src/wt/exp-plain128 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  exp-plain128: 17,213,096 bytes
+==> zigbuild exp-plain256 from /src/wt/exp-plain256 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  exp-plain256: 17,213,096 bytes
+==> zigbuild exp-plain-adapt from /src/wt/exp-plain-adapt (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  exp-plain-adapt: 17,213,288 bytes
+==> s3stub
+    Finished `release` profile [optimized] target(s) in 2.02s
+==> done: exp-plain128 exp-plain256 exp-plain-adapt stub
+2026-11-21T20:36:43Z c-mem rebased onto perf/stage-b: a6723c3 (3 commits)
+2026-11-21T20:37:02Z c-mem tests ok (218 passed, 0 failed) 
+==> zigbuild c-mem from /src/wt/c-mem (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  c-mem: 17,213,288 bytes
+==> done: c-mem
+2026-11-21T20:38:16Z c-mem built /opt/bins/c-mem
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  b-stage: 17,213,288 bytes
+==> done: b-stage
