@@ -24,7 +24,9 @@ It has three parts that share the `storage` types:
 | Fast path | `fast` (Linux) | `cp --fast` / `mv --fast` on monoio io_uring, one runtime per core, own SigV4 signing |
 | Mount | `mount` (Linux, macOS) | `rs5cmd mount` on `fuse3` |
 
-A fourth feature, `bench-stub`, builds the `s3stub` benchmark server.
+A fourth feature, `bench-stub`, builds the `s3stub` benchmark server. Two are on by default:
+`mimalloc` (mimalloc as the global allocator, in `src/main.rs`, which also turns transparent huge
+pages off for the process) and `sso` (credentials from IAM Identity Center profiles).
 
 The code is the authority. This file was checked against the source at release v0.1.0; when it
 disagrees with the code, trust the code and fix this file in the same change.

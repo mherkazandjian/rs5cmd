@@ -81,12 +81,16 @@ webpki-roots = "0.26"
 time = { version = "0.3", features = ["formatting", "macros", "parsing"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+# The global allocator (feature `mimalloc`, src/main.rs): v3, the crate's default.
+mimalloc = { version = "0.1.52", optional = true, default-features = false }
 
 # --- io_uring fast path (Linux-only, opt-in) ---
 # Gated behind the `fast` feature so the default build is unaffected and still
 # compiles on non-Linux / without io_uring.
 [features]
-default = ["sso"]
+default = ["sso", "mimalloc"]
+# mimalloc as the global allocator (src/main.rs). Without it, the system allocator.
+mimalloc = ["dep:mimalloc"]
 # Credentials from AWS IAM Identity Center (SSO) profiles: `sso_session` / `sso_start_url` in
 # ~/.aws/config, as `aws sso login` sets up. Without it such a profile yields no credentials.
 sso = ["aws-config/sso"]
