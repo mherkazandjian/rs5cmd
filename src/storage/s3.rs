@@ -244,6 +244,8 @@ fn cached_http_client(
 ///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
 ///   retries the same ones (`connector_error`).
 /// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record.
+/// - Crypto: aws-lc-rs, as the SDK's client: it offers post-quantum hybrid key exchange
+///   (X25519MLKEM768) first, and its AES-GCM costs less CPU than ring's.
 fn build_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
@@ -256,8 +258,8 @@ fn build_http_client(
 
     // Process-wide default crypto provider (idempotent; the fast path may also
     // install one). Ignore the error if it's already installed.
-    let _ = rustls::crypto::ring::default_provider().install_default();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
 
     let tls = if no_verify {
         // Verification disabled — a custom CA bundle would be moot, so skip it.

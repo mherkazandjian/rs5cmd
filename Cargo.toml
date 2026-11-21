@@ -38,7 +38,7 @@ aws-credential-types = "1"
 # HTTP/1.1 only (#14), adapted to the smithy `HttpClient` trait; it also carries
 # `--no-verify-ssl`, `--proxy` and `--ca-certs-file`. `rustls`/`http` are also used by `fast`.
 # `ring` provider matches the fast path's crypto backend.
-rustls = { version = "0.23", features = ["ring"] }
+rustls = { version = "0.23", features = ["ring", "aws_lc_rs"] }
 # The platform's trust store (with SSL_CERT_FILE / SSL_CERT_DIR), as the SDK's client used.
 rustls-native-certs = "0.8"
 # Parse a custom CA bundle (`--ca-certs-file`) into rustls certificates.
