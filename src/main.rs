@@ -53,6 +53,7 @@ async fn main() -> ExitCode {
         biased;
 
         _ = wait_for_signal() => {
+            rs5cmd::storage::remove_partial_downloads();
             rs5cmd::output::err_line(format_args!("interrupted"));
             ExitCode::from(interrupt_exit_code())
         }

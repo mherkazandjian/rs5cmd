@@ -8,7 +8,7 @@
 use std::io::{BufRead, BufReader, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -152,6 +152,37 @@ fn entries(dir: &std::path::Path) -> Vec<String> {
         .unwrap()
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect()
+}
+
+/// SIGTERM in the middle of a `--fast` download ends the run at once with 130 and leaves no
+/// file behind. The fast path's transfers used to hold the task that answers signals, so the
+/// run went on until every transfer finished (#16).
+#[test]
+fn fast_sigterm_ends_the_run_and_leaves_no_file() {
+    let port = start_partial_server(64 << 20, 64 << 10, true);
+    let dir = tempfile::tempdir().unwrap();
+    let mut child = fast_download(port, &dir.path().join("object")).spawn().unwrap();
+    // The download has started once its temporary file exists.
+    let start = Instant::now();
+    while entries(dir.path()).is_empty() {
+        assert!(start.elapsed() < Duration::from_secs(20), "the download did not start");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let pid = child.id().to_string();
+    assert!(Command::new("kill").args(["-TERM", &pid]).status().unwrap().success());
+    let signalled = Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        if signalled.elapsed() > Duration::from_secs(10) {
+            let _ = child.kill();
+            panic!("still running 10 s after SIGTERM");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert_eq!(status.code(), Some(130));
+    assert!(entries(dir.path()).is_empty(), "left behind: {:?}", entries(dir.path()));
 }
 
 /// A `--fast` download whose body ends early fails and leaves no file: the body is written as it

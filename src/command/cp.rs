@@ -947,9 +947,16 @@ async fn try_fast_path(
         is_move,
     };
 
-    // run_transfers blocks (spawns OS threads); keep it off the tokio worker.
-    let outcomes =
-        tokio::task::block_in_place(|| run_transfers(transfers, cfg));
+    // run_transfers blocks until every transfer ends, so it runs on a thread of its own and this
+    // task waits for it: in block_in_place it held the task that also waits for SIGINT and
+    // SIGTERM, which then went unanswered until the last transfer finished (#16).
+    let (done, outcomes) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run_transfers(transfers, cfg));
+    });
+    let outcomes = outcomes
+        .await
+        .map_err(|_| anyhow::anyhow!("the fast path's thread ended without a result"))?;
 
     let mut had_error = false;
     for o in &outcomes {
