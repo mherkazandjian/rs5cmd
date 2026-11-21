@@ -182,27 +182,33 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
     let filters = Filters::new(&includes, &excludes)?;
 
-    // Expand every source through the existing single-source logic and collect
-    // all (src, dst) pairs so they share one client and one worker pool.
-    let mut pairs: Vec<(Url, Url)> = Vec::new();
-    for raw in src_raws {
-        let src = Url::new(
-            raw,
-            crate::storage::url::UrlOptions {
-                version_id: args.version_id.clone(),
-                all_versions: args.all_versions,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| anyhow::anyhow!(e))?;
-        let expanded = expand_sources(&src, &dst, &opts, args.follow_symlinks, &filters).await?;
-        pairs.extend(expanded);
-    }
+    let srcs: Vec<Url> = src_raws
+        .iter()
+        .map(|raw| {
+            Url::new(
+                raw,
+                crate::storage::url::UrlOptions {
+                    version_id: args.version_id.clone(),
+                    all_versions: args.all_versions,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| anyhow::anyhow!(e))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    // Pairs stream from a listing task through a bounded channel while transfers run (F13);
+    // collecting them all first held every (source, destination) pair in memory at once.
+    // (`--fast` may replace them with the pairs it collected and declined.)
+    #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
+    let mut pairs =
+        Pairs::new(srcs.clone(), dst.clone(), opts.clone(), args.follow_symlinks, filters);
 
     // Any remote side present means we need an S3 client. Use the first source
     // (or the destination) that is remote as the config anchor.
-    let any_src_remote = pairs.iter().any(|(s, _)| s.is_remote());
+    let any_src_remote = srcs.iter().any(|s| s.is_remote());
     let dst_remote = dst.is_remote();
+    let anchor = srcs.iter().find(|s| s.is_remote()).unwrap_or(&dst);
 
     // io_uring fast path: dispatch small-object upload/download/server-side-copy
     // sets (any mix as long as each pair touches a remote) to the per-core
@@ -210,9 +216,17 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     if args.fast {
         #[cfg(feature = "fast")]
         {
-            if let Some(r) = try_fast_path(global, &pairs, is_move, op).await? {
+            // The fast path shards a complete list, so it still collects first.
+            let mut all = Vec::new();
+            while let Some(p) = pairs.next().await {
+                all.push(p);
+            }
+            pairs.finish().await?;
+            if let Some(r) = try_fast_path(global, &all, is_move, op).await? {
                 return r;
             }
+            // Declined (a local->local pair): run the collected pairs on the default path.
+            pairs = Pairs::Known(all.into_iter());
         }
         #[cfg(not(feature = "fast"))]
         eprintln!("warning: --fast ignored (built without the `fast` feature); using default path");
@@ -234,24 +248,14 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let (s3, s3_dst): (Option<Arc<S3>>, Option<Arc<S3>>) = if any_src_remote || dst_remote {
         if sides_differ {
             // Source-anchored client: prefer a remote source pair, else dst.
-            let src_anchor = pairs
-                .iter()
-                .find(|(s, _)| s.is_remote())
-                .map(|(s, _)| s)
-                .unwrap_or(&dst);
             let src_opts = opts.for_side(crate::storage::Side::Source);
             let dst_opts = opts.for_side(crate::storage::Side::Destination);
-            let src_client = Arc::new(S3::new(src_anchor, &src_opts).await?);
+            let src_client = Arc::new(S3::new(anchor, &src_opts).await?);
             let dst_client = Arc::new(S3::new(&dst, &dst_opts).await?);
             (Some(src_client), Some(dst_client))
         } else {
             // Single shared client (fast path). Anchor on whichever side is
             // remote: prefer a remote source pair, otherwise the destination.
-            let anchor = pairs
-                .iter()
-                .find(|(s, _)| s.is_remote())
-                .map(|(s, _)| s)
-                .unwrap_or(&dst);
             (Some(Arc::new(S3::new(anchor, &opts).await?)), None)
         }
     } else {
@@ -271,9 +275,11 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // object count is huge.
     let mut had_error = false;
     // Count-of-transfers progress bar (no-op in JSON mode / non-TTY stderr).
-    let pb = crate::progress::Progress::new(pairs.len() as u64, op);
+    // The total grows as the listing yields pairs.
+    let pb = crate::progress::Progress::new(0, op);
     let mut set = tokio::task::JoinSet::new();
-    for (s, d) in pairs.into_iter() {
+    while let Some((s, d)) = pairs.next().await {
+        pb.inc_length(1);
         while set.len() >= workers {
             let (s, d, r) = set.join_next().await.unwrap().expect("transfer task panicked");
             report(op, &s, &d, r, &mut had_error);
@@ -305,11 +311,92 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         pb.inc(1);
     }
     pb.finish();
+    // A listing that failed ends the run with its error, after the transfers it already
+    // yielded have finished.
+    pairs.finish().await?;
 
     if had_error {
         anyhow::bail!("one or more {op} operations failed");
     }
     Ok(())
+}
+
+/// How many listed (source, destination) pairs may wait for a transfer slot.
+const PAIRS_QUEUED: usize = 1024;
+
+/// The (source, destination) pairs of a cp or mv, in source order.
+enum Pairs {
+    /// No source expands (one key or file each, as on most lines of a `run` file): the pairs
+    /// are known at once. A listing task and its channel per command made glibc hand memory back
+    /// and fault it in again (+11 % on a 10k-line `run` file).
+    Known(std::vec::IntoIter<(Url, Url)>),
+    /// Listed by a task of its own, through a bounded channel. The task's result is the first
+    /// listing error, if any; it stops early once the receiver is gone.
+    Listed {
+        rx: tokio::sync::mpsc::Receiver<(Url, Url)>,
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    },
+}
+
+impl Pairs {
+    fn new(
+        srcs: Vec<Url>,
+        dst: Url,
+        opts: Options,
+        follow_symlinks: bool,
+        filters: Filters,
+    ) -> Pairs {
+        if !srcs.iter().any(expands) {
+            let known: Vec<(Url, Url)> = srcs
+                .iter()
+                .map(|s| (s.clone(), resolve_single_dest(s, &dst)))
+                .collect();
+            return Pairs::Known(known.into_iter());
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
+        let task = tokio::spawn(async move {
+            for src in &srcs {
+                if !expand_sources(src, &dst, &opts, follow_symlinks, &filters, &tx).await? {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        Pairs::Listed { rx, task }
+    }
+
+    async fn next(&mut self) -> Option<(Url, Url)> {
+        match self {
+            Pairs::Known(pairs) => pairs.next(),
+            Pairs::Listed { rx, .. } => rx.recv().await,
+        }
+    }
+
+    /// The listing's result: its first error, if any.
+    async fn finish(self) -> anyhow::Result<()> {
+        match self {
+            Pairs::Known(_) => Ok(()),
+            Pairs::Listed { rx, task } => {
+                drop(rx);
+                task.await.expect("listing task panicked")
+            }
+        }
+    }
+}
+
+/// Whether a source expands into several (source, destination) pairs: a wildcard, a bucket or
+/// prefix, a local directory, or every version of a key.
+fn expands(src: &Url) -> bool {
+    if src.is_wildcard() {
+        true
+    } else if src.is_remote() {
+        src.all_versions || src.is_bucket() || src.is_prefix()
+    } else {
+        // Local: a directory expands.
+        std::fs::metadata(src.absolute())
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+    }
 }
 
 /// Prints the per-transfer result line, tracking whether any failed.
@@ -331,15 +418,20 @@ fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut boo
     }
 }
 
-/// Determines whether the source expands to multiple objects, and builds the
-/// list of (source, destination) URL pairs to copy.
+/// Determines whether the source expands to multiple objects, and sends its
+/// (source, destination) pairs to `out`. Returns false if the receiver is gone.
 async fn expand_sources(
     src: &Url,
     dst: &Url,
     opts: &Options,
     follow_symlinks: bool,
     filters: &Filters,
-) -> anyhow::Result<Vec<(Url, Url)>> {
+    out: &tokio::sync::mpsc::Sender<(Url, Url)>,
+) -> anyhow::Result<bool> {
+    if !expands(src) {
+        let dst_url = resolve_single_dest(src, dst);
+        return Ok(out.send((src.clone(), dst_url)).await.is_ok());
+    }
     let client = new_client(src, opts).await?;
 
     // `--all-versions` against a single remote key: route the source through the
@@ -348,28 +440,16 @@ async fn expand_sources(
     // collide (#762). `src.all_versions` makes `list()` dispatch to the version
     // lister, where every emitted object carries its `version_id`.
     if src.is_remote() && src.all_versions && !src.is_wildcard() {
-        return expand_all_versions(client.as_ref(), src, dst, follow_symlinks).await;
-    }
-
-    let is_multi = if src.is_wildcard() {
-        true
-    } else if src.is_remote() {
-        src.is_bucket() || src.is_prefix()
-    } else {
-        // Local: a directory expands.
-        std::fs::metadata(src.absolute())
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-    };
-
-    if !is_multi {
-        let dst_url = resolve_single_dest(src, dst);
-        return Ok(vec![(src.clone(), dst_url)]);
+        for pair in expand_all_versions(client.as_ref(), src, dst, follow_symlinks).await? {
+            if out.send(pair).await.is_err() {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
     }
 
     // Expand by listing.
     let mut rx = client.list(src, follow_symlinks);
-    let mut pairs = Vec::new();
     while let Some(obj) = rx.recv().await {
         if let Some(err) = obj.err {
             // A per-entry listing error (e.g. a broken symlink) must not abort
@@ -389,9 +469,11 @@ async fn expand_sources(
         // Destination keeps the source's relative layout under dst as a prefix.
         let rel = obj_url.relative();
         let dst_url = dst.join(&rel);
-        pairs.push((obj_url, dst_url));
+        if out.send((obj_url, dst_url)).await.is_err() {
+            return Ok(false);
+        }
     }
-    Ok(pairs)
+    Ok(true)
 }
 
 /// Expands a single remote `--all-versions` source into one (source, dest) pair
