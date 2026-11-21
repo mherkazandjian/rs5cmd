@@ -43,8 +43,11 @@ async fn main() -> ExitCode {
 
     // Best-effort: raise the open-file soft limit and warn if it is likely too
     // low for the configured parallelism (upstream issue #390). `--concurrency`
-    // is a per-`cp`/`sync` flag (default 8); use that default for the estimate.
-    rs5cmd::rlimit::setup_nofile_limits(cli.global.numworkers, 8);
+    // is a per-`cp`/`sync` flag; use its default for the estimate.
+    rs5cmd::rlimit::setup_nofile_limits(
+        cli.global.numworkers,
+        rs5cmd::storage::DEFAULT_CONCURRENCY,
+    );
     // Download parts in flight over every object at once: --numworkers, 256 at least (and raised
     // to an object's --concurrency when that is larger).
     rs5cmd::storage::s3::set_download_parts_in_flight(cli.global.numworkers);

@@ -334,9 +334,9 @@ fn large_object_multipart_roundtrip() {
     let bucket = unique_bucket();
     let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
 
-    // 12 MiB > default 8 MiB part size => multipart upload (2 parts) and ranged
-    // download (2 ranges). Byte value depends on position so a mis-ordered or
-    // truncated part is detected.
+    // 12 MiB in 5 MiB parts => multipart upload (3 parts) and ranged download
+    // (3 ranges). Byte value depends on position so a mis-ordered or truncated
+    // part is detected.
     let size = 12 * 1024 * 1024usize;
     let mut data = vec![0u8; size];
     for (i, b) in data.iter_mut().enumerate() {
