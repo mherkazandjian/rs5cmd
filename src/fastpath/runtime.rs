@@ -230,9 +230,8 @@ async fn do_one(client: &FastClient, item: Transfer, max_retries: u32, is_move: 
         }
         Transfer::Download { bucket, key, local } => {
             async {
-                let bytes =
-                    with_retry(max_retries, &label, || client.get(&bucket, &key)).await?;
-                write_file(&local, bytes).await?;
+                with_retry(max_retries, &label, || download(client, &bucket, &key, &local))
+                    .await?;
                 // For `mv`, delete the remote source after a successful download.
                 if is_move {
                     with_retry(max_retries, &label, || client.delete(&bucket, &key)).await?;
@@ -329,17 +328,27 @@ async fn read_file(path: &std::path::Path) -> anyhow::Result<bytes::Bytes> {
     }
 }
 
-/// Writes bytes to a file asynchronously via io_uring (monoio::fs).
-async fn write_file(path: &std::path::Path, data: bytes::Bytes) -> anyhow::Result<()> {
-    if let Some(parent) = path.parent() {
+/// Downloads an object into a temporary file renamed over `local` once complete (F03), writing
+/// the body as it arrives. Whole, every object in flight was held in memory (F43: ~4.1 GB RSS
+/// for 1 GiB objects), and one of 4 GiB or more was a single io_uring write whose length does
+/// not fit the 32 bits monoio gives it, so it failed (#15).
+async fn download(
+    client: &FastClient,
+    bucket: &str,
+    key: &str,
+    local: &std::path::Path,
+) -> anyhow::Result<()> {
+    if let Some(parent) = local.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent)?;
         }
     }
-    let file = monoio::fs::File::create(path).await?;
-    let (res, _buf) = file.write_all_at(data, 0).await;
+    let (partial, file) = crate::storage::partial::PartialFile::create(local)?;
+    let file = monoio::fs::File::from_std(file)?;
+    let received = client.get_into(bucket, key, &file).await;
     let _ = file.close().await;
-    res?;
+    received?;
+    partial.commit()?;
     Ok(())
 }
 

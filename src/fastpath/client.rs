@@ -10,7 +10,7 @@ use std::sync::Arc;
 use bytes::Bytes;
 use http::{Request, StatusCode, Uri};
 use monoio::net::TcpStream;
-use monoio_http::common::body::{BodyExt, FixedBody, HttpBody};
+use monoio_http::common::body::{Body, BodyExt, FixedBody, HttpBody};
 use monoio_rustls::ClientTlsStream;
 use monoio_transports::connectors::{Connector, TcpConnector, TcpTlsAddr, TlsConnector};
 use monoio_transports::http::HttpConnector;
@@ -227,7 +227,8 @@ impl FastClient {
         Ok(())
     }
 
-    /// GET an object, returning its bytes.
+    /// GET an object, returning its bytes (downloads use `get_into`).
+    #[cfg(test)]
     pub async fn get(&self, bucket: &str, key: &str) -> anyhow::Result<Bytes> {
         let req = self.build_request(http::Method::GET, bucket, key, Bytes::new())?;
         let (status, body) = self.send(req).await?;
@@ -242,6 +243,37 @@ impl FastClient {
             .into());
         }
         Ok(body)
+    }
+
+    /// GET an object into `file` from offset 0, each chunk of the body written as it arrives.
+    /// Returns the bytes written.
+    pub async fn get_into(
+        &self,
+        bucket: &str,
+        key: &str,
+        file: &monoio::fs::File,
+    ) -> anyhow::Result<u64> {
+        let req = self.build_request(http::Method::GET, bucket, key, Bytes::new())?;
+        match &self.transport {
+            Transport::Http(connector, host) => {
+                let mut conn = connector
+                    .connect(host.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("connect: {e:?}"))?;
+                let (res, _reuse) = conn.send_request(req).await;
+                let resp = res.map_err(|e| anyhow::anyhow!("send: {e:?}"))?;
+                receive_into(resp, bucket, key, file).await
+            }
+            Transport::Https(connector, addr) => {
+                let mut conn = connector
+                    .connect(addr.clone())
+                    .await
+                    .map_err(|e| anyhow::anyhow!("tls connect: {e:?}"))?;
+                let (res, _reuse) = conn.send_request(req).await;
+                let resp = res.map_err(|e| anyhow::anyhow!("send: {e:?}"))?;
+                receive_into(resp, bucket, key, file).await
+            }
+        }
     }
 
     /// DELETE an object. A 404 is treated as success (already absent), matching
@@ -350,6 +382,55 @@ fn memmem(haystack: &[u8], needle: &[u8]) -> bool {
         return needle.is_empty();
     }
     haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+/// Writes a GET response's body into `file` as it arrives, a chunk per write, and checks it
+/// against Content-Length; an error status becomes an `HttpStatusError` with the body.
+async fn receive_into<B>(
+    resp: http::Response<B>,
+    bucket: &str,
+    key: &str,
+    file: &monoio::fs::File,
+) -> anyhow::Result<u64>
+where
+    B: Body<Data = Bytes>,
+    B::Error: std::fmt::Debug,
+{
+    let status = resp.status();
+    let (parts, mut body) = resp.into_parts();
+    if !status.is_success() {
+        let mut message = Vec::new();
+        while let Some(Ok(chunk)) = body.next_data().await {
+            message.extend_from_slice(&chunk);
+        }
+        return Err(HttpStatusError {
+            status,
+            message: format!(
+                "GET {bucket}/{key} -> {status}: {}",
+                String::from_utf8_lossy(&message)
+            ),
+        }
+        .into());
+    }
+    let expected = parts
+        .headers
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let mut offset = 0u64;
+    while let Some(chunk) = body.next_data().await {
+        let chunk = chunk.map_err(|e| anyhow::anyhow!("read body: {e:?}"))?;
+        if chunk.is_empty() {
+            continue;
+        }
+        let len = chunk.len() as u64;
+        let (written, _) = file.write_all_at(chunk, offset).await;
+        written?;
+        offset += len;
+    }
+    if let Some(n) = expected {
+        anyhow::ensure!(offset == n, "GET {bucket}/{key}: got {offset} of {n} bytes");
+    }
+    Ok(offset)
 }
 
 /// An HTTP response with a non-success status. Carries the status so the retry

@@ -5,8 +5,10 @@
 
 #![cfg(feature = "fast")]
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
@@ -93,4 +95,114 @@ fn fast_path_all_directions() {
     g().args(["rm", &s3("/up/*")]).assert().success();
     g().args(["rm", &s3("/moved/*")]).assert().success();
     g().args(["rb", &s3("")]).assert().success();
+}
+
+/// An in-test server for one GET: it reads the request, then sends the status line, a
+/// Content-Length of `total` and `sent` bytes of the body, then either holds the connection
+/// open (`hold`) or closes it.
+fn start_partial_server(total: usize, sent: usize, hold: bool) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || answer_partially(stream, total, sent, hold));
+        }
+    });
+    port
+}
+
+fn answer_partially(stream: TcpStream, total: usize, sent: usize, hold: bool) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if line.trim_end().is_empty() {
+            break;
+        }
+    }
+    let mut out = format!("HTTP/1.1 200 OK\r\nContent-Length: {total}\r\nETag: \"e\"\r\n\r\n")
+        .into_bytes();
+    out.resize(out.len() + sent, b'a');
+    let mut stream = stream;
+    let _ = stream.write_all(&out);
+    if hold {
+        std::thread::sleep(Duration::from_secs(60));
+    }
+}
+
+/// `rs5cmd --fast cp s3://bucket/object <dst>` against the in-test server on `port`.
+fn fast_download(port: u16, dst: &std::path::Path) -> Command {
+    let mut c = rs5cmd();
+    c.env("AWS_ACCESS_KEY_ID", "test")
+        .env("AWS_SECRET_ACCESS_KEY", "test")
+        .env("AWS_REGION", "us-east-1")
+        .env_remove("AWS_ENDPOINT_URL")
+        .env_remove("S3_ENDPOINT_URL")
+        .env_remove("AWS_PROFILE")
+        .args(["--endpoint-url", &format!("http://127.0.0.1:{port}")])
+        .args(["--retry-count", "0", "cp", "--fast", "s3://bucket/object"])
+        .arg(dst);
+    c
+}
+
+fn entries(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// A `--fast` download whose body ends early fails and leaves no file: the body is written as it
+/// arrives, into a temporary file renamed only once complete.
+#[test]
+fn fast_short_download_leaves_no_file() {
+    let port = start_partial_server(1 << 20, 1000, false);
+    let dir = tempfile::tempdir().unwrap();
+    fast_download(port, &dir.path().join("object")).assert().failure();
+    assert!(entries(dir.path()).is_empty(), "left behind: {:?}", entries(dir.path()));
+}
+
+/// With `--fast`, a file larger than a part goes to the default path's multipart upload instead
+/// of being read whole; it downloads back on the fast path, the body streamed to the file.
+#[test]
+fn fast_path_leaves_files_larger_than_a_part_to_multipart() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    };
+    let bucket = unique_bucket();
+    let g = || {
+        let mut c = rs5cmd();
+        c.args(["--endpoint-url", &ep]);
+        c
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let data: Vec<u8> = (0..(6u32 << 20)).map(|i| (i % 251) as u8).collect();
+    std::fs::write(tmp.path().join("big"), &data).unwrap();
+    std::fs::write(tmp.path().join("small"), b"small").unwrap();
+    g().args(["mb", &format!("s3://{bucket}")]).assert().success();
+
+    let pattern = format!("{}/*", tmp.path().to_str().unwrap());
+    g().args(["cp", "--fast", "--part-size", "5", &pattern, &format!("s3://{bucket}/up/")])
+        .assert()
+        .success();
+    // A multipart upload's ETag ends in -<parts>.
+    g().args(["ls", "-e", &format!("s3://{bucket}/up/big")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("-2"));
+
+    let out = tmp.path().join("out");
+    std::fs::create_dir(&out).unwrap();
+    g().args(["cp", "--fast", &format!("s3://{bucket}/up/*")])
+        .arg(format!("{}/", out.display()))
+        .assert()
+        .success();
+    assert_eq!(std::fs::read(out.join("big")).unwrap(), data);
+    assert_eq!(std::fs::read(out.join("small")).unwrap(), b"small");
+
+    g().args(["rm", &format!("s3://{bucket}/up/*")]).assert().success();
+    g().args(["rb", &format!("s3://{bucket}")]).assert().success();
 }
