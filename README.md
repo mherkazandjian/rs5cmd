@@ -319,6 +319,17 @@ the `test-fast` and `bench` services run with a hardened profile
 HTTPS / `--no-verify-ssl` checks use a self-signed cert for the `minio-tls`
 service — generate it once with `bench/gen-certs.sh` (the cert is git-ignored).
 
+### Cargo features
+
+`fast` (the io_uring path, Linux) and `mount` (FUSE) are opt-in. On by default:
+
+- `mimalloc`: mimalloc is the global allocator, faster than the system allocator where rs5cmd
+  makes many small allocations (many small objects, `run`, `ls`, `du`). The process runs with
+  transparent huge pages turned off, as with mimalloc's `MIMALLOC_ALLOW_THP=0`, so small
+  commands stay small where THP is `always`. Build with `--no-default-features` (then add back
+  the features you want) for the system allocator.
+- `sso`: credentials from AWS IAM Identity Center (SSO) profiles.
+
 ### Testing notes
 
 All e2e tests run against **MinIO only** — there is no coverage against real AWS

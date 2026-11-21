@@ -322,17 +322,26 @@ fn is_retryable(e: &anyhow::Error) -> bool {
 
 /// Reads a whole file asynchronously via io_uring (monoio::fs), so the read
 /// overlaps with in-flight network requests instead of blocking the runtime.
+///
+/// The data goes after the lead the default path's upload bodies keep (`upload_body::buffer`),
+/// which keeps rustls's copy of it into TLS records fast with mimalloc.
 async fn read_file(path: &std::path::Path) -> anyhow::Result<bytes::Bytes> {
+    use monoio::buf::IoBufMut;
     let file = monoio::fs::File::open(path).await?;
     let len = file.metadata().await?.len() as usize;
-    let buf = Vec::with_capacity(len);
-    let (res, mut buf) = file.read_exact_at(buf, 0).await;
+    let mut buf = crate::storage::upload_body::buffer(len);
+    let lead = buf.len();
+    // The slice covers the `len` bytes after the lead; read_exact_at fills all of it.
+    let slice = buf.slice_mut(lead..lead + len);
+    let (res, slice) = file.read_exact_at(slice, 0).await;
     let _ = file.close().await;
+    let mut buf = slice.into_inner();
     match res {
         Ok(()) => {
-            // SAFETY: read_exact_at filled `len` bytes; reflect that in the Vec.
-            unsafe { buf.set_len(len) };
-            Ok(bytes::Bytes::from(buf))
+            // SAFETY: the lead was initialized by `buffer` and read_exact_at filled the `len`
+            // bytes after it; reflect that in the Vec.
+            unsafe { buf.set_len(lead + len) };
+            Ok(crate::storage::upload_body::bytes(buf))
         }
         Err(e) => Err(e.into()),
     }

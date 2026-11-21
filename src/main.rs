@@ -4,11 +4,41 @@ use clap::Parser;
 
 use rs5cmd::command::{self, Cli};
 
+/// mimalloc v3 is faster than glibc's allocator where rs5cmd makes many small allocations
+/// (many small objects, `run`, `ls`, `du`). See `DISABLE_TRANSPARENT_HUGE_PAGES`.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Exit code returned when the process is interrupted by a termination signal
 /// (SIGINT/Ctrl-C or SIGTERM). 128 + SIGINT(2) = 130, matching the conventional
 /// shell exit code and upstream s5cmd behavior (upstream #615 / PR #863).
 fn interrupt_exit_code() -> u8 {
     130
+}
+
+/// Turns transparent huge pages off for this process (Linux, with mimalloc). mimalloc commits
+/// its memory in large aligned blocks, so where THP is `always` the first touch of a block
+/// faults in a 2 MiB page: a small command would use twice the memory. mimalloc does the same
+/// itself with `MIMALLOC_ALLOW_THP=0`, which it reads as it starts. This runs earlier still,
+/// from the ELF initializers with a priority, so before mimalloc's own initializer (it has none)
+/// and before the Rust runtime's first allocation; from `main` it came too late (`--version`:
+/// 11.0 MB, against 7.3 MB this way). Child processes (a `credential_process` helper) inherit
+/// the setting.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+#[used]
+#[link_section = ".init_array.00100"]
+static DISABLE_TRANSPARENT_HUGE_PAGES: extern "C" fn() = disable_transparent_huge_pages;
+
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+extern "C" fn disable_transparent_huge_pages() {
+    // prctl reads its arguments as unsigned longs, and this option wants the last three zero.
+    let (disable, zero): (libc::c_ulong, libc::c_ulong) = (1, 0);
+    // SAFETY: PR_SET_THP_DISABLE takes integers only and changes no memory of ours; a kernel
+    // without it fails the call, which is ignored.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, disable, zero, zero, zero);
+    }
 }
 
 #[tokio::main]

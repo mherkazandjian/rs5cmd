@@ -30,6 +30,29 @@ const CHUNK: usize = 128 * 1024;
 /// 16 MiB on the same rows, with the least memory.
 const BUDGET: usize = 4 * 1024 * 1024;
 
+/// Bytes left unused at the start of every buffer an upload body is read into (`buffer`).
+///
+/// mimalloc gives a large block a page-aligned address, so each chunk's data started on a page
+/// boundary. Over TLS, rustls copies every record's plaintext into a buffer of its own whose data
+/// starts 5 bytes (the record header) past a page boundary, and glibc's `rep movsb` copy between
+/// two such addresses ran at a fraction of its speed (4K aliasing between the copy's loads and its
+/// stores; measured on AMD Zen): a 4 GiB upload over TLS took 1.11 s against 0.76 s with any lead
+/// tried from 64 bytes to 4000, and 0.79 s with glibc's allocator. One cache line keeps the data
+/// 64-byte aligned; with glibc's allocator, whose addresses vary, it changes nothing.
+const LEAD: usize = 64;
+
+/// An empty buffer to read `n` bytes of an upload body into, after its `LEAD`.
+pub(crate) fn buffer(n: usize) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(LEAD + n);
+    buf.resize(LEAD, 0);
+    buf
+}
+
+/// The data read into `buf` (from `buffer`), as a body's bytes.
+pub(crate) fn bytes(buf: Vec<u8>) -> Bytes {
+    Bytes::from_owner(Held { buf, _permit: None })
+}
+
 /// One permit per chunk read but not yet sent.
 fn budget() -> &'static Arc<Semaphore> {
     static B: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -44,15 +67,15 @@ pub(crate) fn file_range(path: &Path, offset: u64, len: u64) -> ByteStream {
     }))
 }
 
-/// A chunk and the budget permit it holds until hyper drops it.
+/// A buffer from `buffer` and, for a chunk, the budget permit it holds until hyper drops it.
 struct Held {
     buf: Vec<u8>,
-    _permit: OwnedSemaphorePermit,
+    _permit: Option<OwnedSemaphorePermit>,
 }
 
 impl AsRef<[u8]> for Held {
     fn as_ref(&self) -> &[u8] {
-        &self.buf
+        &self.buf[LEAD..]
     }
 }
 
@@ -94,7 +117,7 @@ impl FileBody {
             let permit = budget.acquire_owned().await.map_err(io::Error::other)?;
             // Allocated here, on a runtime worker, and filled on the blocking pool: a buffer
             // allocated on one of its many threads would leave memory in that thread's heap.
-            let mut buf = Vec::with_capacity(n);
+            let mut buf = buffer(n);
             let (file, buf) = tokio::task::spawn_blocking(move || -> io::Result<(File, Vec<u8>)> {
                 let mut file = match file {
                     Some(f) => f,
@@ -106,14 +129,14 @@ impl FileBody {
                 };
                 // Read into spare capacity: no zero-filling of every chunk.
                 (&mut file).take(n as u64).read_to_end(&mut buf)?;
-                if buf.len() < n {
+                if buf.len() < LEAD + n {
                     return Err(io::ErrorKind::UnexpectedEof.into());
                 }
                 Ok((file, buf))
             })
             .await
             .map_err(io::Error::other)??;
-            Ok((file, Bytes::from_owner(Held { buf, _permit: permit })))
+            Ok((file, Bytes::from_owner(Held { buf, _permit: Some(permit) })))
         })
     }
 }
@@ -179,6 +202,18 @@ mod tests {
         let data: Vec<u8> = (0..n).map(|i| (i % 251) as u8).collect();
         std::fs::write(&path, &data).unwrap();
         (dir, path, data)
+    }
+
+    #[test]
+    fn data_starts_a_lead_into_its_buffer() {
+        let mut buf = buffer(3);
+        assert_eq!(buf.len(), LEAD);
+        let start = buf.as_ptr() as usize;
+        buf.extend_from_slice(b"abc");
+        assert_eq!(buf.as_ptr() as usize, start, "room for the n bytes asked for");
+        let body = bytes(buf);
+        assert_eq!(&body[..], b"abc");
+        assert_eq!(body.as_ptr() as usize, start + LEAD);
     }
 
     #[tokio::test]
