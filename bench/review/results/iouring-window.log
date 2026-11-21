@@ -1,0 +1,99 @@
+2026-11-19T16:29:47Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-19T16:29:47Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-19T16:29:47Z running: bash -c 
+        for ep in stub stub-tls; do
+            '<repo>/bench/review/dc' exec -T bench bash bench/review/run-matrix.sh run --rows 'W1.up.100k,W1.dn.100k,W1.up.10k,W1.dn.10k,W1.up.1k,W1.dn.1k,W1.up.deep,W1.dn.deep,W1.up.10k.disk,W1.dn.10k.disk,W2.up,W2.dn,W2.up.disk,W2.dn.disk,W3.*' --endpoint $ep --clients rs5cmd-fast --tag a3-uring
+        done
+        '<repo>/bench/review/dc' exec -T bench bash bench/review/run-matrix.sh run --rows 'W1.up.10k,W1.dn.10k,W1.up.100k,W1.dn.100k,W2.up,W2.dn,W3.up.4x1g,W3.dn.4x1g,W3.up.32x128m,W3.dn.32x128m' --endpoint minio --clients rs5cmd-fast --tag a3-uring
+        # The --features fast test suite (compiled beforehand with --no-run), on io_uring.
+        echo "== $(date -u +%FT%TZ) cargo test --all --features fast"
+        '<repo>/bench/review/dc' exec -T -e CARGO_TARGET_DIR=/target/test bench cargo test --all --features fast --locked > '<repo>/bench/review/results/fast-tests.log' 2>&1
+        echo "== $(date -u +%FT%TZ) fast tests exit=$?"
+    
+2026-11-19T16:52:24Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-19T16:52:24Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-20T15:23:29Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-20T15:23:29Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-20T15:23:29Z running the batch (pid 2395677)
+2026-11-20T15:46:29Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-20T15:46:29Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-20T16:11:26Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-20T16:11:26Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-20T16:11:26Z running the batch (pid 2988183)
+2026-11-20T16:11:33Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-20T16:11:33Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-20T19:44:33Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-20T19:44:33Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-20T19:44:33Z running the batch (pid 1421037)
+2026-11-20T19:44:41Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-20T19:44:41Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-20T20:10:31Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-20T20:10:31Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-20T20:10:31Z running the batch (pid 1743504)
+2026-11-20T20:10:39Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-20T20:10:39Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-20T22:58:59Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-20T22:58:59Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-20T22:58:59Z running the batch (pid 3745883)
+2026-11-20T23:19:01Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-20T23:19:01Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T04:38:59Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T04:38:59Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T04:38:59Z running the batch (pid 3585752)
+2026-11-21T04:39:09Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T04:39:09Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T07:35:04Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T07:35:04Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T07:35:04Z running the batch (pid 1571310)
+2026-11-21T07:35:14Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T07:35:14Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T08:47:43Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T08:47:43Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T08:47:43Z running the batch (pid 2451493)
+2026-11-21T09:12:41Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T09:12:41Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T09:34:50Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T09:34:50Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T09:34:50Z running the batch (pid 3015292)
+2026-11-21T09:55:19Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T09:55:19Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:13:21Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T10:13:21Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:13:21Z running the batch (pid 3494940)
+2026-11-21T10:33:44Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T10:33:44Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:50:14Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T10:50:14Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:50:14Z running the batch (pid 3923318)
+2026-11-21T10:50:29Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T10:50:29Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:50:52Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T10:50:52Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:50:52Z running the batch (pid 3930425)
+2026-11-21T10:51:00Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T10:51:00Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:51:15Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T10:51:15Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T10:51:15Z running the batch (pid 3934631)
+2026-11-21T10:51:18Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T10:51:18Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T13:30:44Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T13:30:44Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T13:30:44Z running the batch (pid 1467554)
+2026-11-21T13:53:24Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T13:53:24Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T14:02:14Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T14:02:14Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T14:02:14Z running the batch (pid 1871316)
+2026-11-21T14:08:54Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T14:08:54Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T14:51:47Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T14:51:47Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T14:51:47Z running the batch (pid 2499666)
+2026-11-21T14:56:17Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T14:56:17Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-21T18:00:23Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-21T18:00:23Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-21T18:00:23Z running the batch (pid 575331)
+2026-11-21T18:22:57Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-21T18:22:57Z host probe (after close, ordinary user): io_uring: Operation not permitted

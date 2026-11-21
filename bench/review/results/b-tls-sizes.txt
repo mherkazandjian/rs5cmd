@@ -1,0 +1,5 @@
+binary              bytes  x s5cmd      tar.gz  x s5cmd  toolchain
+b-stage        19,184,672    1.086   7,963,596    1.581  rustc 1.100.0, zig 0.13.0, cargo-zigbuild 0.24.1, --features fast, stripped, worktree
+b-tls          17,203,712    0.974   7,097,131    1.409  rustc 1.100.0, zig 0.13.0, cargo-zigbuild 0.24.1, --features fast, stripped, worktree
+b-tls-nosso    16,669,744    0.944   6,900,675    1.370  rustc 1.100.0, zig 0.13.0, cargo-zigbuild 0.24.1, --features fast --no-default-features, stripped, worktree
+s5cmd          17,658,008    1.000   5,037,198    1.000  official release v2.3.0 (goreleaser, Go 1.22, -s -w)

@@ -1,0 +1,174 @@
+2026-11-20T16:08:51Z b-url-prefix rebased onto perf/stage-b: 46074d8 (2 commits)
+2026-11-20T16:09:11Z b-url-prefix tests ok (192 passed, 0 failed) 
+==> zigbuild b-url-prefix from /src/wt/b-url-prefix (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 28s
+  b-url-prefix: 20,534,496 bytes
+==> done: b-url-prefix
+2026-11-20T16:10:40Z b-url-prefix built /opt/bins/b-url-prefix
+2026-11-20T16:11:33Z b-url-prefix fast suite (D1 window): 199 passed, 0 failed
+2026-11-20T16:54:13Z b-upload-read rebased onto perf/stage-b: 5ed2218 (1 commits)
+2026-11-20T16:54:28Z b-upload-read tests ok (192 passed, 0 failed) 
+==> zigbuild b-upload-read from /src/wt/b-upload-read (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 23s
+  b-upload-read: 20,535,424 bytes
+==> done: b-upload-read
+2026-11-20T16:55:52Z b-upload-read built /opt/bins/b-upload-read
+2026-11-20T17:08:12Z b-upload-read rebased onto perf/stage-b: 867dfa8 (1 commits)
+2026-11-20T17:08:26Z b-upload-read tests ok (196 passed, 0 failed) 
+==> zigbuild b-upload-read from /src/wt/b-upload-read (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 22s
+  b-upload-read: 20,502,560 bytes
+==> done: b-upload-read
+2026-11-20T17:09:49Z b-upload-read built /opt/bins/b-upload-read
+2026-11-20T17:24:12Z b-upload-read rebased onto perf/stage-b: 28e90fe (1 commits)
+2026-11-20T17:24:27Z b-upload-read tests ok (196 passed, 0 failed) 
+==> zigbuild b-upload-read from /src/wt/b-upload-read (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 24s
+  b-upload-read: 20,504,672 bytes
+==> done: b-upload-read
+2026-11-20T17:25:51Z b-upload-read built /opt/bins/b-upload-read
+2026-11-20T17:54:32Z b-shared-client REBASE FAILED
+2026-11-20T18:16:34Z b-shared-client rebased onto perf/stage-b: 4045530 (1 commits)
+2026-11-20T18:16:36Z b-shared-client TESTS FAILED (exit 101; 0 passed, 0 failed): see results/b-shared-client-tests.log
+2026-11-20T18:17:53Z b-shared-client rebased onto perf/stage-b: 5f50f24 (1 commits)
+2026-11-20T18:18:07Z b-shared-client tests ok (196 passed, 0 failed) 
+==> zigbuild b-shared-client from /src/wt/b-shared-client (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 28s
+  b-shared-client: 21,137,720 bytes
+==> done: b-shared-client
+2026-11-20T18:19:36Z b-shared-client built /opt/bins/b-shared-client
+2026-11-20T19:03:57Z b-delete-batches rebased onto perf/stage-b: 15d11a1 (4 commits)
+2026-11-20T19:04:14Z b-delete-batches tests ok (198 passed, 0 failed) 
+==> zigbuild b-delete-batches from /src/wt/b-delete-batches (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 30s
+  b-delete-batches: 21,191,288 bytes
+==> done: b-delete-batches
+2026-11-20T19:05:45Z b-delete-batches built /opt/bins/b-delete-batches
+2026-11-20T19:40:13Z b-no-imds rebased onto perf/stage-b: fd05845 (1 commits)
+2026-11-20T19:40:25Z b-no-imds TESTS FAILED (exit 101; 188 passed, 1 failed): see results/b-no-imds-tests.log
+2026-11-20T19:42:40Z b-no-imds rebased onto perf/stage-b: 2817d26 (1 commits)
+2026-11-20T19:42:55Z b-no-imds tests ok (199 passed, 0 failed) 
+==> zigbuild b-no-imds from /src/wt/b-no-imds (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 28s
+  b-no-imds: 21,221,384 bytes
+==> done: b-no-imds
+2026-11-20T19:44:24Z b-no-imds built /opt/bins/b-no-imds
+2026-11-20T19:44:41Z b-no-imds fast suite (D1 window): 206 passed, 0 failed
+2026-11-20T20:08:37Z b-stdout rebased onto perf/stage-b: 1c47f85 (1 commits)
+2026-11-20T20:08:54Z b-stdout tests ok (201 passed, 0 failed) 
+==> zigbuild b-stdout from /src/wt/b-stdout (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 28s
+  b-stdout: 21,236,152 bytes
+==> done: b-stdout
+2026-11-20T20:10:22Z b-stdout built /opt/bins/b-stdout
+2026-11-20T20:10:39Z b-stdout fast suite (D1 window): 208 passed, 0 failed
+2026-11-20T20:41:08Z b-panic-abort rebased onto perf/stage-b: c33fe94 (1 commits)
+2026-11-20T20:41:24Z b-panic-abort tests ok (201 passed, 0 failed) 
+==> zigbuild b-panic-abort from /src/wt/b-panic-abort (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 56s
+  b-panic-abort: 19,147,688 bytes
+==> done: b-panic-abort
+2026-11-20T20:43:21Z b-panic-abort built /opt/bins/b-panic-abort
+2026-11-21T00:01:48Z b-stream-download rebased onto perf/stage-b: 0a93984 (4 commits)
+2026-11-21T00:02:08Z b-stream-download tests ok (210 passed, 0 failed) 
+==> zigbuild b-stream-download from /src/wt/b-stream-download (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-stream-download: 19,143,296 bytes
+==> done: b-stream-download
+2026-11-21T00:03:27Z b-stream-download built /opt/bins/b-stream-download
+2026-11-21T01:24:05Z b-stream-download rebased onto perf/stage-b: 6ece31f (6 commits)
+2026-11-21T01:24:22Z b-stream-download tests ok (212 passed, 0 failed) 
+==> zigbuild b-stream-download from /src/wt/b-stream-download (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-stream-download: 19,156,952 bytes
+==> done: b-stream-download
+2026-11-21T01:25:42Z b-stream-download built /opt/bins/b-stream-download
+2026-11-21T02:54:12Z b-stream-download rebased onto perf/stage-b: 158e02d (6 commits)
+2026-11-21T02:54:28Z b-stream-download tests ok (213 passed, 0 failed) 
+==> zigbuild b-stream-download from /src/wt/b-stream-download (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-stream-download: 19,153,344 bytes
+==> done: b-stream-download
+2026-11-21T02:55:48Z b-stream-download built /opt/bins/b-stream-download
+2026-11-21T04:32:24Z b-stream-download rebased onto perf/stage-b: 30eeeae (7 commits)
+2026-11-21T04:32:41Z b-stream-download tests ok (213 passed, 0 failed) 
+==> zigbuild b-stream-download from /src/wt/b-stream-download (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-stream-download: 19,153,344 bytes
+==> done: b-stream-download
+2026-11-21T04:34:00Z b-stream-download built /opt/bins/b-stream-download
+2026-11-21T04:37:13Z b-stream-pairs rebased onto perf/stage-b: c5835fc (1 commits)
+2026-11-21T04:37:30Z b-stream-pairs tests ok (213 passed, 0 failed) 
+==> zigbuild b-stream-pairs from /src/wt/b-stream-pairs (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 19s
+  b-stream-pairs: 19,186,544 bytes
+==> done: b-stream-pairs
+2026-11-21T04:38:49Z b-stream-pairs built /opt/bins/b-stream-pairs
+2026-11-21T04:39:09Z b-stream-pairs fast suite (D1 window): 220 passed, 0 failed
+2026-11-21T06:59:27Z b-upload-buffers rebased onto perf/stage-b: e77a6b3 (1 commits)
+2026-11-21T06:59:45Z b-upload-buffers tests ok (213 passed, 0 failed) 
+==> zigbuild b-upload-buffers from /src/wt/b-upload-buffers (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 19s
+  b-upload-buffers: 19,155,664 bytes
+==> done: b-upload-buffers
+2026-11-21T07:01:05Z b-upload-buffers built /opt/bins/b-upload-buffers
+2026-11-21T07:33:17Z b-stream-pairs rebased onto perf/stage-b: d6a9add (2 commits)
+2026-11-21T07:33:35Z b-stream-pairs tests ok (213 passed, 0 failed) 
+==> zigbuild b-stream-pairs from /src/wt/b-stream-pairs (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-stream-pairs: 19,173,808 bytes
+==> done: b-stream-pairs
+2026-11-21T07:34:54Z b-stream-pairs built /opt/bins/b-stream-pairs
+2026-11-21T07:35:14Z b-stream-pairs fast suite (D1 window): 220 passed, 0 failed
+2026-11-21T08:17:23Z b-cat-stream rebased onto perf/stage-b: a06191a (2 commits)
+2026-11-21T08:17:43Z b-cat-stream tests ok (215 passed, 0 failed) 
+==> zigbuild b-cat-stream from /src/wt/b-cat-stream (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-cat-stream: 19,171,560 bytes
+==> done: b-cat-stream
+2026-11-21T08:19:02Z b-cat-stream built /opt/bins/b-cat-stream
+2026-11-21T08:45:52Z b-fast rebased onto perf/stage-b: 7e6f683 (3 commits)
+2026-11-21T08:46:15Z b-fast tests ok (216 passed, 0 failed) 
+==> zigbuild b-fast from /src/wt/b-fast (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 18s
+  b-fast: 19,181,392 bytes
+==> done: b-fast
+2026-11-21T08:47:34Z b-fast built /opt/bins/b-fast
+2026-11-21T09:12:41Z b-fast fast suite (D1 window): 226 passed, 0 failed
+2026-11-21T09:33:00Z b-fast rebased onto perf/stage-b: 6249c77 (4 commits)
+2026-11-21T09:33:20Z b-fast tests ok (216 passed, 0 failed) 
+==> zigbuild b-fast from /src/wt/b-fast (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 19s
+  b-fast: 19,183,216 bytes
+==> done: b-fast
+2026-11-21T09:34:40Z b-fast built /opt/bins/b-fast
+2026-11-21T09:55:19Z b-fast fast suite (D1 window): 228 passed, 0 failed
+2026-11-21T10:11:31Z b-fast rebased onto perf/stage-b: a9dff16 (5 commits)
+2026-11-21T10:11:51Z b-fast tests ok (216 passed, 0 failed) 
+==> zigbuild b-fast from /src/wt/b-fast (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 19s
+  b-fast: 19,184,672 bytes
+==> done: b-fast
+2026-11-21T10:13:11Z b-fast built /opt/bins/b-fast
+2026-11-21T10:33:44Z b-fast fast suite (D1 window): 228 passed, 0 failed
+2026-11-21T13:53:24Z w2 (perf/stage-b 9adc34b) fast suite (D1 window): 228 passed, 0 failed
+2026-11-21T13:56:04Z b-tls rebased onto perf/stage-b: c05c5e3 (3 commits)
+2026-11-21T13:56:59Z b-tls tests ok (216 passed, 0 failed) 
+==> zigbuild b-tls from /src/wt/b-tls (features: fast)
+    Finished `release` profile [optimized] target(s) in 2m 26s
+  b-tls: 17,203,712 bytes
+==> done: b-tls
+2026-11-21T13:59:25Z b-tls built /opt/bins/b-tls
+2026-11-21T13:59:51Z b-tls --no-default-features tests (exit 0): 216 passed, 0 failed
+2026-11-21T14:08:54Z b-tls fast suite (D1 window): 228 passed, 0 failed
+2026-11-21T14:47:21Z b-crc32c rebased onto perf/stage-b: aa1a44f (2 commits)
+2026-11-21T14:47:36Z b-crc32c TESTS FAILED (exit 101; 198 passed, 3 failed): see results/b-crc32c-tests.log
+2026-11-21T14:50:02Z b-crc32c rebased onto perf/stage-b: 43aacf1 (2 commits)
+2026-11-21T14:50:22Z b-crc32c tests ok (221 passed, 0 failed) 
+==> zigbuild b-crc32c from /src/wt/b-crc32c (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  b-crc32c: 17,223,744 bytes
+==> done: b-crc32c
+2026-11-21T14:51:37Z b-crc32c built /opt/bins/b-crc32c
+2026-11-21T14:56:17Z b-crc32c fast suite (D1 window): 235 passed, 0 failed
+2026-11-21T18:22:57Z w3 (perf/stage-b 293af6c) fast suite (D1 window): 228 passed, 0 failed

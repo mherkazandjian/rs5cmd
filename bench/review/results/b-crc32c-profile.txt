@@ -1,0 +1,19 @@
+D6 (CRC32C upload checksums through the SDK): where the added CPU goes. One `cp` of 4 x 1 GiB from
+tmpfs to the stub, `perf record -F 1999 -g` (diag_crc.py), builds with frame pointers and line
+tables: b-stage-prof = perf/stage-b after item 12, b-crc32c-prof = perf/b-crc32c (CRC32C via the
+SDK, RequestChecksumCalculation::WhenSupported). Samples = share x total samples.
+
+stub-tls (HTTPS; the SDK sends STREAMING-UNSIGNED-PAYLOAD-TRAILER, payload not hashed):
+                              b-stage-prof   b-crc32c-prof   added
+  total samples                      8,222          11,633   +3,411 (+41 %; matrix median +26 %)
+  libc memcpy (unresolved)             440           1,638   +1,198
+  crc_fast (avx512 vpclmulqdq)           0             392     +392
+  kernel copyout                       876           1,234     +358
+  kernel copyin                        932             870      -62
+  aws-lc AES-GCM                     1,106           1,043      -63
+  The CRC itself is ~0.2 CPU-s per 4 GiB (~5 % of the upload's CPU); the aws-chunked body's
+  copies cost about three times as much.
+
+stub (plain HTTP; the SDK signs every aws-chunked chunk):
+  sha2::sha256::x86_sha::compress 36.4 % of all samples (payload SHA-256 for chunk signatures),
+  copyout 9.0 %, copyin 7.8 %: hence the x2.1-2.4 CPU on the stub and x1.7 on MinIO.

@@ -1,0 +1,35 @@
+/opt/bins/rs5cmd-default  :
+section                 size       addr
+.interp                   28        736
+.note.ABI-tag             32        764
+.dynsym                 4368        800
+.gnu.version             364       5168
+.gnu.version_r           432       5532
+.gnu.hash                 28       5968
+.hash                   1464       5996
+.dynstr                 2396       7460
+.rela.dyn            1509720       9856
+.rela.plt               1416    1519576
+.gcc_except_table    1345152    1520992
+.rodata              2669220    2867200
+.eh_frame_hdr         300420    5536420
+.eh_frame            1946712    5836840
+.text               16741414    7787648
+.init                     23   24529064
+.fini                      9   24529088
+.plt                     960   24529104
+.tdata                   280   24534160
+.tbss                    272   24534440
+.data.rel.ro         1034384   24534448
+.init_array               16   25568832
+.fini_array               16   25568848
+.dynamic                 512   25568864
+.got                   40600   25569376
+.got.plt                 496   25609976
+.relro_padding          1816   25610472
+.data                  32856   25614568
+.bss                   12912   25647424
+.comment                 170          0
+Total               25648488
+
+

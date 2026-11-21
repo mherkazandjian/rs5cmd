@@ -1,0 +1,171 @@
+### cargo tree -i rustls@0.21.12 --features fast
+rustls v0.21.12
+├── aws-smithy-http-client v1.1.12
+│   └── aws-smithy-runtime v1.11.3
+│       ├── aws-config v1.8.17
+│       │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│       ├── aws-runtime v1.7.4
+│       │   ├── aws-config v1.8.17 (*)
+│       │   ├── aws-sdk-s3 v1.134.0
+│       │   ├── aws-sdk-sso v1.100.0
+│       │   ├── aws-sdk-ssooidc v1.102.0
+│       │   └── aws-sdk-sts v1.105.0
+│       ├── aws-sdk-s3 v1.134.0 (*)
+│       ├── aws-sdk-sso v1.100.0 (*)
+│       ├── aws-sdk-ssooidc v1.102.0 (*)
+│       └── aws-sdk-sts v1.105.0 (*)
+├── hyper-rustls v0.24.2
+│   └── aws-smithy-http-client v1.1.12 (*)
+├── monoio-rustls v0.3.0
+│   └── monoio-http v0.3.12
+│       ├── monoio-transports v0.5.3
+│       │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│       └── rs5cmd v0.1.0 (/src/rs5cmd)
+└── tokio-rustls v0.24.1
+    └── hyper-rustls v0.24.2 (*)
+
+### cargo tree -i rustls@0.23.40 --features fast
+rustls v0.23.40
+├── aws-smithy-http-client v1.1.12
+│   └── aws-smithy-runtime v1.11.3
+│       ├── aws-config v1.8.17
+│       │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│       ├── aws-runtime v1.7.4
+│       │   ├── aws-config v1.8.17 (*)
+│       │   ├── aws-sdk-s3 v1.134.0
+│       │   ├── aws-sdk-sso v1.100.0
+│       │   ├── aws-sdk-ssooidc v1.102.0
+│       │   └── aws-sdk-sts v1.105.0
+│       ├── aws-sdk-s3 v1.134.0 (*)
+│       ├── aws-sdk-sso v1.100.0 (*)
+│       ├── aws-sdk-ssooidc v1.102.0 (*)
+│       └── aws-sdk-sts v1.105.0 (*)
+├── hyper-rustls v0.27.9
+│   ├── aws-smithy-http-client v1.1.12 (*)
+│   └── rs5cmd v0.1.0 (/src/rs5cmd)
+├── monoio-rustls v0.4.0
+│   ├── monoio-transports v0.5.3
+│   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   └── rs5cmd v0.1.0 (/src/rs5cmd)
+├── monoio-transports v0.5.3 (*)
+├── rs5cmd v0.1.0 (/src/rs5cmd)
+└── tokio-rustls v0.26.4
+    ├── aws-smithy-http-client v1.1.12 (*)
+    └── hyper-rustls v0.27.9 (*)
+
+### cargo tree -i aws-lc-rs --features fast
+aws-lc-rs v1.17.0
+├── rustls v0.23.40
+│   ├── aws-smithy-http-client v1.1.12
+│   │   └── aws-smithy-runtime v1.11.3
+│   │       ├── aws-config v1.8.17
+│   │       ├── aws-runtime v1.7.4
+│   │       ├── aws-sdk-s3 v1.134.0
+│   │       ├── aws-sdk-sso v1.100.0
+│   │       ├── aws-sdk-ssooidc v1.102.0
+│   │       └── aws-sdk-sts v1.105.0
+│   ├── hyper-rustls v0.27.9
+│   │   ├── aws-smithy-http-client v1.1.12 (*)
+│   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   ├── monoio-rustls v0.4.0
+│   │   ├── monoio-transports v0.5.3
+│   │   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   ├── monoio-transports v0.5.3 (*)
+│   ├── rs5cmd v0.1.0 (/src/rs5cmd)
+│   └── tokio-rustls v0.26.4
+│       ├── aws-smithy-http-client v1.1.12 (*)
+│       └── hyper-rustls v0.27.9 (*)
+└── rustls-webpki v0.103.13
+    └── rustls v0.23.40 (*)
+
+### cargo tree -i ring --features fast
+ring v0.17.14
+├── rustls v0.21.12
+│   ├── aws-smithy-http-client v1.1.12
+│   │   └── aws-smithy-runtime v1.11.3
+│   │       ├── aws-config v1.8.17
+│   │       ├── aws-runtime v1.7.4
+│   │       ├── aws-sdk-s3 v1.134.0
+│   │       ├── aws-sdk-sso v1.100.0
+│   │       ├── aws-sdk-ssooidc v1.102.0
+│   │       └── aws-sdk-sts v1.105.0
+│   ├── hyper-rustls v0.24.2
+│   │   └── aws-smithy-http-client v1.1.12 (*)
+│   ├── monoio-rustls v0.3.0
+│   │   └── monoio-http v0.3.12
+│   │       ├── monoio-transports v0.5.3
+│   │       └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   └── tokio-rustls v0.24.1
+│       └── hyper-rustls v0.24.2 (*)
+├── rustls v0.23.40
+│   ├── aws-smithy-http-client v1.1.12 (*)
+│   ├── hyper-rustls v0.27.9
+│   │   ├── aws-smithy-http-client v1.1.12 (*)
+│   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   ├── monoio-rustls v0.4.0
+│   │   ├── monoio-transports v0.5.3 (*)
+│   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   ├── monoio-transports v0.5.3 (*)
+│   ├── rs5cmd v0.1.0 (/src/rs5cmd)
+│   └── tokio-rustls v0.26.4
+│       ├── aws-smithy-http-client v1.1.12 (*)
+│       └── hyper-rustls v0.27.9 (*)
+├── rustls-webpki v0.101.7
+│   └── rustls v0.21.12 (*)
+├── rustls-webpki v0.103.13
+│   └── rustls v0.23.40 (*)
+└── sct v0.7.1
+    └── rustls v0.21.12 (*)
+
+### cargo tree -i hyper@0.14.32 --features fast
+hyper v0.14.32
+├── aws-smithy-http-client v1.1.12
+│   └── aws-smithy-runtime v1.11.3
+│       ├── aws-config v1.8.17
+│       │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│       ├── aws-runtime v1.7.4
+│       │   ├── aws-config v1.8.17 (*)
+│       │   ├── aws-sdk-s3 v1.134.0
+│       │   ├── aws-sdk-sso v1.100.0
+│       │   ├── aws-sdk-ssooidc v1.102.0
+│       │   └── aws-sdk-sts v1.105.0
+│       ├── aws-sdk-s3 v1.134.0 (*)
+│       ├── aws-sdk-sso v1.100.0 (*)
+│       ├── aws-sdk-ssooidc v1.102.0 (*)
+│       └── aws-sdk-sts v1.105.0 (*)
+└── hyper-rustls v0.24.2
+    └── aws-smithy-http-client v1.1.12 (*)
+
+### cargo tree -i hyper-rustls@0.24.2 --features fast
+hyper-rustls v0.24.2
+└── aws-smithy-http-client v1.1.12
+    └── aws-smithy-runtime v1.11.3
+        ├── aws-config v1.8.17
+        │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+        ├── aws-runtime v1.7.4
+        │   ├── aws-config v1.8.17 (*)
+        │   ├── aws-sdk-s3 v1.134.0
+        │   ├── aws-sdk-sso v1.100.0
+        │   ├── aws-sdk-ssooidc v1.102.0
+        │   └── aws-sdk-sts v1.105.0
+        ├── aws-sdk-s3 v1.134.0 (*)
+        ├── aws-sdk-sso v1.100.0 (*)
+        ├── aws-sdk-ssooidc v1.102.0 (*)
+        └── aws-sdk-sts v1.105.0 (*)
+
+### cargo tree -i hyper-rustls@0.27.7 --features fast
+error: package ID specification `hyper-rustls@0.27.7` did not match any packages
+help: there are similar package ID specifications:
+
+  hyper-rustls@0.24.2
+  hyper-rustls@0.27.9
+
+### cargo tree -i regex --features fast
+regex v1.12.3
+└── rs5cmd v0.1.0 (/src/rs5cmd)
+
+### cargo tree -i tracing-subscriber --features fast
+tracing-subscriber v0.3.23
+└── rs5cmd v0.1.0 (/src/rs5cmd)
+

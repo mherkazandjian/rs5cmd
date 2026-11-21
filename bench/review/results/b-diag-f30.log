@@ -1,0 +1,18 @@
+s5cmd      r1 rc=0 wall   2.25s reqs 28 faults 6 gets 21 retries 0 by-attempt {} backoff sum 0.0s max 0.00s quota-lines 0
+rs5cmd     r1 rc=0 wall   5.80s reqs 175 faults 47 gets 128 retries 47 by-attempt {1: 38, 2: 8, 3: 1} backoff sum 25.0s max 2.01s quota-lines 0
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+rs5cmd-eq  r1 rc=0 wall   1.64s reqs 27 faults 6 gets 21 retries 6 by-attempt {1: 5, 2: 1} backoff sum 3.7s max 1.25s quota-lines 0
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+s5cmd      r2 rc=0 wall   2.17s reqs 28 faults 6 gets 21 retries 0 by-attempt {} backoff sum 0.0s max 0.00s quota-lines 0
+rs5cmd     r2 rc=0 wall   4.32s reqs 176 faults 48 gets 128 retries 48 by-attempt {1: 40, 2: 8} backoff sum 27.3s max 1.49s quota-lines 0
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+rs5cmd-eq  r2 rc=0 wall   2.45s reqs 27 faults 6 gets 21 retries 6 by-attempt {1: 5, 2: 1} backoff sum 4.3s max 1.90s quota-lines 0
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.
+     [0m [2maws_smithy_runtime::client::retries::strategy::standard[0m[2m:[0m no client rate limiter configured, so no token is required for the initial request.

@@ -1,0 +1,5 @@
+__pycache__/
+
+# Profiles from profile.sh / a4.sh (large; not committed).
+/prof/
+/prof-*/

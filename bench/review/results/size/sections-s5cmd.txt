@@ -1,0 +1,17 @@
+/opt/bins/s5cmd  :
+section                size       addr
+.text               6672960    4198400
+.rodata             6708288   10874880
+.typelink             18712   17583168
+.itablink              4648   17601888
+.gosymtab                 0   17606536
+.gopclntab          3891696   17606560
+.go.buildinfo          1600   21499904
+.noptrdata           249296   21501504
+.data                100640   21750816
+.bss                 405904   21851456
+.noptrbss             57552   22257376
+.note.go.buildid        100    4198300
+Total              18111396
+
+

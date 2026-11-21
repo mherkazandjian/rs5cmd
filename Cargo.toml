@@ -15,6 +15,12 @@ name = "s3stub"
 path = "src/bin/s3stub.rs"
 required-features = ["bench-stub"]
 
+# Benchmark-only "SDK floor" probe (optimization review, experiment E8).
+[[bin]]
+name = "sdkfloor"
+path = "src/bin/sdkfloor.rs"
+required-features = ["bench-stub", "fast"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive", "cargo", "env"] }
@@ -85,8 +91,9 @@ fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-ru
 # needed to BUILD; macOS uses macFUSE. Opt-in so the default build stays free of
 # FUSE deps, mirroring the `fast` precedent.
 mount = ["dep:fuse3", "dep:libc", "dep:bytes"]
-# Builds the s3stub benchmark target (uses only tokio).
-bench-stub = []
+# Benchmark-only targets: s3stub (tokio, plus tokio-rustls for its HTTPS listeners and h2 for
+# the HTTP/2 one) and, with `fast` as well, the sdkfloor probe (http-body-util).
+bench-stub = ["dep:tokio-rustls", "dep:http-body-util", "dep:h2", "dep:bytes"]
 
 [dependencies.fuse3]
 version = "0.8"
@@ -136,6 +143,31 @@ optional = true
 [dependencies.core_affinity]
 version = "0.8"
 optional = true
+
+# sdkfloor's request bodies (bench-stub only; already in the lock graph via hyper).
+[dependencies.http-body-util]
+version = "0.1"
+optional = true
+
+# s3stub's HTTP/2 listener (bench-stub only; already in the lock graph via hyper).
+[dependencies.h2]
+version = "0.4"
+optional = true
+
+# s3stub's HTTPS listener (bench-stub only; already in the lock graph via hyper-rustls).
+[dependencies.tokio-rustls]
+version = "0.26"
+optional = true
+default-features = false
+features = ["ring", "tls12"]
+
+# Profiling builds for the optimization review (bench/review/): release code generation with
+# full debug info, nothing stripped. Frame pointers come from RUSTFLAGS in build.sh. The release
+# profile itself is unchanged.
+[profile.profiling]
+inherits = "release"
+debug = true
+strip = "none"
 
 [dev-dependencies]
 tempfile = "3"

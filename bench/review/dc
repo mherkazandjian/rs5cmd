@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Host-side wrapper: docker compose for the review project, with the caller's uid/gid passed in
+# so results written by the (root) container can be handed back to the caller, and IO_DEVICE set
+# to the block device behind the docker root (the whole disk if that is a partition), which
+# compose.yml caps with io.max.
+here="$(cd "$(dirname "$0")" && pwd)"
+if [ -z "${IO_DEVICE:-}" ]; then
+    root="$(sudo docker info -f '{{.DockerRootDir}}')"
+    dev="$(df --output=source "$root" | tail -1)"
+    dev="$(readlink -f "$dev")"
+    if [ "$(lsblk -dno TYPE "$dev")" = "part" ]; then
+        dev="/dev/$(lsblk -dno PKNAME "$dev")"
+    fi
+    src_dev="$(readlink -f "$(df --output=source "$here" | tail -1)")"
+    if [ "$src_dev" != "$dev" ] && [ "$(lsblk -dno TYPE "$src_dev")" != "part" ]; then
+        echo "dc: note: the source tree is on $src_dev, not $dev; only $dev is capped" >&2
+    fi
+    IO_DEVICE="$dev"
+fi
+exec sudo env HOST_UID="$(id -u)" HOST_GID="$(id -g)" IO_DEVICE="$IO_DEVICE" \
+    docker compose -f "$here/compose.yml" "$@"

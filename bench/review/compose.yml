@@ -1,0 +1,163 @@
+# Compose project for the optimization review. Run from the repository root:
+#
+#   sudo docker compose -f bench/review/compose.yml up -d minio bench
+#   sudo docker compose -f bench/review/compose.yml exec bench bash bench/review/run-matrix.sh ...
+#   sudo docker compose -f bench/review/compose.yml --profile gate run --rm test   # see `test`
+#   sudo docker compose -f bench/review/compose.yml down -v      # remove everything at the end
+# (bench/review/dc wraps this and sets IO_DEVICE.)
+#
+# Footprint on a shared host (see README.md):
+#   - no published ports; services talk over the project network only
+#   - every container is pinned to the cpuset in CPUSET_ALL (8 logical CPUs); the server side
+#     (MinIO, or s3stub inside `bench`) uses CPUSET_SERVER, clients use CPUSET_CLIENT
+#   - memory limits add up to 32 GiB including both tmpfs mounts: bench 18 (10 tmpfs) +
+#     minio 14 (9 tmpfs for its data, so MinIO causes no disk I/O at all)
+#   - hard block-I/O limits (io.max) on the device behind the docker root and the source tree,
+#     for every container: 300 MB/s read, 200 MB/s write, 3000 / 2000 IOPS. (io.weight alone
+#     has no effect on NVMe/md.)
+name: rs5cmd-optreview
+
+x-io: &io
+  weight: 100
+  device_read_bps: [{path: "${IO_DEVICE:?run through bench/review/dc}", rate: "300mb"}]
+  device_write_bps: [{path: "${IO_DEVICE:?run through bench/review/dc}", rate: "200mb"}]
+  device_read_iops: [{path: "${IO_DEVICE:?run through bench/review/dc}", rate: 3000}]
+  device_write_iops: [{path: "${IO_DEVICE:?run through bench/review/dc}", rate: 2000}]
+
+x-s3-env: &s3env
+  AWS_ACCESS_KEY_ID: minioadmin
+  AWS_SECRET_ACCESS_KEY: minioadmin
+  AWS_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://minio:9000
+  S3_ENDPOINT_URL: http://minio:9000
+
+services:
+  minio:
+    # RELEASE.2025-09-07, pinned by digest.
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    command: server /data
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+      # Deleted objects go to .minio.sys/tmp/.trash first. This release does not purge it in
+      # time for the review's churn (the setting below did not help), so matrix.py empties it
+      # through the shared volume after every MinIO round and row.
+      MINIO_API_DELETE_CLEANUP_INTERVAL: 10s
+    cpuset: "${CPUSET_SERVER:-4,5,12,13}"
+    mem_limit: 14g
+    memswap_limit: 14g
+    blkio_config: *io
+    volumes:
+      - minio-data:/data  # tmpfs, 9 GiB (see `volumes:`), charged to this container's 14 GiB
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+  # Long-running toolchain container: builds, the matrix runner, the stub and the clients.
+  bench:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: rs5cmd-optreview-bench
+    init: true  # reap orphans (killed runs) instead of leaving zombies under `sleep infinity`
+    cpuset: "${CPUSET_ALL:-4-7,12-15}"
+    mem_limit: 18g
+    memswap_limit: 18g
+    blkio_config: *io
+    # Docker's default seccomp profile plus the three io_uring syscalls (repo root).
+    security_opt:
+      - seccomp:../../seccomp-iouring.json
+    # perf inside the container (the host keeps perf_event_paranoid as it is).
+    cap_add:
+      - PERFMON
+      - SYSLOG
+      - SYS_PTRACE
+    # Members of this gid may use io_uring while the host's sysctl window is open
+    # (kernel.io_uring_disabled=1 + kernel.io_uring_group). Outside the window it does nothing.
+    group_add:
+      - "${IOURING_GID:-59900}"
+    ulimits:
+      nofile:
+        soft: 1048576
+        hard: 1048576
+    # This container's network namespace only. MinIO is not on loopback, so with the default
+    # (2 = loopback only) closed connections pin ephemeral ports in TIME_WAIT for 60 s and
+    # clients that churn connections end up in the kernel's port search (or out of ports).
+    # The default-setting behaviour was recorded in the A2 validation.
+    sysctls:
+      net.ipv4.tcp_tw_reuse: 1
+    environment:
+      <<: *s3env
+      CARGO_TARGET_DIR: /target/main
+      CARGO_BUILD_JOBS: "8"
+      GOMAXPROCS: "8"
+      GOFLAGS: "-p=8"
+      GOCACHE: /cache/go-build
+      GOPATH: /cache/gopath
+      CPUSET_SERVER: "${CPUSET_SERVER:-4,5,12,13}"
+      CPUSET_CLIENT: "${CPUSET_CLIENT:-6,7,14,15}"
+      CPUSET_OTHER: "${CPUSET_OTHER:-0-3,8-11}"
+      HOST_UID: "${HOST_UID:-0}"
+      HOST_GID: "${HOST_GID:-0}"
+    volumes:
+      # The parent directory holds rs5cmd/ and s5cmd/ (and worktrees for experiments).
+      - ../../..:/src
+      - cargo-registry:/usr/local/cargo/registry
+      - target:/target
+      - tools:/opt/tools
+      - cache:/cache
+      - bins:/opt/bins
+      - disk:/mnt/disk
+      - minio-data:/minio-data  # MinIO's tmpfs data, only to purge its trash between rounds
+      - type: tmpfs
+        target: /mnt/tmpfs
+        tmpfs:
+          size: 10737418240
+    working_dir: /src/rs5cmd
+    command: ["sleep", "infinity"]
+
+  # e2e gate (A1 only): the repository's `test` service, pinned and capped, `target/` in a
+  # volume. Behind a profile: bench + minio already use the 32 GiB budget, so run it only with
+  # `bench` stopped. Later test suites run inside `bench` (same toolchain, CARGO_TARGET_DIR
+  # /target/test).
+  test:
+    profiles: ["gate"]
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: rs5cmd-optreview-dev
+    cpuset: "${CPUSET_ALL:-4-7,12-15}"
+    mem_limit: 6g
+    memswap_limit: 6g
+    blkio_config: *io
+    working_dir: /workspace
+    volumes:
+      - ../..:/workspace
+      - cargo-registry:/usr/local/cargo/registry
+      - target:/target
+    environment:
+      <<: *s3env
+      CARGO_TARGET_DIR: /target/test
+      CARGO_BUILD_JOBS: "8"
+      RUST_LOG: info
+    command: cargo test --all -- --nocapture
+    depends_on:
+      minio:
+        condition: service_healthy
+
+volumes:
+  cargo-registry:
+  target:
+  tools:
+  cache:
+  bins:
+  disk:
+  # MinIO's data: a tmpfs (memory, no disk I/O), shared with bench for the trash purge.
+  minio-data:
+    driver: local
+    driver_opts:
+      type: tmpfs
+      device: tmpfs
+      o: size=9g
