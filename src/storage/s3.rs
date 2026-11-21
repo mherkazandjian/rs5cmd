@@ -243,6 +243,7 @@ fn cached_http_client(
 /// - As the SDK's client: TCP_NODELAY, the SDK's connect timeout (3.1 s unless configured; TLS
 ///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
 ///   retries the same ones (`connector_error`).
+/// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record.
 fn build_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
@@ -432,7 +433,7 @@ where
 
 /// The SDK's connect timeout around a connector, TLS handshake included (as the SDK's client
 /// times it). Without one a connection to an unreachable host waited for the kernel's SYN
-/// retries, about two minutes.
+/// retries, about two minutes. Its connections read as `FillingReads`.
 #[derive(Clone)]
 struct ConnectTimeout<C> {
     inner: C,
@@ -457,10 +458,10 @@ where
     C::Future: Send + 'static,
     C::Error: Into<BoxError>,
 {
-    type Response = C::Response;
+    type Response = FillingReads<C::Response>;
     type Error = BoxError;
     type Future = std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<C::Response, BoxError>> + Send>,
+        Box<dyn std::future::Future<Output = Result<Self::Response, BoxError>> + Send>,
     >;
 
     fn poll_ready(
@@ -471,17 +472,138 @@ where
     }
 
     fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let fill = uri.scheme() == Some(&http::uri::Scheme::HTTPS);
         let connect = self.inner.call(uri);
         let timeout = self.timeout;
         Box::pin(async move {
-            let Some(d) = timeout else {
-                return connect.await.map_err(Into::into);
+            let io = match timeout {
+                None => connect.await.map_err(Into::into)?,
+                Some(d) => match tokio::time::timeout(d, connect).await {
+                    Ok(r) => r.map_err(Into::into)?,
+                    Err(_) => return Err(Box::new(ConnectTimedOut(d)) as BoxError),
+                },
             };
-            match tokio::time::timeout(d, connect).await {
-                Ok(r) => r.map_err(Into::into),
-                Err(_) => Err(Box::new(ConnectTimedOut(d)) as BoxError),
-            }
+            Ok(FillingReads {
+                io,
+                fill,
+                deferred: None,
+            })
         })
+    }
+}
+
+/// A connection whose reads over TLS go on while more is ready, up to `FILL_LIMIT`. A TLS read
+/// returns one record (16 KiB at most) however much more has arrived, so a body came in 16 KiB
+/// chunks, each one write into the downloaded file under the file's lock; the runtime workers
+/// waiting on it left too few to decrypt (one 4 GiB object: 2.2 s, s5cmd 1.5 s). Plain
+/// connections pass through: their reads already return what is ready, and another read there
+/// would find nothing.
+struct FillingReads<T> {
+    io: T,
+    fill: bool,
+    /// An error met after some bytes were read: the next read returns it.
+    deferred: Option<std::io::Error>,
+}
+
+/// The most one read gathers over TLS: 64 KiB (four records). hyper's read buffer settles at
+/// twice what its reads return, so this also bounds each connection's buffer; reading up to
+/// hyper's whole buffer (~400 KiB) was faster still for one object but tripled the memory of
+/// downloads over many connections, and wrote data already gone from the CPU's cache.
+const FILL_LIMIT: usize = 64 << 10;
+
+impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        mut buf: hyper::rt::ReadBufCursor<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::pin::Pin;
+        use std::task::Poll;
+        let this = self.get_mut();
+        if let Some(e) = this.deferred.take() {
+            return Poll::Ready(Err(e));
+        }
+        let capacity = buf.remaining().min(FILL_LIMIT);
+        if !this.fill || capacity == 0 {
+            return Pin::new(&mut this.io).poll_read(cx, buf);
+        }
+        // SAFETY: the inner reader only writes into this unfilled part, and only the bytes it
+        // reports filled (so initialized) are advanced over below.
+        let mut part = hyper::rt::ReadBuf::uninit(unsafe { &mut buf.as_mut()[..capacity] });
+        let mut result = Poll::Pending;
+        loop {
+            let before = part.filled().len();
+            match Pin::new(&mut this.io).poll_read(cx, part.unfilled()) {
+                Poll::Ready(Ok(())) => {
+                    result = Poll::Ready(Ok(()));
+                    let now = part.filled().len();
+                    // End of stream, or the buffer is full.
+                    if now == before || now == capacity {
+                        break;
+                    }
+                }
+                Poll::Ready(Err(e)) => {
+                    if part.filled().is_empty() {
+                        result = Poll::Ready(Err(e));
+                    } else {
+                        this.deferred = Some(e);
+                    }
+                    break;
+                }
+                // Nothing more ready: return what was read, if anything (the inner reader has
+                // registered the waker either way).
+                Poll::Pending => break,
+            }
+        }
+        let n = part.filled().len();
+        // SAFETY: `n` bytes were filled by the inner reader.
+        unsafe { buf.advance(n) };
+        result
+    }
+}
+
+impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for FillingReads<T> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_shutdown(cx)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.io.is_write_vectored()
+    }
+
+    fn poll_write_vectored(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        std::pin::Pin::new(&mut self.get_mut().io).poll_write_vectored(cx, bufs)
+    }
+}
+
+impl<T> hyper_util::client::legacy::connect::Connection for FillingReads<T>
+where
+    T: hyper_util::client::legacy::connect::Connection,
+{
+    fn connected(&self) -> hyper_util::client::legacy::connect::Connected {
+        self.io.connected()
     }
 }
 
@@ -2514,6 +2636,112 @@ fn apply_put_metadata(
 #[cfg(test)]
 mod tests {
     use super::percent_decode;
+
+    /// A scripted connection for `FillingReads`: each step is one inner read's outcome.
+    enum Step {
+        Data(Vec<u8>),
+        Pending,
+        Fail,
+    }
+
+    struct Scripted(std::collections::VecDeque<Step>);
+
+    impl hyper::rt::Read for Scripted {
+        fn poll_read(
+            self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+            mut buf: hyper::rt::ReadBufCursor<'_>,
+        ) -> std::task::Poll<std::io::Result<()>> {
+            use std::task::Poll;
+            let steps = &mut self.get_mut().0;
+            match steps.pop_front() {
+                Some(Step::Data(mut d)) => {
+                    let n = d.len().min(buf.remaining());
+                    buf.put_slice(&d[..n]);
+                    if n < d.len() {
+                        steps.push_front(Step::Data(d.split_off(n)));
+                    }
+                    Poll::Ready(Ok(()))
+                }
+                Some(Step::Pending) => Poll::Pending,
+                Some(Step::Fail) => Poll::Ready(Err(std::io::Error::other("reset"))),
+                None => Poll::Ready(Ok(())), // end of stream
+            }
+        }
+    }
+
+    /// One `poll_read` of `r` into a buffer of `size`: the outcome and the bytes read.
+    fn read_once(
+        r: &mut super::FillingReads<Scripted>,
+        size: usize,
+    ) -> (std::task::Poll<std::io::Result<()>>, Vec<u8>) {
+        let mut mem = vec![std::mem::MaybeUninit::<u8>::uninit(); size];
+        let mut buf = hyper::rt::ReadBuf::uninit(&mut mem);
+        let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+        let poll = hyper::rt::Read::poll_read(std::pin::Pin::new(r), &mut cx, buf.unfilled());
+        (poll, buf.filled().to_vec())
+    }
+
+    fn filling(steps: Vec<Step>, fill: bool) -> super::FillingReads<Scripted> {
+        super::FillingReads {
+            io: Scripted(steps.into()),
+            fill,
+            deferred: None,
+        }
+    }
+
+    #[test]
+    fn filling_reads_gathers_what_is_ready() {
+        use std::task::Poll;
+        let mut r = filling(
+            vec![
+                Step::Data(vec![1; 10]),
+                Step::Data(vec![2; 20]),
+                Step::Pending,
+                Step::Data(vec![3; 5]),
+                Step::Fail,
+            ],
+            true,
+        );
+        // Two reads' worth, then nothing more ready: both are returned at once.
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert_eq!(got, [vec![1; 10], vec![2; 20]].concat());
+        // Bytes, then an error: the bytes now, the error on the next read.
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert_eq!(got, vec![3; 5]);
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Err(_))));
+        assert!(got.is_empty());
+        // End of stream reads as zero bytes.
+        let (poll, got) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert!(got.is_empty());
+    }
+
+    #[test]
+    fn filling_reads_stops_at_the_limit_and_passes_plain_reads_through() {
+        use std::task::Poll;
+        let limit = super::FILL_LIMIT;
+        let data: Vec<u8> = (0..3 * limit).map(|i| (i % 251) as u8).collect();
+        let chunks = data.chunks(16 << 10).map(|c| Step::Data(c.to_vec())).collect();
+        let mut r = filling(chunks, true);
+        let mut got = Vec::new();
+        for _ in 0..3 {
+            let (poll, part) = read_once(&mut r, 1 << 20);
+            assert!(matches!(poll, Poll::Ready(Ok(()))));
+            assert_eq!(part.len(), limit);
+            got.extend(part);
+        }
+        assert_eq!(got, data);
+        // Nothing ready on the first read: pending, as the inner reader is.
+        let mut r = filling(vec![Step::Pending], true);
+        assert!(read_once(&mut r, 1 << 20).0.is_pending());
+        // A plain connection reads once per call.
+        let mut r = filling(vec![Step::Data(vec![7; 10]), Step::Data(vec![8; 10])], false);
+        assert_eq!(read_once(&mut r, 1 << 20).1, vec![7; 10]);
+    }
 
     #[test]
     fn percent_decode_passthrough_plain() {
