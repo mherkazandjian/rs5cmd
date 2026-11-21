@@ -85,6 +85,59 @@ async fn write_body(
     Ok(offset)
 }
 
+/// The fewest download parts in flight the process-wide budget allows: the default
+/// `--numworkers`. Below it, workers x `--concurrency` stays small anyway, and a smaller budget
+/// would only slow down a few large downloads at once.
+const MIN_PARTS_IN_FLIGHT: usize = 256;
+
+/// Download parts in flight over the whole process, beyond each object's first part.
+static PARTS_IN_FLIGHT: std::sync::atomic::AtomicUsize =
+    std::sync::atomic::AtomicUsize::new(MIN_PARTS_IN_FLIGHT);
+
+/// Sets the process-wide budget of download parts in flight from `--numworkers` (256 at least).
+/// Takes effect if called before the first multipart download, as `main` does.
+pub fn set_download_parts_in_flight(numworkers: usize) {
+    PARTS_IN_FLIGHT.store(
+        numworkers.max(MIN_PARTS_IN_FLIGHT),
+        std::sync::atomic::Ordering::Relaxed,
+    );
+}
+
+/// One permit per download part in flight. Each connection holds up to ~128 KiB while its part
+/// streams (`FILL_LIMIT`), so with --numworkers objects of several parts each, the parts in
+/// flight bound the memory: 256 workers x 8 parts opened 2,048 connections.
+struct PartBudget {
+    sem: tokio::sync::Semaphore,
+    size: std::sync::Mutex<usize>,
+}
+
+impl PartBudget {
+    fn new(n: usize) -> Self {
+        PartBudget {
+            sem: tokio::sync::Semaphore::new(n),
+            size: std::sync::Mutex::new(n),
+        }
+    }
+
+    fn global() -> &'static PartBudget {
+        static B: std::sync::OnceLock<PartBudget> = std::sync::OnceLock::new();
+        B.get_or_init(|| {
+            PartBudget::new(PARTS_IN_FLIGHT.load(std::sync::atomic::Ordering::Relaxed))
+        })
+    }
+
+    /// The budget, raised to at least `n` permits first: a `--concurrency` above `--numworkers`
+    /// still gets its parts.
+    fn at_least(&self, n: usize) -> &tokio::sync::Semaphore {
+        let mut size = self.size.lock().unwrap_or_else(|e| e.into_inner());
+        if n > *size {
+            self.sem.add_permits(n - *size);
+            *size = n;
+        }
+        &self.sem
+    }
+}
+
 /// Parses the total object size from a `Content-Range: bytes START-END/TOTAL`
 /// header value (the part after the final `/`).
 fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
@@ -243,7 +296,8 @@ fn cached_http_client(
 /// - As the SDK's client: TCP_NODELAY, the SDK's connect timeout (3.1 s unless configured; TLS
 ///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
 ///   retries the same ones (`connector_error`).
-/// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record.
+/// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record;
+///   no read returns more than that, which bounds each connection's read buffer.
 /// - Crypto: aws-lc-rs, as the SDK's client: it offers post-quantum hybrid key exchange
 ///   (X25519MLKEM768) first, and its AES-GCM costs less CPU than ring's.
 fn build_http_client(
@@ -498,8 +552,8 @@ where
 /// returns one record (16 KiB at most) however much more has arrived, so a body came in 16 KiB
 /// chunks, each one write into the downloaded file under the file's lock; the runtime workers
 /// waiting on it left too few to decrypt (one 4 GiB object: 2.2 s, s5cmd 1.5 s). Plain
-/// connections pass through: their reads already return what is ready, and another read there
-/// would find nothing.
+/// connections read once per call (their reads already return what is ready, and another read
+/// there would find nothing), but no more than `FILL_LIMIT` either.
 struct FillingReads<T> {
     io: T,
     fill: bool,
@@ -507,10 +561,12 @@ struct FillingReads<T> {
     deferred: Option<std::io::Error>,
 }
 
-/// The most one read gathers over TLS: 64 KiB (four records). hyper's read buffer settles at
-/// twice what its reads return, so this also bounds each connection's buffer; reading up to
-/// hyper's whole buffer (~400 KiB) was faster still for one object but tripled the memory of
-/// downloads over many connections, and wrote data already gone from the CPU's cache.
+/// The most one read returns: 64 KiB (four TLS records). hyper's read buffer settles at twice
+/// what its reads return, so this bounds each connection's buffer near 128 KiB, over TLS and
+/// plain HTTP alike. Reading up to hyper's whole buffer (~400 KiB) was faster still for one
+/// object over TLS but tripled the memory of downloads over many connections, and wrote data
+/// already gone from the CPU's cache; plain connections left unbounded held ~400 KiB each, so
+/// 256 downloads of 1 MiB objects peaked at 4x s5cmd's memory.
 const FILL_LIMIT: usize = 64 << 10;
 
 impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
@@ -526,7 +582,7 @@ impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
             return Poll::Ready(Err(e));
         }
         let capacity = buf.remaining().min(FILL_LIMIT);
-        if !this.fill || capacity == 0 {
+        if capacity == 0 {
             return Pin::new(&mut this.io).poll_read(cx, buf);
         }
         // SAFETY: the inner reader only writes into this unfilled part, and only the bytes it
@@ -539,8 +595,9 @@ impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
                 Poll::Ready(Ok(())) => {
                     result = Poll::Ready(Ok(()));
                     let now = part.filled().len();
-                    // End of stream, or the buffer is full.
-                    if now == before || now == capacity {
+                    // A plain connection reads once; over TLS, until the end of the stream or a
+                    // full buffer.
+                    if !this.fill || now == before || now == capacity {
                         break;
                     }
                 }
@@ -1347,6 +1404,9 @@ impl S3 {
     ) -> anyhow::Result<()> {
         use futures::TryStreamExt;
         let n_parts = total.div_ceil(part_size);
+        // Every object's parts draw on one budget, so many large downloads at once do not open
+        // up to --numworkers x --concurrency connections; one object still gets its --concurrency.
+        let budget = PartBudget::global().at_least(self.concurrency);
         let tasks = (1..n_parts).map(|i| {
             let offset = i * part_size;
             let len = part_size.min(total - offset);
@@ -1358,6 +1418,8 @@ impl S3 {
             let file = std::sync::Arc::clone(&file);
             let limiter = self.download_limiter.clone();
             async move {
+                // Held for this part's request and body only, never while waiting for another.
+                let _permit = budget.acquire().await?;
                 let range = format!("bytes={}-{}", offset, offset + len - 1);
                 let mut req = client
                     .get_object()
@@ -1416,10 +1478,12 @@ impl S3 {
         self.upload_multipart(src, dst, metadata, size).await
     }
 
-    /// Files up to this size are read fully into memory for the request body,
-    /// avoiding per-request streaming-from-disk overhead (blocking-pool file
-    /// reads) that throttles many small concurrent uploads.
-    const INLINE_BODY_MAX: u64 = 1024 * 1024;
+    /// Files up to this size are read fully into memory for the request body, avoiding the
+    /// per-request streaming-from-disk overhead (blocking-pool file reads) that throttles many
+    /// small concurrent uploads. Larger files stream in `upload_body`'s chunks under its
+    /// process-wide budget: at 1 MiB, 256 uploads of 1 MiB files held 256 MiB of bodies at once
+    /// (peak memory 8x s5cmd's).
+    const INLINE_BODY_MAX: u64 = 256 * 1024;
 
     async fn upload_single(&self, src: &Path, dst: &Url, metadata: &Metadata) -> anyhow::Result<()> {
         let size = std::fs::metadata(src).map(|m| m.len()).unwrap_or(u64::MAX);
@@ -2740,7 +2804,7 @@ mod tests {
     }
 
     #[test]
-    fn filling_reads_stops_at_the_limit_and_passes_plain_reads_through() {
+    fn filling_reads_stops_at_the_limit_and_reads_plain_connections_once() {
         use std::task::Poll;
         let limit = super::FILL_LIMIT;
         let data: Vec<u8> = (0..3 * limit).map(|i| (i % 251) as u8).collect();
@@ -2757,9 +2821,34 @@ mod tests {
         // Nothing ready on the first read: pending, as the inner reader is.
         let mut r = filling(vec![Step::Pending], true);
         assert!(read_once(&mut r, 1 << 20).0.is_pending());
-        // A plain connection reads once per call.
+        // A plain connection reads once per call...
         let mut r = filling(vec![Step::Data(vec![7; 10]), Step::Data(vec![8; 10])], false);
         assert_eq!(read_once(&mut r, 1 << 20).1, vec![7; 10]);
+        // ...and no more than the limit, however much is ready and however large hyper's buffer.
+        let mut r = filling(vec![Step::Data(data.clone())], false);
+        let (poll, part) = read_once(&mut r, 1 << 20);
+        assert!(matches!(poll, Poll::Ready(Ok(()))));
+        assert_eq!(part, data[..limit]);
+        assert_eq!(read_once(&mut r, 1 << 20).1, data[limit..2 * limit]);
+        // Pending and errors pass through.
+        let mut r = filling(vec![Step::Pending, Step::Fail], false);
+        assert!(read_once(&mut r, 1 << 20).0.is_pending());
+        assert!(matches!(read_once(&mut r, 1 << 20).0, Poll::Ready(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn part_budget_bounds_parts_and_grows_to_the_concurrency_asked() {
+        let b = super::PartBudget::new(2);
+        let sem = b.at_least(1);
+        assert_eq!(sem.available_permits(), 2);
+        let p1 = sem.acquire().await.unwrap();
+        let p2 = sem.acquire().await.unwrap();
+        assert!(sem.try_acquire().is_err(), "a third part started beyond the budget");
+        // A larger --concurrency raises the budget; a smaller one never lowers it.
+        assert_eq!(b.at_least(3).available_permits(), 1);
+        assert_eq!(b.at_least(1).available_permits(), 1);
+        drop((p1, p2));
+        assert_eq!(b.at_least(1).available_permits(), 3);
     }
 
     #[test]

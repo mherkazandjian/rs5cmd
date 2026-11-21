@@ -117,7 +117,8 @@ pub struct GlobalOpts {
     #[arg(long, short = 'x', global = true)]
     pub proxy: Option<String>,
 
-    /// Number of concurrent workers for batch operations.
+    /// Number of concurrent workers for batch operations. Also bounds the parts of large
+    /// downloads in flight at once over all objects (256 at least, --concurrency at least).
     #[arg(long, global = true, default_value_t = 256)]
     pub numworkers: usize,
 

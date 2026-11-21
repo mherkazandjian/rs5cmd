@@ -45,6 +45,9 @@ async fn main() -> ExitCode {
     // low for the configured parallelism (upstream issue #390). `--concurrency`
     // is a per-`cp`/`sync` flag (default 8); use that default for the estimate.
     rs5cmd::rlimit::setup_nofile_limits(cli.global.numworkers, 8);
+    // Download parts in flight over every object at once: --numworkers, 256 at least (and raised
+    // to an object's --concurrency when that is larger).
+    rs5cmd::storage::s3::set_download_parts_in_flight(cli.global.numworkers);
 
     // Race the command against termination signals so that a Ctrl-C (SIGINT) or
     // SIGTERM cancels the in-flight work and exits with code 130 instead of
