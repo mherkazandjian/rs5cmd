@@ -92,6 +92,9 @@ impl FileBody {
         let budget = self.budget.clone();
         Box::pin(async move {
             let permit = budget.acquire_owned().await.map_err(io::Error::other)?;
+            // Allocated here, on a runtime worker, and filled on the blocking pool: a buffer
+            // allocated on one of its many threads would leave memory in that thread's heap.
+            let mut buf = Vec::with_capacity(n);
             let (file, buf) = tokio::task::spawn_blocking(move || -> io::Result<(File, Vec<u8>)> {
                 let mut file = match file {
                     Some(f) => f,
@@ -102,7 +105,6 @@ impl FileBody {
                     }
                 };
                 // Read into spare capacity: no zero-filling of every chunk.
-                let mut buf = Vec::with_capacity(n);
                 (&mut file).take(n as u64).read_to_end(&mut buf)?;
                 if buf.len() < n {
                     return Err(io::ErrorKind::UnexpectedEof.into());

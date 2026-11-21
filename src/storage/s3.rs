@@ -1423,7 +1423,16 @@ impl S3 {
             }
         }
         let body = if size <= Self::INLINE_BODY_MAX {
-            ByteStream::from(tokio::fs::read(src).await?)
+            // Allocated here and filled on the blocking pool, as upload_body's chunks are.
+            let mut buf = Vec::with_capacity(size as usize);
+            let path = src.to_path_buf();
+            let buf = tokio::task::spawn_blocking(move || -> std::io::Result<Vec<u8>> {
+                use std::io::Read;
+                std::fs::File::open(&path)?.read_to_end(&mut buf)?;
+                Ok(buf)
+            })
+            .await??;
+            ByteStream::from(buf)
         } else {
             let len = tokio::fs::metadata(src).await?.len();
             super::upload_body::file_range(src, 0, len)
