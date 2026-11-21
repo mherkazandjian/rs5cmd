@@ -59,15 +59,16 @@ jobs:
             features: ''
 
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable branch, 2026-11-21
         with:
+          toolchain: stable
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry and target
-        uses: actions/cache@v5
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v5.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -85,13 +86,13 @@ jobs:
       # holdout here). All other actions are already on Node 24.
       - name: Install zig (Linux)
         if: matrix.build == 'zigbuild'
-        uses: mlugg/setup-zig@v2
+        uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: 0.13.0
 
       - name: Install cargo-zigbuild (Linux)
         if: matrix.build == 'zigbuild'
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@25f51f6b1bf4e18876107cece836f4f77ac17c8c # v2.90.7
         with:
           tool: cargo-zigbuild
 
@@ -135,7 +136,7 @@ jobs:
           echo "checksum=$stage.tar.gz.sha256" >> "$GITHUB_OUTPUT"
 
       - name: Upload workflow artifacts (every run)
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: rs5cmd-${{ matrix.target }}
           path: |
@@ -144,7 +145,7 @@ jobs:
 
       - name: Attach to GitHub Release (tag pushes only)
         if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             ${{ steps.package.outputs.archive }}
@@ -160,7 +161,7 @@ jobs:
     runs-on: ubuntu-24.04
     if: startsWith(github.ref, 'refs/tags/')
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
 
       - name: Resolve release tag
         id: tag
@@ -168,7 +169,7 @@ jobs:
         run: echo "tag=${{ github.event.inputs.tag || github.ref_name }}" >> "$GITHUB_OUTPUT"
 
       - name: Download Linux build artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: rs5cmd-*-unknown-linux-gnu
           path: artifacts
@@ -203,7 +204,7 @@ jobs:
           bash packaging/build-packages.sh "$ver" stage dist
 
       - name: Attach packages to GitHub Release
-        uses: softprops/action-gh-release@v3
+        uses: softprops/action-gh-release@8a0cd651e5b2365bd640854a3fa5dfc70e4875f3 # v3.0.4
         with:
           files: |
             dist/*.deb

@@ -1,0 +1,14 @@
+# Proposes updates for the GitHub Actions used in .github/workflows/, which are pinned to commit
+# SHAs: each update PR moves the SHA and its version comment together.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      github-actions:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: ci
