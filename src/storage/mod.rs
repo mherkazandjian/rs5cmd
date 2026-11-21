@@ -2,6 +2,12 @@
 
 pub mod fs;
 pub(crate) mod partial;
+
+/// Removes the temporary files of downloads still in progress, for a process that was
+/// interrupted (SIGINT, SIGTERM) and is about to exit.
+pub fn remove_partial_downloads() {
+    partial::remove_pending();
+}
 pub mod s3;
 pub mod url;
 pub(crate) mod upload_body;

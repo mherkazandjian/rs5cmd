@@ -213,6 +213,8 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // io_uring fast path: dispatch small-object upload/download/server-side-copy
     // sets (any mix as long as each pair touches a remote) to the per-core
     // monoio engine. Falls back to the default path for local->local.
+    #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
+    let mut fast_failed = false;
     if args.fast {
         #[cfg(feature = "fast")]
         {
@@ -222,10 +224,13 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
                 all.push(p);
             }
             pairs.finish().await?;
-            if let Some(r) = try_fast_path(global, &all, is_move, op).await? {
-                return r;
+            match try_fast_path(global, &mut all, opts.part_size, is_move, op).await? {
+                Some(r) if all.is_empty() => return r,
+                Some(r) => fast_failed = r.is_err(),
+                None => {}
             }
-            // Declined (a local->local pair): run the collected pairs on the default path.
+            // What it declined (a set with a local->local pair) or left (files larger than a
+            // part) runs on the default path.
             pairs = Pairs::Known(all.into_iter());
         }
         #[cfg(not(feature = "fast"))]
@@ -273,7 +278,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // single core.) The in-flight `JoinSet` is bounded to `workers`, which caps
     // both running tasks *and* buffered completed results — important when the
     // object count is huge.
-    let mut had_error = false;
+    let mut had_error = fast_failed;
     // Count-of-transfers progress bar (no-op in JSON mode / non-TTY stderr).
     // The total grows as the listing yields pairs.
     let pb = crate::progress::Progress::new(0, op);
@@ -818,14 +823,24 @@ async fn resolve_credentials(
     ))
 }
 
+/// The most the fast path sends or receives in one request: it reads a file to upload whole into
+/// memory, and gets a download's body as one buffer, each in one io_uring operation whose length
+/// must fit 32 bits (#15). Larger files, and any larger than a part, go to the default path (a
+/// multipart upload for those larger than a part); downloads are fetched in ranges of this size
+/// or a part, whichever is smaller.
+#[cfg(feature = "fast")]
+const FAST_PART_MAX: u64 = 1 << 30;
+
 /// Attempts to run the (src,dst) pairs on the io_uring fast path. Each pair is
 /// mapped independently to upload / download / server-side copy, so mixed sets
 /// are supported. Returns `Ok(Some(result))` if handled, or `Ok(None)` if the
-/// set contains a local->local pair (caller falls back to the default path).
+/// set contains a local->local pair (caller falls back to the default path). Pairs it does not
+/// take (files larger than `part_size`) stay in `pairs` for the default path.
 #[cfg(feature = "fast")]
 async fn try_fast_path(
     global: &GlobalOpts,
-    pairs: &[(Url, Url)],
+    pairs: &mut Vec<(Url, Url)>,
+    part_size: u64,
     is_move: bool,
     op: &str,
 ) -> anyhow::Result<Option<anyhow::Result<()>>> {
@@ -880,15 +895,26 @@ async fn try_fast_path(
     let per_core_concurrency = (global.numworkers / cores).max(1);
 
     // Map each pair independently to the right transfer variant based on which
-    // side(s) are remote. Mixed-direction sets are supported.
-    let transfers: Vec<Transfer> = pairs
-        .iter()
-        .map(|(s, d)| match (s.is_remote(), d.is_remote()) {
-            (false, true) => Transfer::Upload {
-                local: std::path::PathBuf::from(s.absolute()),
-                bucket: d.bucket.clone(),
-                key: d.path.clone(),
-            },
+    // side(s) are remote. Mixed-direction sets are supported. A file larger than a part, or
+    // than FAST_PART_MAX, is left to the default path: the fast path PUTs a file whole, read
+    // into memory in one io_uring read (F43, #15).
+    let largest = part_size.min(FAST_PART_MAX);
+    let mut rest = Vec::new();
+    let mut transfers = Vec::with_capacity(pairs.len());
+    for (s, d) in std::mem::take(pairs) {
+        let t = match (s.is_remote(), d.is_remote()) {
+            (false, true) => {
+                let local = std::path::PathBuf::from(s.absolute());
+                if std::fs::metadata(&local).is_ok_and(|m| m.len() > largest) {
+                    rest.push((s, d));
+                    continue;
+                }
+                Transfer::Upload {
+                    local,
+                    bucket: d.bucket.clone(),
+                    key: d.path.clone(),
+                }
+            }
             (true, false) => Transfer::Download {
                 bucket: s.bucket.clone(),
                 key: s.path.clone(),
@@ -902,8 +928,13 @@ async fn try_fast_path(
             },
             // local->local was already excluded above.
             (false, false) => unreachable!("local->local excluded from fast path"),
-        })
-        .collect();
+        };
+        transfers.push(t);
+    }
+    *pairs = rest;
+    if transfers.is_empty() {
+        return Ok(Some(Ok(())));
+    }
 
     let cfg = FastConfig {
         endpoint,
@@ -916,11 +947,19 @@ async fn try_fast_path(
         max_retries: global.retry_count,
         dry_run: global.dry_run,
         is_move,
+        part_size: largest,
     };
 
-    // run_transfers blocks (spawns OS threads); keep it off the tokio worker.
-    let outcomes =
-        tokio::task::block_in_place(|| run_transfers(transfers, cfg));
+    // run_transfers blocks until every transfer ends, so it runs on a thread of its own and this
+    // task waits for it: in block_in_place it held the task that also waits for SIGINT and
+    // SIGTERM, which then went unanswered until the last transfer finished (#16).
+    let (done, outcomes) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run_transfers(transfers, cfg));
+    });
+    let outcomes = outcomes
+        .await
+        .map_err(|_| anyhow::anyhow!("the fast path's thread ended without a result"))?;
 
     let mut had_error = false;
     for o in &outcomes {
