@@ -230,7 +230,7 @@ fn cached_http_client(
     Ok(client)
 }
 
-/// rs5cmd's HTTP client for S3 requests: hyper 1 over rustls (ring).
+/// rs5cmd's HTTP client for S3 requests: hyper 1 over rustls (aws-lc-rs).
 ///
 /// - HTTP/1.1 only, as S3 itself and s5cmd's Go transport. The SDK's client also offers HTTP/2,
 ///   and behind an HTTP/2 front end hyper then sends every request to the endpoint over one

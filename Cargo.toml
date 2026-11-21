@@ -41,13 +41,13 @@ aws-credential-types = "1"
 # rs5cmd's HTTP client for S3 (src/storage/s3.rs `build_http_client`): hyper + hyper-rustls,
 # HTTP/1.1 only (#14), adapted to the smithy `HttpClient` trait; it also carries
 # `--no-verify-ssl`, `--proxy` and `--ca-certs-file`. `rustls`/`http` are also used by `fast`.
-# `ring` provider matches the fast path's crypto backend.
-rustls = { version = "0.23", features = ["ring", "aws_lc_rs"] }
+# One crypto provider, aws-lc-rs, on both paths (F75): ring is not linked.
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 # The platform's trust store (with SSL_CERT_FILE / SSL_CERT_DIR), as the SDK's client used.
 rustls-native-certs = "0.8"
 # Parse a custom CA bundle (`--ca-certs-file`) into rustls certificates.
 rustls-pemfile = "2"
-hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "native-tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12", "native-tokio"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper = "1"
 http = "1"
