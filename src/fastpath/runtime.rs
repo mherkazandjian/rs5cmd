@@ -60,6 +60,8 @@ pub struct FastConfig {
     pub dry_run: bool,
     /// If true, delete the source after a successful transfer (move semantics).
     pub is_move: bool,
+    /// The most bytes one GET asks for; larger objects are downloaded as ranges of this size.
+    pub part_size: u64,
 }
 
 /// Runs all transfers across `cfg.cores` threads, returning every outcome.
@@ -117,6 +119,7 @@ pub fn run_transfers(items: Vec<Transfer>, cfg: FastConfig) -> Vec<Outcome> {
         let conc = cfg.per_core_concurrency.max(1);
         let max_retries = cfg.max_retries;
         let is_move = cfg.is_move;
+        let part_size = cfg.part_size;
         let pin = core_ids.get(ci).copied();
 
         handles.push(thread::spawn(move || {
@@ -130,7 +133,7 @@ pub fn run_transfers(items: Vec<Transfer>, cfg: FastConfig) -> Vec<Outcome> {
                 .build()
                 .expect("build monoio runtime (is io_uring blocked by seccomp?)");
             rt.block_on(async move {
-                match FastClient::new(endpoint, signer) {
+                match FastClient::new(endpoint, signer).map(|c| c.with_part_size(part_size)) {
                     Ok(client) => {
                         run_shard(&client, shard, conc, max_retries, is_move, &tx).await
                     }
@@ -335,10 +338,11 @@ async fn read_file(path: &std::path::Path) -> anyhow::Result<bytes::Bytes> {
     }
 }
 
-/// Downloads an object into a temporary file renamed over `local` once complete (F03), writing
-/// the body as it arrives. Whole, every object in flight was held in memory (F43: ~4.1 GB RSS
-/// for 1 GiB objects), and one of 4 GiB or more was a single io_uring write whose length does
-/// not fit the 32 bits monoio gives it, so it failed (#15).
+/// Downloads an object into a temporary file renamed over `local` once complete (F03), a part
+/// at a time (see `FastClient::get_into`). Fetched whole, every object in flight was held in
+/// memory (F43: ~4.1 GB RSS for 1 GiB objects, 12 GB for 4 GiB), and one of 4 GiB or more was a
+/// single io_uring write whose length does not fit the 32 bits monoio gives it, so it failed
+/// (#15).
 async fn download(
     client: &FastClient,
     bucket: &str,

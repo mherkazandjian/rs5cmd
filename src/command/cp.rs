@@ -823,11 +823,13 @@ async fn resolve_credentials(
     ))
 }
 
-/// The largest file the fast path uploads: it reads a file whole into memory, in one io_uring
-/// read whose length must fit 32 bits (#15). Larger files, and any larger than a part, go to the
-/// default path (a multipart upload for those larger than a part).
+/// The most the fast path sends or receives in one request: it reads a file to upload whole into
+/// memory, and gets a download's body as one buffer, each in one io_uring operation whose length
+/// must fit 32 bits (#15). Larger files, and any larger than a part, go to the default path (a
+/// multipart upload for those larger than a part); downloads are fetched in ranges of this size
+/// or a part, whichever is smaller.
 #[cfg(feature = "fast")]
-const FAST_UPLOAD_MAX: u64 = 1 << 30;
+const FAST_PART_MAX: u64 = 1 << 30;
 
 /// Attempts to run the (src,dst) pairs on the io_uring fast path. Each pair is
 /// mapped independently to upload / download / server-side copy, so mixed sets
@@ -894,9 +896,9 @@ async fn try_fast_path(
 
     // Map each pair independently to the right transfer variant based on which
     // side(s) are remote. Mixed-direction sets are supported. A file larger than a part, or
-    // than FAST_UPLOAD_MAX, is left to the default path: the fast path PUTs a file whole, read
+    // than FAST_PART_MAX, is left to the default path: the fast path PUTs a file whole, read
     // into memory in one io_uring read (F43, #15).
-    let largest = part_size.min(FAST_UPLOAD_MAX);
+    let largest = part_size.min(FAST_PART_MAX);
     let mut rest = Vec::new();
     let mut transfers = Vec::with_capacity(pairs.len());
     for (s, d) in std::mem::take(pairs) {
@@ -945,6 +947,7 @@ async fn try_fast_path(
         max_retries: global.retry_count,
         dry_run: global.dry_run,
         is_move,
+        part_size: largest,
     };
 
     // run_transfers blocks until every transfer ends, so it runs on a thread of its own and this
