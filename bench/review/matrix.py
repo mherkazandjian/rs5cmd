@@ -35,12 +35,15 @@ CERTS = "/cache/certs"
 CPU_SERVER = os.environ.get("CPUSET_SERVER", "4,5,12,13")
 CPU_CLIENT = os.environ.get("CPUSET_CLIENT", "6,7,14,15")
 CPU_OTHER = os.environ.get("CPUSET_OTHER", "0-3,8-11")
-STUB_PORT, STUB_TLS_PORT, STUB_H2_PORT = 9100, 9443, 9444
+STUB_PORT, STUB_TLS_PORT, STUB_H2_PORT, STUB_PQ_PORT = 9100, 9443, 9444, 9445
 ENDPOINTS = {
     "stub": f"http://127.0.0.1:{STUB_PORT}",
     "stub-tls": f"https://127.0.0.1:{STUB_TLS_PORT}",
     # The stub's HTTPS listener that also offers HTTP/2, as an HTTP/2 front end does (#14).
     "stub-h2": f"https://127.0.0.1:{STUB_H2_PORT}",
+    # HTTPS (HTTP/1.1) on aws-lc-rs, which offers the post-quantum hybrid X25519MLKEM768 first;
+    # stub-tls is on ring and has no post-quantum group (#25).
+    "stub-pq": f"https://127.0.0.1:{STUB_PQ_PORT}",
     "minio": "http://minio:9000",
 }
 BUCKET = "bench"
@@ -150,7 +153,7 @@ class Stub:
         env = dict(os.environ)
         env.update({
             "STUB_PORT": str(STUB_PORT), "STUB_TLS_PORT": str(STUB_TLS_PORT),
-            "STUB_H2_PORT": str(STUB_H2_PORT),
+            "STUB_H2_PORT": str(STUB_H2_PORT), "STUB_TLS_PQ_PORT": str(STUB_PQ_PORT),
             "STUB_TLS_CERT": f"{CERTS}/server.pem", "STUB_TLS_KEY": f"{CERTS}/server.key",
         })
         env.update(self.env_extra)
@@ -260,7 +263,7 @@ class Ctx:
         os.makedirs(e["HOME"], exist_ok=True)
         if region:
             e["AWS_REGION"] = "us-east-1"
-        if self.endpoint in ("stub-tls", "stub-h2"):
+        if self.endpoint in ("stub-tls", "stub-h2", "stub-pq"):
             e["SSL_CERT_FILE"] = f"{CERTS}/ca.pem"
         e.update(self.extra_env)
         return e
@@ -268,8 +271,9 @@ class Ctx:
     def cli(self, client, sub, *args, cmd_flags=(), global_flags=()):
         c = CLIENTS[client]
         a = [c["bin"], "--endpoint-url", self.url]
-        if c.get("fast") and self.endpoint in ("stub-tls", "stub-h2"):
+        if c.get("fast") and self.endpoint in ("stub-tls", "stub-h2", "stub-pq"):
             a.append("--no-verify-ssl")  # the fast path has no custom-CA option
+        a += c.get("global_flags", [])
         a += list(global_flags)
         a.append(sub)
         if c.get("fast") and sub in ("cp", "mv"):
@@ -338,7 +342,7 @@ class Row:
 class Upload(Row):
     """cp <local dir>/* s3://bench/<fresh prefix>/ (W1, W2, W3 upload)."""
     fast_ok = True
-    endpoints = ("stub", "stub-tls", "minio")
+    endpoints = ("stub", "stub-tls", "stub-pq", "minio")
 
     def prepare(self, ctx):
         p = self.p
@@ -380,7 +384,7 @@ class Upload(Row):
 class Download(Row):
     """cp 's3://bench/<prefix>/*' <local dir>/ (W1, W2, W3 download)."""
     fast_ok = True
-    endpoints = ("stub", "stub-tls", "stub-h2", "minio")
+    endpoints = ("stub", "stub-tls", "stub-h2", "stub-pq", "minio")
 
     def prepare(self, ctx):
         p = self.p
@@ -1012,10 +1016,12 @@ def measure(ctx, row, client, rnd, warm, run, out_mode, results, extra=None):
     if ctx.stub:
         ctx.stub.reset()
         s0 = ctx.stub.cpu_s()
+    env = dict(run.env or ctx.env())
+    env.update(CLIENTS[client].get("env", {}))
     load0 = loadavg()
     t0 = time.time()
     if out_mode == "pipe" and not out_path:
-        p = subprocess.Popen(argv, env=run.env or ctx.env(), stdin=stdin, stdout=subprocess.PIPE,
+        p = subprocess.Popen(argv, env=env, stdin=stdin, stdout=subprocess.PIPE,
                              stderr=open(err_path, "wb"))
         sink = subprocess.Popen(["taskset", "-c", CPU_CLIENT, "cat"], stdin=p.stdout,
                                 stdout=subprocess.DEVNULL)
@@ -1023,7 +1029,7 @@ def measure(ctx, row, client, rnd, warm, run, out_mode, results, extra=None):
         rc = p.wait()
         sink.wait()
     else:
-        rc = subprocess.run(argv, env=run.env or ctx.env(), stdin=stdin, stdout=stdout,
+        rc = subprocess.run(argv, env=env, stdin=stdin, stdout=stdout,
                             stderr=open(err_path, "wb")).returncode
     if run.stdin:
         stdin.close()
@@ -1033,8 +1039,9 @@ def measure(ctx, row, client, rnd, warm, run, out_mode, results, extra=None):
         stub_cpu = ctx.stub.cpu_s() - s0
         stats = ctx.stub.stats()
         rec["stub_cpu_s"] = round(stub_cpu, 2)
-        rec["stub"] = {k: stats[k] for k in ("conns", "conns_peak", "conns_h2", "reqs", "faults")
-                       if k in stats}
+        rec["stub"] = {k: v for k, v in stats.items()
+                       if k in ("conns", "conns_peak", "conns_h2", "reqs", "faults", "tls_failed")
+                       or (k.startswith("kx_") and v)}
     with open(jpath) as f:
         rec.update(json.loads(f.read().strip().splitlines()[-1]))
     ok, info = (False, {"error": "nonzero exit"}) if rc != 0 else row.check(
@@ -1105,6 +1112,8 @@ def run_rows(args):
             env_extra["STUB_LATENCY_MS"] = str(args.latency_ms)
         if args.fault_rate:
             env_extra["STUB_FAULT_RATE"] = str(args.fault_rate)
+        if args.stub_close:
+            env_extra["STUB_CONN_CLOSE"] = "1"
         ctx.stub = Stub(args.stub_cpus, env_extra).start()
     results = open(os.path.join(RESULTS, f"{args.tag}.jsonl"), "a")
     extra = {}
@@ -1114,6 +1123,8 @@ def run_rows(args):
         extra["fault_rate"] = args.fault_rate
     if args.variant:
         extra["variant"] = args.variant
+    if args.stub_close:
+        extra["conn_close"] = True
     if args.env:
         extra["env"] = args.env
     if args.wrap:
@@ -1203,6 +1214,12 @@ def main():
                         "a name ending in -fast adds --fast)")
     r.add_argument("--env", action="append", default=[], help="KEY=VAL for every client run")
     r.add_argument("--wrap", default="", help="program prefixed to every measured command")
+    r.add_argument("--stub-close", action="store_true",
+                   help="the stub ends every connection after one response (one handshake per request)")
+    r.add_argument("--client-flag", action="append", default=[],
+                   help="NAME=FLAG: a global flag for client NAME only (repeatable)")
+    r.add_argument("--client-env", action="append", default=[],
+                   help="NAME=KEY=VALUE: an environment variable for client NAME only (repeatable)")
     args = ap.parse_args()
     if args.cmd == "list":
         for rid, (cls, wl, long, p) in ROWS.items():
@@ -1212,6 +1229,13 @@ def main():
     for spec in args.client_bin:
         name, path = spec.split("=", 1)
         CLIENTS[name] = {"bin": path, "fast": name.endswith("-fast")}
+    for spec in args.client_flag:
+        name, flag = spec.split("=", 1)
+        CLIENTS[name].setdefault("global_flags", []).append(flag)
+    for spec in args.client_env:
+        name, kv = spec.split("=", 1)
+        k, v = kv.split("=", 1)
+        CLIENTS[name].setdefault("env", {})[k] = v
     run_rows(args)
 
 

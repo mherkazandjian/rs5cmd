@@ -38,7 +38,12 @@
 //! `STUB_OBJECT_SIZE` (4096), `STUB_THREADS`
 //! (default: CPUs in the affinity mask), `STUB_LATENCY_MS`, `STUB_CONN_LATENCY_MS`,
 //! `STUB_FAULT_RATE` (fraction of object requests answered 503 SlowDown), `STUB_DUMP` (file for
-//! request lines + headers) and `STUB_DUMP_MAX` (200).
+//! request lines + headers) and `STUB_DUMP_MAX` (200), `STUB_TLS_PQ_PORT` (an HTTPS listener, HTTP/1.1
+//! only, on aws-lc-rs: it prefers the post-quantum hybrid X25519MLKEM768, then X25519, P-256 and
+//! P-384, where `STUB_TLS_PORT` (ring) has no post-quantum group) and `STUB_CONN_CLOSE=1` (every
+//! response says `Connection: close` and ends its connection, so each request costs a handshake).
+//! The TLS listeners count the key exchange group each handshake negotiated (`kx_*`) and the
+//! handshakes that failed (`tls_failed`).
 //!
 //!   cargo run --release --features bench-stub --bin s3stub
 
@@ -81,7 +86,8 @@ macro_rules! counters {
 counters!(
     conns, conns_tls, conns_h2, h2_streams, reqs, puts, put_bytes, gets, get_bytes, heads, lists, list_keys,
     list_prefixes, delete_one, delete_batches, delete_keys, mpu_create, mpu_parts, mpu_part_bytes,
-    mpu_complete, mpu_abort, copies, faults, bucket_ops, other, bad_requests,
+    mpu_complete, mpu_abort, copies, faults, bucket_ops, other, bad_requests, tls_failed,
+    kx_x25519mlkem768, kx_x25519, kx_secp256r1, kx_secp384r1, kx_other,
 );
 
 static ACTIVE: AtomicI64 = AtomicI64::new(0);
@@ -100,6 +106,7 @@ struct Settings {
     conn_latency_us: AtomicU64,
     fault_ppm: AtomicU64,
     default_size: AtomicU64,
+    close_conns: std::sync::atomic::AtomicBool,
     dump: Mutex<Option<(std::io::BufWriter<std::fs::File>, u64)>>,
     datasets: RwLock<Vec<Dataset>>,
 }
@@ -111,6 +118,7 @@ fn settings() -> &'static Settings {
         conn_latency_us: AtomicU64::new(0),
         fault_ppm: AtomicU64::new(0),
         default_size: AtomicU64::new(4096),
+        close_conns: std::sync::atomic::AtomicBool::new(false),
         dump: Mutex::new(None),
         datasets: RwLock::new(Vec::new()),
     })
@@ -455,6 +463,7 @@ async fn serve(threads: usize) -> std::io::Result<()> {
     if let Some(n) = std::env::var("STUB_OBJECT_SIZE").ok().and_then(|s| s.parse().ok()) {
         st.default_size.store(n, Relaxed);
     }
+    st.close_conns.store(std::env::var("STUB_CONN_CLOSE").is_ok_and(|v| v == "1"), Relaxed);
     if let Ok(p) = std::env::var("STUB_DUMP") {
         set_dump(&p, std::env::var("STUB_DUMP_MAX").ok().and_then(|s| s.parse().ok()).unwrap_or(200));
     }
@@ -464,10 +473,15 @@ async fn serve(threads: usize) -> std::io::Result<()> {
     let plain = TcpListener::bind(("0.0.0.0", port)).await?;
     eprintln!("s3stub: http on :{port}, {threads} threads");
 
-    if let Ok(tls_port) = std::env::var("STUB_TLS_PORT") {
-        let acceptor = tls_acceptor(&[b"http/1.1"])?;
-        let l = TcpListener::bind(("0.0.0.0", tls_port.parse::<u16>().unwrap_or(9443))).await?;
-        eprintln!("s3stub: https (http/1.1 only) on :{tls_port}");
+    let listeners = [
+        ("STUB_TLS_PORT", 9443, Arc::new(rustls::crypto::ring::default_provider()), "ring"),
+        ("STUB_TLS_PQ_PORT", 9445, Arc::new(rustls::crypto::aws_lc_rs::default_provider()), "aws-lc-rs"),
+    ];
+    for (var, default_port, provider, name) in listeners {
+        let Ok(tls_port) = std::env::var(var) else { continue };
+        let acceptor = tls_acceptor(&[b"http/1.1"], provider)?;
+        let l = TcpListener::bind(("0.0.0.0", tls_port.parse::<u16>().unwrap_or(default_port))).await?;
+        eprintln!("s3stub: https (http/1.1 only, {name}) on :{tls_port}");
         tokio::spawn(async move {
             loop {
                 let Ok((tcp, _)) = l.accept().await else { continue };
@@ -475,8 +489,12 @@ async fn serve(threads: usize) -> std::io::Result<()> {
                 tokio::spawn(async move {
                     let _ = tcp.set_nodelay(true);
                     conn_start(true);
-                    if let Ok(tls) = acceptor.accept(tcp).await {
-                        let _ = handle_conn(tls).await;
+                    match acceptor.accept(tcp).await {
+                        Ok(tls) => {
+                            record_kx(tls.get_ref().1);
+                            let _ = handle_conn(tls).await;
+                        }
+                        Err(_) => inc(&ctr::tls_failed),
                     }
                     ACTIVE.fetch_sub(1, Relaxed);
                 });
@@ -485,7 +503,7 @@ async fn serve(threads: usize) -> std::io::Result<()> {
     }
 
     if let Ok(h2_port) = std::env::var("STUB_H2_PORT") {
-        let acceptor = tls_acceptor(&[b"h2", b"http/1.1"])?;
+        let acceptor = tls_acceptor(&[b"h2", b"http/1.1"], Arc::new(rustls::crypto::ring::default_provider()))?;
         let l = TcpListener::bind(("0.0.0.0", h2_port.parse::<u16>().unwrap_or(9444))).await?;
         eprintln!("s3stub: https (h2 or http/1.1) on :{h2_port}");
         tokio::spawn(async move {
@@ -496,6 +514,7 @@ async fn serve(threads: usize) -> std::io::Result<()> {
                     let _ = tcp.set_nodelay(true);
                     conn_start(true);
                     if let Ok(tls) = acceptor.accept(tcp).await {
+                        record_kx(tls.get_ref().1);
                         if tls.get_ref().1.alpn_protocol() == Some(&b"h2"[..]) {
                             inc(&ctr::conns_h2);
                             serve_h2(tls).await;
@@ -529,7 +548,22 @@ fn conn_start(tls: bool) {
     PEAK.fetch_max(n, Relaxed);
 }
 
-fn tls_acceptor(alpn: &[&[u8]]) -> std::io::Result<tokio_rustls::TlsAcceptor> {
+/// Counts the key exchange group a TLS handshake negotiated.
+fn record_kx(conn: &rustls::ServerConnection) {
+    use rustls::NamedGroup;
+    inc(match conn.negotiated_key_exchange_group().map(|g| g.name()) {
+        Some(NamedGroup::X25519MLKEM768) => &ctr::kx_x25519mlkem768,
+        Some(NamedGroup::X25519) => &ctr::kx_x25519,
+        Some(NamedGroup::secp256r1) => &ctr::kx_secp256r1,
+        Some(NamedGroup::secp384r1) => &ctr::kx_secp384r1,
+        _ => &ctr::kx_other,
+    });
+}
+
+fn tls_acceptor(
+    alpn: &[&[u8]],
+    provider: Arc<rustls::crypto::CryptoProvider>,
+) -> std::io::Result<tokio_rustls::TlsAcceptor> {
     use std::io::{Error, ErrorKind};
     let cert_path = std::env::var("STUB_TLS_CERT").map_err(|_| Error::other("STUB_TLS_CERT unset"))?;
     let key_path = std::env::var("STUB_TLS_KEY").map_err(|_| Error::other("STUB_TLS_KEY unset"))?;
@@ -537,7 +571,6 @@ fn tls_acceptor(alpn: &[&[u8]]) -> std::io::Result<tokio_rustls::TlsAcceptor> {
         .collect::<Result<Vec<_>, _>>()?;
     let key = rustls_pemfile::private_key(&mut std::io::BufReader::new(std::fs::File::open(key_path)?))?
         .ok_or_else(|| Error::new(ErrorKind::InvalidData, "no private key"))?;
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let mut cfg = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(Error::other)?
@@ -806,7 +839,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> std::io::R
         if let Some(ctl) = path.strip_prefix("/__stub/") {
             control(&h.method, ctl, &q, &mut out);
             s.get_mut().write_all(&out).await?;
-            if h.close {
+            if h.close || st.close_conns.load(Relaxed) {
                 s.get_mut().flush().await?;
                 return Ok(());
             }
@@ -828,7 +861,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> std::io::R
             let x = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><Error><Code>SlowDown</Code><Message>Please reduce your request rate.</Message></Error>";
             respond(&mut out, "503 Slow Down", "application/xml", &[], x.as_bytes());
             s.get_mut().write_all(&out).await?;
-            if h.close {
+            if h.close || st.close_conns.load(Relaxed) {
                 s.get_mut().flush().await?;
                 return Ok(());
             }
@@ -981,7 +1014,7 @@ async fn handle_conn<S: AsyncRead + AsyncWrite + Unpin>(stream: S) -> std::io::R
         if !out.is_empty() {
             s.get_mut().write_all(&out).await?;
         }
-        if h.close {
+        if h.close || st.close_conns.load(Relaxed) {
             s.get_mut().flush().await?;
             return Ok(());
         }
@@ -1006,6 +1039,9 @@ fn head_only(out: &mut Vec<u8>, status: &str, headers: &[&str]) {
     for h in headers {
         out.extend_from_slice(h.as_bytes());
         out.extend_from_slice(b"\r\n");
+    }
+    if settings().close_conns.load(Relaxed) {
+        out.extend_from_slice(b"Connection: close\r\n");
     }
     out.extend_from_slice(b"x-amz-request-id: stub\r\n\r\n");
 }

@@ -91,9 +91,10 @@ fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-ru
 # needed to BUILD; macOS uses macFUSE. Opt-in so the default build stays free of
 # FUSE deps, mirroring the `fast` precedent.
 mount = ["dep:fuse3", "dep:libc", "dep:bytes"]
-# Benchmark-only targets: s3stub (tokio, plus tokio-rustls for its HTTPS listeners and h2 for
-# the HTTP/2 one) and, with `fast` as well, the sdkfloor probe (http-body-util).
-bench-stub = ["dep:tokio-rustls", "dep:http-body-util", "dep:h2", "dep:bytes"]
+# Benchmark-only targets: s3stub (tokio, plus tokio-rustls for its HTTPS listeners, h2 for the
+# HTTP/2 one and aws-lc-rs for the post-quantum one) and, with `fast` as well, the sdkfloor probe
+# (http-body-util).
+bench-stub = ["dep:tokio-rustls", "dep:http-body-util", "dep:h2", "dep:bytes", "rustls/aws_lc_rs"]
 
 [dependencies.fuse3]
 version = "0.8"

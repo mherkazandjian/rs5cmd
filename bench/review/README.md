@@ -62,6 +62,10 @@ bench/review/fast-window.sh $D exec -T bench bash bench/review/run-matrix.sh run
     --rows 'W1.*' --endpoint stub --clients rs5cmd-fast --tag baseline   # io_uring rows
 $D exec -T bench python3 bench/review/aggregate.py bench/review/results/baseline.jsonl
 bash bench/review/pack-results.sh                            # gzip finished results before a commit
+STAGE=c bash bench/review/b.sh <change> <endpoint> <rows>   # before/after rows of one change
+$D exec -T bench bash bench/review/run-matrix.sh run --rows W1.dn.10k --endpoint stub-pq \
+    --stub-close --clients s5cmd,rs5cmd,rs5cmd-pq --client-bin rs5cmd-pq=/opt/bins/rs5cmd \
+    --client-flag rs5cmd-pq=--tls-post-quantum --tag kx            # one TLS handshake per request
 bash bench/review/a3.sh; bash bench/review/a4.sh; bash bench/review/a5.sh   # Stage A batches
 $D down -v                                                  # remove containers and volumes
 ```
@@ -76,6 +80,11 @@ $D down -v                                                  # remove containers 
   TLS (HTTP/1.1 only; the test CA is trusted through `SSL_CERT_FILE`, because
   `--no-verify-ssl` / `--ca-certs-file` switch rs5cmd's default path to another TLS stack;
   `--fast` uses `--no-verify-ssl` since it has no custom-CA option), and MinIO over HTTP.
+  `stub-tls` runs on ring (classic key exchange only); `stub-pq` on aws-lc-rs (X25519MLKEM768
+  first, then X25519, P-256, P-384). The stub counts each handshake's group (`stub.kx_*` in a
+  record) and, with `--stub-close`, ends every connection after one response.
+- **Per-client settings**: `--client-bin NAME=PATH` adds a client, `--client-flag NAME=FLAG` a
+  global flag for it, `--client-env NAME=KEY=VALUE` an environment variable for it.
 - **Rounds**: one warm-up (recorded, flagged, its stdout checked), then 10 rounds for short rows
   and 5 for rows of 5 s or more, interleaved across clients with the client order rotated each
   round. stdout goes to `/dev/null` (primary) or a pipe (`--stdout pipe`).

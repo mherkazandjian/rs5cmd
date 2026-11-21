@@ -214,7 +214,7 @@ targets=("$@")
 [ ${#targets[@]} -eq 0 ] && targets=(tools stub rs5cmd sizes profiling published s5cmd)
 for t in "${targets[@]}"; do
     case "$t" in
-        exp-*|b-*) t_exp "$t" ;;
+        exp-*|b-*|c-*|l-*) t_exp "$t" ;;
         *) "t_$t" ;;
     esac
 done
