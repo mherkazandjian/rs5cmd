@@ -103,8 +103,9 @@ pub fn set_download_parts_in_flight(numworkers: usize) {
     );
 }
 
-/// One permit per download part in flight. Each connection holds up to ~128 KiB while its part
-/// streams (`FILL_LIMIT`), so with --numworkers objects of several parts each, the parts in
+/// One permit per download part in flight. Each connection holds about twice what its reads
+/// return while its part streams (~128 KiB once many are open: `FillingReads`), so with
+/// --numworkers objects of several parts each, the parts in
 /// flight bound the memory: 256 workers x 8 parts opened 2,048 connections.
 struct PartBudget {
     sem: tokio::sync::Semaphore,
@@ -297,7 +298,8 @@ fn cached_http_client(
 ///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
 ///   retries the same ones (`connector_error`).
 /// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record;
-///   no read returns more than that, which bounds each connection's read buffer.
+///   reads on plain connections return up to 2 MiB shared by the connections open (64-512 KiB).
+///   Either bounds each connection's read buffer.
 /// - Crypto: aws-lc-rs, as the SDK's client: it offers post-quantum hybrid key exchange
 ///   (X25519MLKEM768) first, and its AES-GCM costs less CPU than ring's.
 fn build_http_client(
@@ -543,6 +545,7 @@ where
                 io,
                 fill,
                 deferred: None,
+                _open: OpenConnection::new(),
             })
         })
     }
@@ -553,21 +556,56 @@ where
 /// chunks, each one write into the downloaded file under the file's lock; the runtime workers
 /// waiting on it left too few to decrypt (one 4 GiB object: 2.2 s, s5cmd 1.5 s). Plain
 /// connections read once per call (their reads already return what is ready, and another read
-/// there would find nothing), but no more than `FILL_LIMIT` either.
+/// there would find nothing), up to `plain_read_limit`.
 struct FillingReads<T> {
     io: T,
     fill: bool,
     /// An error met after some bytes were read: the next read returns it.
     deferred: Option<std::io::Error>,
+    _open: OpenConnection,
 }
 
-/// The most one read returns: 64 KiB (four TLS records). hyper's read buffer settles at twice
-/// what its reads return, so this bounds each connection's buffer near 128 KiB, over TLS and
-/// plain HTTP alike. Reading up to hyper's whole buffer (~400 KiB) was faster still for one
-/// object over TLS but tripled the memory of downloads over many connections, and wrote data
-/// already gone from the CPU's cache; plain connections left unbounded held ~400 KiB each, so
-/// 256 downloads of 1 MiB objects peaked at 4x s5cmd's memory.
+/// The most one read over TLS returns: 64 KiB (four TLS records). hyper's read buffer settles at
+/// twice what its reads return, so this bounds each connection's buffer near 128 KiB. Reading up
+/// to hyper's whole buffer (~400 KiB) was faster still for one object over TLS but tripled the
+/// memory of downloads over many connections, and wrote data already gone from the CPU's cache.
 const FILL_LIMIT: usize = 64 << 10;
+
+/// What reads on plain connections may return together: each returns this much shared by the
+/// connections open (`plain_read_limit`). Uncapped, plain connections held ~400 KiB each, so 256
+/// downloads of 1 MiB objects peaked at 4x s5cmd's memory; capped at `FILL_LIMIT` for all, one
+/// object over a few connections came 12 % slower (8 parts at a time) and `cat` 2.3x slower.
+const PLAIN_READ_BUDGET: usize = 2 << 20;
+
+/// More than hyper's largest read buffer (~400 KiB): with four connections open or fewer, plain
+/// reads are not capped.
+const PLAIN_READ_MAX: usize = 512 << 10;
+
+/// The most one read on a plain connection returns while `open` connections are open: 64 KiB
+/// from 32 of them on, uncapped up to 4.
+fn plain_read_limit(open: usize) -> usize {
+    (PLAIN_READ_BUDGET / open.max(1)).clamp(FILL_LIMIT, PLAIN_READ_MAX)
+}
+
+/// The connections of rs5cmd's HTTP client open now, idle ones in the pool included: each keeps
+/// its read buffer.
+static OPEN_CONNECTIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Counts one connection in `OPEN_CONNECTIONS` while it lives.
+struct OpenConnection;
+
+impl OpenConnection {
+    fn new() -> Self {
+        OPEN_CONNECTIONS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        OpenConnection
+    }
+}
+
+impl Drop for OpenConnection {
+    fn drop(&mut self) {
+        OPEN_CONNECTIONS.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+    }
+}
 
 impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
     fn poll_read(
@@ -581,7 +619,12 @@ impl<T: hyper::rt::Read + Unpin> hyper::rt::Read for FillingReads<T> {
         if let Some(e) = this.deferred.take() {
             return Poll::Ready(Err(e));
         }
-        let capacity = buf.remaining().min(FILL_LIMIT);
+        let limit = if this.fill {
+            FILL_LIMIT
+        } else {
+            plain_read_limit(OPEN_CONNECTIONS.load(std::sync::atomic::Ordering::Relaxed))
+        };
+        let capacity = buf.remaining().min(limit);
         if capacity == 0 {
             return Pin::new(&mut this.io).poll_read(cx, buf);
         }
@@ -2770,6 +2813,7 @@ mod tests {
             io: Scripted(steps.into()),
             fill,
             deferred: None,
+            _open: super::OpenConnection::new(),
         }
     }
 
@@ -2804,7 +2848,7 @@ mod tests {
     }
 
     #[test]
-    fn filling_reads_stops_at_the_limit_and_reads_plain_connections_once() {
+    fn filling_reads_stop_at_their_limits_and_read_plain_connections_once() {
         use std::task::Poll;
         let limit = super::FILL_LIMIT;
         let data: Vec<u8> = (0..3 * limit).map(|i| (i % 251) as u8).collect();
@@ -2824,16 +2868,29 @@ mod tests {
         // A plain connection reads once per call...
         let mut r = filling(vec![Step::Data(vec![7; 10]), Step::Data(vec![8; 10])], false);
         assert_eq!(read_once(&mut r, 1 << 20).1, vec![7; 10]);
-        // ...and no more than the limit, however much is ready and however large hyper's buffer.
-        let mut r = filling(vec![Step::Data(data.clone())], false);
+        // ...and no more than its limit, however much is ready and however large hyper's
+        // buffer (other tests' connections count too, so the limit is between its bounds).
+        let big: Vec<u8> = (0..3 * super::PLAIN_READ_MAX).map(|i| (i % 251) as u8).collect();
+        let mut r = filling(vec![Step::Data(big.clone())], false);
         let (poll, part) = read_once(&mut r, 1 << 20);
         assert!(matches!(poll, Poll::Ready(Ok(()))));
-        assert_eq!(part, data[..limit]);
-        assert_eq!(read_once(&mut r, 1 << 20).1, data[limit..2 * limit]);
+        assert!((limit..=super::PLAIN_READ_MAX).contains(&part.len()), "{}", part.len());
+        assert_eq!(part, big[..part.len()]);
         // Pending and errors pass through.
         let mut r = filling(vec![Step::Pending, Step::Fail], false);
         assert!(read_once(&mut r, 1 << 20).0.is_pending());
         assert!(matches!(read_once(&mut r, 1 << 20).0, Poll::Ready(Err(_))));
+    }
+
+    #[test]
+    fn plain_reads_share_their_budget_over_the_connections_open() {
+        use super::{plain_read_limit, FILL_LIMIT, PLAIN_READ_MAX};
+        assert_eq!(plain_read_limit(0), PLAIN_READ_MAX);
+        assert_eq!(plain_read_limit(4), PLAIN_READ_MAX);
+        assert_eq!(plain_read_limit(8), 256 << 10);
+        assert_eq!(plain_read_limit(16), 128 << 10);
+        assert_eq!(plain_read_limit(32), FILL_LIMIT);
+        assert_eq!(plain_read_limit(2048), FILL_LIMIT);
     }
 
     #[tokio::test]
