@@ -154,13 +154,6 @@ fn load_ca_bundle(path: &str) -> anyhow::Result<Vec<rustls::pki_types::Certifica
     Ok(certs)
 }
 
-/// Builds a custom HTTP client for the AWS SDK when we need behavior the
-/// bundled connector can't express: `--no-verify-ssl` (skip TLS verification
-/// for self-signed endpoints), `--proxy` (route through a SOCKS5 or HTTP proxy),
-/// and/or `--ca-certs-file` (trust a private/self-signed CA without disabling
-/// verification). We assemble a hyper + hyper-rustls connector — optionally
-/// wrapping a `ProxyConnector` — and adapt it to the smithy `HttpClient` trait
-/// that `aws_sdk_s3::config::Builder::http_client` accepts.
 /// The SDK's default region chain without its last step, the EC2 instance-metadata probe: the
 /// environment, then the profile file (`--profile` or AWS_PROFILE). Outside EC2 the probe waited
 /// about 3 s for a timeout on every invocation that had no region configured (#20). s5cmd never
@@ -213,34 +206,10 @@ async fn bucket_region(client: &Client, endpoint: &str, bucket: &str) -> Option<
     r
 }
 
-/// One HTTP client for the whole process, built exactly like the SDK's default (hyper 1, rustls
-/// on aws-lc, the platform's trust store, proxy settings from the environment). The SDK builds
-/// its default client per `Client`, so every S3 client a command made (one per `run` line, two
-/// in `rm`) had its own connection pool: 10,001 connections for a 10k-line run file (#19).
-fn shared_default_http_client() -> aws_smithy_runtime_api::client::http::SharedHttpClient {
-    use aws_smithy_http_client::{proxy::ProxyConfig, tls, Builder, ConnectorBuilder};
-    use aws_smithy_runtime_api::client::http::SharedHttpClient;
-    static CLIENT: std::sync::OnceLock<SharedHttpClient> = std::sync::OnceLock::new();
-    CLIENT
-        .get_or_init(|| {
-            Builder::new().build_with_connector_fn(|settings, components| {
-                let mut conn = ConnectorBuilder::default().tls_provider(tls::Provider::Rustls(
-                    tls::rustls_provider::CryptoMode::AwsLc,
-                ));
-                conn.set_connector_settings(settings.cloned());
-                if let Some(components) = components {
-                    conn.set_sleep_impl(components.sleep_impl());
-                }
-                conn.set_proxy_config(Some(ProxyConfig::from_env()));
-                conn.build()
-            })
-        })
-        .clone()
-}
-
-/// `build_sdk_http_client`, once per distinct (no-verify, proxy, CA bundle) for the process, so
-/// those clients share their connection pools too.
-fn cached_custom_http_client(
+/// The HTTP client of every S3 client in the process, one per distinct (no-verify, proxy, CA
+/// bundle), so they share connection pools: the SDK builds its default client per S3 client, which
+/// opened 10,001 connections for a 10k-line `run` file (#19).
+fn cached_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
     ca_certs: Option<&str>,
@@ -252,7 +221,7 @@ fn cached_custom_http_client(
     if let Some((_, c)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
         return Ok(c.clone());
     }
-    let client = build_sdk_http_client(no_verify, proxy, ca_certs)?;
+    let client = build_http_client(no_verify, proxy, ca_certs)?;
     let mut cache = CACHE.lock().unwrap();
     if let Some((_, c)) = cache.iter().find(|(k, _)| *k == key) {
         return Ok(c.clone());
@@ -261,15 +230,26 @@ fn cached_custom_http_client(
     Ok(client)
 }
 
-fn build_sdk_http_client(
+/// rs5cmd's HTTP client for S3 requests: hyper 1 over rustls (ring).
+///
+/// - HTTP/1.1 only, as S3 itself and s5cmd's Go transport. The SDK's client also offers HTTP/2,
+///   and behind an HTTP/2 front end hyper then sends every request to the endpoint over one
+///   connection: one TCP flow and one thread for all parts of a download, which capped a 100 GB
+///   download at ~700 MB/s where s5cmd did 1.6 GB/s (#14).
+/// - Trust: the platform's roots, `SSL_CERT_FILE` and `SSL_CERT_DIR` included, as the SDK's
+///   client; with a proxy or `--ca-certs-file`, the bundled webpki roots plus the bundle;
+///   `--no-verify-ssl` verifies nothing (no hostname check either: the intended effect).
+/// - As the SDK's client: TCP_NODELAY, the SDK's connect timeout (3.1 s unless configured; TLS
+///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
+///   retries the same ones (`connector_error`).
+fn build_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
     ca_certs: Option<&str>,
 ) -> anyhow::Result<aws_smithy_runtime_api::client::http::SharedHttpClient> {
     use aws_smithy_runtime_api::client::http::SharedHttpClient;
     use hyper_rustls::HttpsConnectorBuilder;
-    use hyper_util::client::legacy::Client;
-    use hyper_util::rt::TokioExecutor;
+    use hyper_util::client::legacy::connect::HttpConnector;
     use std::sync::Arc;
 
     // Process-wide default crypto provider (idempotent; the fast path may also
@@ -287,7 +267,13 @@ fn build_sdk_http_client(
             .with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        if proxy.is_none() && ca_certs.is_none() {
+            // What the SDK's client trusted. Certificates that fail to parse are skipped, and
+            // none at all fails only TLS requests, as with the SDK's client.
+            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        } else {
+            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        }
         // `--ca-certs-file`: trust additional (e.g. private/self-signed) CAs on
         // top of the bundled webpki roots.
         if let Some(path) = ca_certs {
@@ -304,68 +290,118 @@ fn build_sdk_http_client(
             .with_no_client_auth()
     };
 
-    match proxy {
+    // HTTP/1.1 alone: hyper-rustls then offers no ALPN, so no server can choose HTTP/2.
+    let https = HttpsConnectorBuilder::new()
+        .with_tls_config(tls)
+        .https_or_http()
+        .enable_http1();
+    Ok(match proxy {
         None => {
-            let https = HttpsConnectorBuilder::new()
-                .with_tls_config(tls)
-                .https_or_http()
-                .enable_http1()
-                .enable_http2()
-                .build();
-            let client: Client<_, aws_smithy_types::body::SdkBody> =
-                Client::builder(TokioExecutor::new()).build(https);
-            Ok(SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) }))
+            let mut tcp = HttpConnector::new();
+            tcp.enforce_http(false);
+            tcp.set_nodelay(true);
+            SharedHttpClient::new(SdkHyperClient::new(https.wrap_connector(tcp)))
         }
-        Some(p) => {
-            let https = HttpsConnectorBuilder::new()
-                .with_tls_config(tls)
-                .https_or_http()
-                .enable_http1()
-                .enable_http2()
-                .wrap_connector(ProxyConnector { proxy: p });
-            let client: Client<_, aws_smithy_types::body::SdkBody> =
-                Client::builder(TokioExecutor::new()).build(https);
-            Ok(SharedHttpClient::new(SdkHyperClient { client: Arc::new(client) }))
+        Some(p) => SharedHttpClient::new(SdkHyperClient::new(
+            https.wrap_connector(ProxyConnector { proxy: p }),
+        )),
+    })
+}
+
+/// A smithy `HttpClient` over a pooled hyper-util client on connector `C` (direct or through a
+/// proxy). The connect timeout comes with the SDK's settings, so the client is built when the
+/// SDK first asks for a connector: one per distinct timeout, one in practice.
+struct SdkHyperClient<C> {
+    connector: C,
+    clients: std::sync::Mutex<
+        Vec<(
+            Option<std::time::Duration>,
+            aws_smithy_runtime_api::client::http::SharedHttpConnector,
+        )>,
+    >,
+}
+
+impl<C> SdkHyperClient<C> {
+    fn new(connector: C) -> Self {
+        SdkHyperClient {
+            connector,
+            clients: std::sync::Mutex::new(Vec::new()),
         }
     }
 }
 
-/// A smithy `HttpClient` backed by a hyper-util legacy `Client` over connector
-/// `C` (generic so it serves both the proxy and non-proxy connector types).
-#[derive(Debug, Clone)]
-struct SdkHyperClient<C: Clone> {
-    client: std::sync::Arc<
-        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
-    >,
+impl<C> std::fmt::Debug for SdkHyperClient<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdkHyperClient")
+    }
 }
 
 impl<C> aws_smithy_runtime_api::client::http::HttpClient for SdkHyperClient<C>
 where
-    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+    C: tower_service::Service<http::Uri> + Clone + Send + Sync + 'static,
+    C::Response: hyper::rt::Read
+        + hyper::rt::Write
+        + hyper_util::client::legacy::connect::Connection
+        + Send
+        + Unpin
+        + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
 {
     fn http_connector(
         &self,
-        _settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
+        settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
         _components: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
     ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector {
-        aws_smithy_runtime_api::client::http::SharedHttpConnector::new(SdkHyperConnector {
-            client: self.client.clone(),
-        })
+        use aws_smithy_runtime_api::client::http::SharedHttpConnector;
+        use hyper_util::client::legacy::Client;
+        use hyper_util::rt::{TokioExecutor, TokioTimer};
+
+        let timeout = settings.connect_timeout();
+        let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, c)) = clients.iter().find(|(t, _)| *t == timeout) {
+            return c.clone();
+        }
+        let mut builder = Client::builder(TokioExecutor::new());
+        // With a timer the pool closes connections idle for 90 s (hyper-util's default).
+        builder.pool_timer(TokioTimer::new());
+        let client = builder.build(ConnectTimeout {
+            inner: self.connector.clone(),
+            timeout,
+        });
+        let c = SharedHttpConnector::new(SdkHyperConnector {
+            client: std::sync::Arc::new(client),
+        });
+        clients.push((timeout, c.clone()));
+        c
     }
 }
 
 /// Adapts a hyper 1.x legacy `Client` to the smithy `HttpConnector` trait,
 /// mirroring `aws-smithy-http-client`'s internal `Adapter`.
-#[derive(Debug, Clone)]
-struct SdkHyperConnector<C: Clone> {
+struct SdkHyperConnector<C> {
     client: std::sync::Arc<
-        hyper_util::client::legacy::Client<C, aws_smithy_types::body::SdkBody>,
+        hyper_util::client::legacy::Client<ConnectTimeout<C>, aws_smithy_types::body::SdkBody>,
     >,
+}
+
+impl<C> std::fmt::Debug for SdkHyperConnector<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdkHyperConnector")
+    }
 }
 
 impl<C> aws_smithy_runtime_api::client::http::HttpConnector for SdkHyperConnector<C>
 where
-    C: hyper_util::client::legacy::connect::Connect + Clone + Send + Sync + std::fmt::Debug + 'static,
+    C: tower_service::Service<http::Uri> + Clone + Send + Sync + 'static,
+    C::Response: hyper::rt::Read
+        + hyper::rt::Write
+        + hyper_util::client::legacy::connect::Connection
+        + Send
+        + Unpin
+        + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
 {
     fn call(
         &self,
@@ -382,15 +418,123 @@ where
         };
         let client = self.client.clone();
         HttpConnectorFuture::new(async move {
-            let response = client
-                .request(request)
-                .await
-                .map_err(|e| ConnectorError::other(e.into(), None))?;
+            let response = client.request(request).await.map_err(connector_error)?;
             let (parts, body) = response.into_parts();
             let body = SdkBody::from_body_1_x(body);
             HttpResponse::try_from(http::Response::from_parts(parts, body))
                 .map_err(|err| ConnectorError::other(err.into(), None))
         })
+    }
+}
+
+/// The SDK's connect timeout around a connector, TLS handshake included (as the SDK's client
+/// times it). Without one a connection to an unreachable host waited for the kernel's SYN
+/// retries, about two minutes.
+#[derive(Clone)]
+struct ConnectTimeout<C> {
+    inner: C,
+    timeout: Option<std::time::Duration>,
+}
+
+#[derive(Debug)]
+struct ConnectTimedOut(std::time::Duration);
+
+impl std::fmt::Display for ConnectTimedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "no connection within {:?}", self.0)
+    }
+}
+
+impl std::error::Error for ConnectTimedOut {}
+
+impl<C> tower_service::Service<http::Uri> for ConnectTimeout<C>
+where
+    C: tower_service::Service<http::Uri>,
+    C::Response: Send + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
+{
+    type Response = C::Response;
+    type Error = BoxError;
+    type Future = std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<C::Response, BoxError>> + Send>,
+    >;
+
+    fn poll_ready(
+        &mut self,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), BoxError>> {
+        self.inner.poll_ready(cx).map_err(Into::into)
+    }
+
+    fn call(&mut self, uri: http::Uri) -> Self::Future {
+        let connect = self.inner.call(uri);
+        let timeout = self.timeout;
+        Box::pin(async move {
+            let Some(d) = timeout else {
+                return connect.await.map_err(Into::into);
+            };
+            match tokio::time::timeout(d, connect).await {
+                Ok(r) => r.map_err(Into::into),
+                Err(_) => Err(Box::new(ConnectTimedOut(d)) as BoxError),
+            }
+        })
+    }
+}
+
+/// A hyper error as the SDK's retry policy needs it, classified as the SDK's own client does
+/// (`aws-smithy-http-client`): timeouts and I/O errors (a refused, reset or closed connection) are
+/// retried, a response cut short is transient, an error of the request body is not retried. All
+/// were "other" before, which the SDK does not retry: the `--no-verify-ssl`, `--proxy` and
+/// `--ca-certs-file` clients gave up on the first dropped connection.
+fn connector_error(
+    err: hyper_util::client::legacy::Error,
+) -> aws_smithy_runtime_api::client::result::ConnectorError {
+    use aws_smithy_runtime_api::client::result::ConnectorError;
+    use aws_smithy_types::retry::ErrorKind;
+    use std::error::Error;
+
+    fn find<'a, E: Error + 'static>(mut e: &'a (dyn Error + 'static)) -> Option<&'a E> {
+        loop {
+            if let Some(found) = e.downcast_ref::<E>() {
+                return Some(found);
+            }
+            e = e.source()?;
+        }
+    }
+    enum Kind {
+        Timeout,
+        Io,
+        User,
+        Transient,
+        Other,
+    }
+    let kind = if find::<ConnectTimedOut>(&err).is_some() {
+        Kind::Timeout
+    } else if let Some(h) = find::<hyper::Error>(&err) {
+        if h.is_timeout() {
+            Kind::Timeout
+        } else if h.is_user() {
+            Kind::User
+        } else if h.is_closed() || h.is_canceled() || find::<std::io::Error>(h).is_some() {
+            Kind::Io
+        } else if h.is_incomplete_message() {
+            Kind::Transient
+        } else {
+            Kind::Other
+        }
+    } else if err.is_connect() || find::<std::io::Error>(&err).is_some() {
+        Kind::Io
+    } else {
+        Kind::Other
+    };
+    let err: BoxError = err.into();
+    match kind {
+        Kind::Timeout => ConnectorError::timeout(err),
+        Kind::Io => ConnectorError::io(err),
+        Kind::User => ConnectorError::user(err),
+        Kind::Transient => ConnectorError::other(err, Some(ErrorKind::TransientError)),
+        Kind::Other => ConnectorError::other(err, None),
     }
 }
 
@@ -768,26 +912,13 @@ impl S3 {
             builder = builder.use_fips(true);
         }
 
-        // `--no-verify-ssl`: swap in a custom HTTP client whose rustls config
-        // skips certificate verification, for self-signed HTTPS endpoints. The
-        // bundled `aws-smithy-http-client` TLS context can only ADD trust, not
-        // disable verification, so we build our own hyper + hyper-rustls
-        // connector with a dangerous `ServerCertVerifier` and hand it to the
-        // SDK via `http_client`. NOTE: this also disables hostname checking —
-        // that is the intended effect of the flag.
-        // A custom HTTP client is needed for `--no-verify-ssl` and/or `--proxy`
-        // (the bundled connector supports neither). When neither is requested we
-        // leave the SDK's default client in place.
-        let proxy_cfg = effective_proxy(opts)?;
-        if opts.no_verify_ssl || proxy_cfg.is_some() || opts.ca_certs_file.is_some() {
-            builder = builder.http_client(cached_custom_http_client(
-                opts.no_verify_ssl,
-                proxy_cfg,
-                opts.ca_certs_file.as_deref(),
-            )?);
-        } else {
-            builder = builder.http_client(shared_default_http_client());
-        }
+        // rs5cmd's own HTTP client for every configuration (`build_http_client`): HTTP/1.1 only,
+        // and the only way to express `--no-verify-ssl`, `--proxy` and `--ca-certs-file`.
+        builder = builder.http_client(cached_http_client(
+            opts.no_verify_ssl,
+            effective_proxy(opts)?,
+            opts.ca_certs_file.as_deref(),
+        )?);
         // `--retry-count` (default 10, like s5cmd) is the number of retries after the first
         // attempt. It never reached the SDK, which then gave up after 3 attempts (F02, #17).
         builder = builder.retry_config(
