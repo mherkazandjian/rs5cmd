@@ -1,4 +1,4 @@
-//! Thread-per-core driver for the fast path: shard a work-list across N pinned
+//! Thread-per-core driver for the fast path: shard a work-list across N
 //! monoio runtimes (one io_uring instance per thread), each running many
 //! in-flight transfers concurrently. No cross-thread synchronization on the hot
 //! path — results flow back over a channel.
@@ -94,7 +94,14 @@ pub fn run_transfers(items: Vec<Transfer>, cfg: FastConfig) -> Vec<Outcome> {
         shards[i % cores].push(item);
     }
 
-    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+    // Shards pinned themselves to the first CPUs of the process mask, so concurrent runs shared
+    // the same CPUs while others sat idle (F47). The scheduler places them now; RS5CMD_FAST_PIN=1
+    // pins as before, for a run that has the machine to itself.
+    let core_ids = if std::env::var_os("RS5CMD_FAST_PIN").is_some_and(|v| v == "1") {
+        core_affinity::get_core_ids().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let (tx, rx) = mpsc::channel::<Outcome>();
     let mut handles = Vec::with_capacity(cores);
 
