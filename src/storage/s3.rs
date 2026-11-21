@@ -1171,6 +1171,14 @@ impl S3 {
         })
     }
 
+    /// Waits until `n` more downloaded bytes fit under --limit-download, if one is set. For
+    /// callers that consume a `read` body themselves (`cat`, F05).
+    pub async fn pace_download(&self, n: usize) {
+        if let Some(limiter) = &self.download_limiter {
+            limiter.acquire(n as u64).await;
+        }
+    }
+
     pub(crate) fn request_payer(&self) -> Option<aws_sdk_s3::types::RequestPayer> {
         self.request_payer_str
             .as_deref()

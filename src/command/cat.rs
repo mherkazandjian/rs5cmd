@@ -61,11 +61,27 @@ pub async fn run(global: &GlobalOpts, args: CatArgs) -> anyhow::Result<()> {
         let s3 = S3::new(&url, &opts).await?;
         let mut body = s3.read(&url).await?;
         while let Some(chunk) = body.try_next().await? {
+            s3.pace_download(chunk.len()).await;
             stdout.write_all(&chunk).await.map_err(crate::output::stdout_error)?;
         }
     } else {
-        let data = tokio::fs::read(url.absolute()).await?;
-        stdout.write_all(&data).await.map_err(crate::output::stdout_error)?;
+        // Stream a local file instead of reading it whole (#18: a 1 GiB file took 1 GiB of
+        // memory). std::io::copy moves the bytes with copy_file_range/sendfile/splice where the
+        // kernel can.
+        let path = url.absolute();
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut file = std::fs::File::open(&path)
+                .map_err(|e| anyhow::anyhow!("cat {path}: {e}"))?;
+            let mut out = std::io::stdout().lock();
+            match std::io::copy(&mut file, &mut out) {
+                Ok(_) => Ok(()),
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {
+                    crate::output::die_of_broken_pipe()
+                }
+                Err(e) => Err(anyhow::anyhow!("cat {path}: {e}")),
+            }
+        })
+        .await??;
     }
     stdout.flush().await.map_err(crate::output::stdout_error)?;
     Ok(())
@@ -120,6 +136,7 @@ async fn cat_expanded(
             .await
             .map_err(|e| anyhow::anyhow!("cat {src}: {e:#}"))?
         {
+            s3.pace_download(chunk.len()).await;
             stdout.write_all(&chunk).await.map_err(crate::output::stdout_error)?;
         }
     }

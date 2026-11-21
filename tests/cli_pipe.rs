@@ -63,3 +63,15 @@ fn result_lines_into_closed_pipe_end_by_sigpipe() {
     drop(stdout);
     assert_quiet_sigpipe(child);
 }
+
+#[test]
+fn cat_local_file_streams_exact_bytes() {
+    // #18: a local file is streamed, not read whole; the bytes must still come out unchanged.
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("data");
+    let data: Vec<u8> = (0..(3 << 20) + 17).map(|i: u32| (i % 251) as u8).collect();
+    std::fs::write(&f, &data).unwrap();
+    let out = rs5cmd().args(["cat", f.to_str().unwrap()]).output().unwrap();
+    assert!(out.status.success());
+    assert!(out.stdout == data, "got {} bytes, want {}", out.stdout.len(), data.len());
+}
