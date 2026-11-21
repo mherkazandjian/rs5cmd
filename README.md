@@ -221,9 +221,13 @@ for all three; every variant verified 50000/50000 byte-complete round-trips). At
   and moves the data for **5–6× less CPU** (99–120 vs 636 CPU-s). At 1 MiB the
   io_uring path no longer beats the tokio path on upload — its wall-clock edge is
   sharpest on *small* objects and on *download*.
-- **Tradeoff — memory:** rs5cmd buffers each object fully in RAM across 256 workers,
-  so peak RSS is **0.9–1.6 GB** vs Go s5cmd's streaming **73–100 MB**. Lower
-  `--numworkers` to trade throughput for memory.
+- **Tradeoff — memory:** in this run (v0.1.0) rs5cmd buffered each object fully in RAM
+  across 256 workers, so peak RSS was **0.9–1.6 GB** vs Go s5cmd's streaming **73–100 MB**.
+  The default path now streams both ways (files over 256 KiB are read in 128 KiB chunks,
+  downloads are written as they arrive): 5,000 × 1 MiB against the in-memory stub peaks at
+  ~42 MB up and ~79 MB down (s5cmd ~36 / ~52 MB). `--fast` still holds each object, up to its
+  8 MiB part, in memory per transfer in flight: lower `--numworkers` there to trade throughput
+  for memory.
 - **Caveat:** storage here is NVMe (not the bottleneck); MinIO peaked at ~16 of 32
   cores serving PUTs, so the *upload* gap partly reflects how efficiently each
   client drives a busy server, not a pure client ceiling.

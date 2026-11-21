@@ -248,8 +248,10 @@ Full list with details and workarounds: [known issues](references/known-issues.m
   inside a wildcard source fails. `cp --links` stores links as placeholder objects instead.
 - **Uploads are `application/octet-stream`** unless `--content-type` is given. `cp` and `sync`
   do not guess the type from the file extension.
-- **Memory grows with `--numworkers`.** The default of 256 workers can use over 1 GB with
-  megabyte-sized objects. Lower it on small machines.
+- **`--fast` memory grows with `--numworkers`.** It holds each object (up to its 8 MiB part)
+  in memory per transfer in flight, so the default of 256 workers can use over 1 GB with
+  megabyte-sized objects. Lower it on small machines. The default path streams instead (tens of
+  MB for 256 transfers of 1 MiB objects).
 - Tested against MinIO only. Check behaviour on real AWS S3 before relying on multipart edge
   cases, versioning, encryption, cross-region copies or dual-stack endpoints.
 
