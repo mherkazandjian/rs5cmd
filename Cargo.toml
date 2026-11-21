@@ -27,7 +27,11 @@ async-trait = "0.1"
 
 # AWS S3
 aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# Without the default features: every S3 client gets rs5cmd's HTTP client (`build_http_client`),
+# and the default `rustls` feature linked the SDK's legacy client in as well (hyper 0.14,
+# rustls 0.21 and ring, h2 0.3; F75). The credential providers keep the SDK's default HTTPS
+# client through aws-config.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "rt-tokio"] }
 aws-smithy-runtime-api = "1"
 aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 bytes = "1"
