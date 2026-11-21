@@ -80,7 +80,9 @@ rs5cmd ls                                                 # lists buckets
 
 - **Credentials** come from the AWS SDK default chain: environment variables, the shared
   `~/.aws/credentials` and `~/.aws/config` files (`--profile NAME`, `--credentials-file PATH`),
-  SSO, and container or instance metadata.
+  and container or instance metadata. SSO (IAM Identity Center) profiles need a build with the
+  `sso` feature; release binaries and packages leave it out. With those, run
+  `eval "$(aws configure export-credentials --profile NAME --format env)"` first.
 - **Endpoint**, first match wins: `--endpoint-url`, `AWS_ENDPOINT_URL`, a `--s3cfg` file,
   `~/.rs5cmd`, then `S3_ENDPOINT_URL`. With a custom endpoint, requests use path-style
   addressing unless `--addressing-style virtual` is given.

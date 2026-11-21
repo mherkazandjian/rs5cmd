@@ -179,7 +179,8 @@ It handles upload, download, S3→S3 server-side copy, and mixed-direction batch
 (only local→local falls back to the default path), and honors `--json`,
 `--dry-run`, `--retry-count`, `mv`, HTTP/HTTPS (rustls; webpki roots by default,
 so it works against real AWS), the standard AWS credential provider chain
-(env → profile → SSO → IMDS), and `--no-verify-ssl` for self-signed endpoints.
+(env → profile → IMDS; SSO profiles with the `sso` feature), and `--no-verify-ssl` for
+self-signed endpoints.
 
 ### Benchmark vs Go s5cmd
 
@@ -321,14 +322,24 @@ service — generate it once with `bench/gen-certs.sh` (the cert is git-ignored)
 
 ### Cargo features
 
-`fast` (the io_uring path, Linux) and `mount` (FUSE) are opt-in. On by default:
+Opt-in: `fast` (the io_uring path, Linux), `mount` (FUSE) and `sso`. On by default: `mimalloc`.
 
 - `mimalloc`: mimalloc is the global allocator, faster than the system allocator where rs5cmd
   makes many small allocations (many small objects, `run`, `ls`, `du`). The process runs with
   transparent huge pages turned off, as with mimalloc's `MIMALLOC_ALLOW_THP=0`, so small
   commands stay small where THP is `always`. Build with `--no-default-features` (then add back
   the features you want) for the system allocator.
-- `sso`: credentials from AWS IAM Identity Center (SSO) profiles.
+- `sso`: credentials from AWS IAM Identity Center (SSO) profiles (`sso_session` or
+  `sso_start_url` in `~/.aws/config`, as `aws sso login` sets up). Release binaries and
+  packages leave it out; such a profile then fails with an error that names the feature.
+  Build with it:
+
+  ```bash
+  cargo build --release --features sso          # with the fast path: --features "sso fast"
+  ```
+
+  With a release binary, the AWS CLI can hand an SSO profile's credentials over instead:
+  `eval "$(aws configure export-credentials --profile NAME --format env)"`.
 
 ### Testing notes
 

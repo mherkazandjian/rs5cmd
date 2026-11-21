@@ -24,9 +24,10 @@ It has three parts that share the `storage` types:
 | Fast path | `fast` (Linux) | `cp --fast` / `mv --fast` on monoio io_uring, one runtime per core, own SigV4 signing |
 | Mount | `mount` (Linux, macOS) | `rs5cmd mount` on `fuse3` |
 
-A fourth feature, `bench-stub`, builds the `s3stub` benchmark server. Two are on by default:
-`mimalloc` (mimalloc as the global allocator, in `src/main.rs`, which also turns transparent huge
-pages off for the process) and `sso` (credentials from IAM Identity Center profiles).
+A fourth feature, `bench-stub`, builds the `s3stub` benchmark server. `mimalloc` is on by
+default (mimalloc as the global allocator, in `src/main.rs`, which also turns transparent huge
+pages off for the process). `sso` is off by default (credentials from IAM Identity Center
+profiles; it enables aws-config's `sso`), so release builds have no SSO.
 
 The code is the authority. This file was checked against the source at release v0.1.0; when it
 disagrees with the code, trust the code and fix this file in the same change.
@@ -221,7 +222,7 @@ run; never compare against numbers from another session or machine.
 - A second job repackages the Linux binaries with nfpm (`packaging/nfpm.yaml`,
   `packaging/build-packages.sh`) into `.deb`, `.rpm` and Arch `.pkg.tar.zst`.
 - glibc 2.28 is the floor because the fast-path runtime needs `statx`. There is no musl build.
-- Release binaries do not include the `mount` feature.
+- Release binaries do not include the `mount` or `sso` features.
 
 Steps, version bumps and local package builds: [release](references/release.md).
 
