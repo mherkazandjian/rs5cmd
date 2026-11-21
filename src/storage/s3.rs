@@ -237,7 +237,8 @@ fn cached_http_client(
 ///   connection: one TCP flow and one thread for all parts of a download, which capped a 100 GB
 ///   download at ~700 MB/s where s5cmd did 1.6 GB/s (#14).
 /// - Trust: the platform's roots, `SSL_CERT_FILE` and `SSL_CERT_DIR` included, as the SDK's
-///   client; with a proxy or `--ca-certs-file`, the bundled webpki roots plus the bundle;
+///   client (read on the first TLS handshake: `platform_trust`); with a proxy or
+///   `--ca-certs-file`, the bundled webpki roots plus the bundle;
 ///   `--no-verify-ssl` verifies nothing (no hostname check either: the intended effect).
 /// - As the SDK's client: TCP_NODELAY, the SDK's connect timeout (3.1 s unless configured; TLS
 ///   handshake included), idle connections closed after 90 s, and errors classified so the SDK
@@ -265,15 +266,17 @@ fn build_http_client(
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(danger::NoVerify(provider)))
             .with_no_client_auth()
+    } else if proxy.is_none() && ca_certs.is_none() {
+        // What the SDK's client trusted, loaded on the first TLS handshake.
+        rustls::ClientConfig::builder_with_provider(provider.clone())
+            .with_safe_default_protocol_versions()
+            .expect("rustls safe default protocol versions")
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(platform_trust::Verifier::new(provider)))
+            .with_no_client_auth()
     } else {
         let mut roots = rustls::RootCertStore::empty();
-        if proxy.is_none() && ca_certs.is_none() {
-            // What the SDK's client trusted. Certificates that fail to parse are skipped, and
-            // none at all fails only TLS requests, as with the SDK's client.
-            roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
-        } else {
-            roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-        }
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         // `--ca-certs-file`: trust additional (e.g. private/self-signed) CAs on
         // top of the bundled webpki roots.
         if let Some(path) = ca_certs {
@@ -803,6 +806,97 @@ mod danger {
 
         fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
             self.0.signature_verification_algorithms.supported_schemes()
+        }
+    }
+}
+
+/// Server certificates checked against the platform's trust store, as the SDK's client did, but
+/// with the store read on the first TLS handshake: loading it (a 220 KB bundle and ~300 files in
+/// the certificate directory, each parsed) cost ~5 ms per process, which commands against an
+/// http:// endpoint never need. Every check is the one `with_root_certificates` installs
+/// (rustls's `WebPkiServerVerifier`): certificates through it, handshake signatures with the
+/// provider's algorithms as it does.
+mod platform_trust {
+    use std::sync::{Arc, OnceLock};
+
+    use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
+    use rustls::client::WebPkiServerVerifier;
+    use rustls::crypto::{verify_tls12_signature, verify_tls13_signature, CryptoProvider};
+    use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
+    use rustls::{DigitallySignedStruct, Error, RootCertStore, SignatureScheme};
+
+    #[derive(Debug)]
+    pub struct Verifier {
+        provider: Arc<CryptoProvider>,
+        roots: OnceLock<Result<Arc<WebPkiServerVerifier>, String>>,
+    }
+
+    impl Verifier {
+        pub fn new(provider: Arc<CryptoProvider>) -> Self {
+            Verifier {
+                provider,
+                roots: OnceLock::new(),
+            }
+        }
+
+        fn webpki(&self) -> Result<&WebPkiServerVerifier, Error> {
+            let built = self.roots.get_or_init(|| {
+                // Certificates that fail to parse are skipped, as the SDK's client did.
+                let mut roots = RootCertStore::empty();
+                roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+                WebPkiServerVerifier::builder_with_provider(Arc::new(roots), self.provider.clone())
+                    .build()
+                    .map_err(|e| format!("the platform's trust store: {e}"))
+            });
+            match built {
+                Ok(v) => Ok(v),
+                Err(e) => Err(Error::General(e.clone())),
+            }
+        }
+    }
+
+    impl ServerCertVerifier for Verifier {
+        fn verify_server_cert(
+            &self,
+            end_entity: &CertificateDer<'_>,
+            intermediates: &[CertificateDer<'_>],
+            server_name: &ServerName<'_>,
+            ocsp: &[u8],
+            now: UnixTime,
+        ) -> Result<ServerCertVerified, Error> {
+            self.webpki()?.verify_server_cert(end_entity, intermediates, server_name, ocsp, now)
+        }
+
+        fn verify_tls12_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls12_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn verify_tls13_signature(
+            &self,
+            message: &[u8],
+            cert: &CertificateDer<'_>,
+            dss: &DigitallySignedStruct,
+        ) -> Result<HandshakeSignatureValid, Error> {
+            verify_tls13_signature(
+                message,
+                cert,
+                dss,
+                &self.provider.signature_verification_algorithms,
+            )
+        }
+
+        fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+            self.provider.signature_verification_algorithms.supported_schemes()
         }
     }
 }

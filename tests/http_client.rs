@@ -3,7 +3,7 @@
 //! - It speaks HTTP/1.1 only, even to a TLS server that offers HTTP/2: over HTTP/2 every part of
 //!   a download would share one connection (#14).
 //! - Without flags it trusts the platform's roots, `SSL_CERT_FILE` included, as the SDK's client
-//!   did; with `--ca-certs-file`, the given bundle.
+//!   did, and refuses a server they do not vouch for; with `--ca-certs-file`, the given bundle.
 //! - A connection dropped before the response is retried, with or without `--no-verify-ssl`.
 //!
 //! tests/data/tls holds a test CA (`ca.pem`) and a server certificate for 127.0.0.1 and
@@ -182,6 +182,23 @@ fn ca_certs_file_and_no_http2() {
     download_over_tls(|cmd| {
         cmd.arg("--ca-certs-file").arg(tls_dir().join("ca.pem"));
     });
+}
+
+/// The trust store is read when the first TLS connection needs it, but still checked: a server
+/// whose certificate does not chain to a trusted root is refused.
+#[test]
+fn untrusted_server_is_refused() {
+    let (port, negotiated) = start_tls_server();
+    let dir = tempfile::tempdir().unwrap();
+    rs5cmd(&format!("https://127.0.0.1:{port}"))
+        // The server's own certificate is not a CA, so nothing it presents chains to a root.
+        .env("SSL_CERT_FILE", tls_dir().join("server.pem"))
+        .args(["--retry-count", "0", "cp", "s3://bucket/object"])
+        .arg(dir.path().join("object"))
+        .assert()
+        .failure();
+    assert!(negotiated.lock().unwrap().is_empty(), "a handshake completed");
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
 
 fn cat_after_a_dropped_connection(flags: &[&str]) {
