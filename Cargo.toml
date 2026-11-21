@@ -26,7 +26,9 @@ futures = "0.3"
 async-trait = "0.1"
 
 # AWS S3
-aws-config = { version = "1", features = ["behavior-version-latest"] }
+# The default features less `sso`, which is rs5cmd's own feature `sso` (on by default), so a
+# build can leave out the SSO and SSO-OIDC clients.
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process"] }
 # Without the default features: every S3 client gets rs5cmd's HTTP client (`build_http_client`),
 # and the default `rustls` feature linked the SDK's legacy client in as well (hyper 0.14,
 # rustls 0.21 and ring, h2 0.3; F75). The credential providers keep the SDK's default HTTPS
@@ -84,6 +86,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Gated behind the `fast` feature so the default build is unaffected and still
 # compiles on non-Linux / without io_uring.
 [features]
+default = ["sso"]
+# Credentials from AWS IAM Identity Center (SSO) profiles: `sso_session` / `sso_start_url` in
+# ~/.aws/config, as `aws sso login` sets up. Without it such a profile yields no credentials.
+sso = ["aws-config/sso"]
 fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:sha2", "dep:hex", "dep:core_affinity"]
 # FUSE mount (`rs5cmd mount`): rclone-style local mount of a remote S3 path.
 # Linux mounts via libfuse3's `fusermount3` helper at runtime — the `fuse3`
