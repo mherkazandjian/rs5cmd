@@ -166,9 +166,12 @@ you need repeat runs to be exact no-ops.
 
 ## 3. Resource use
 
-- **Memory.** Objects are buffered in memory per worker. The project's own measurement for
-  50,000 objects of 1 MiB with the default 256 workers is 0.9 to 1.6 GB peak. Lower
-  `--numworkers` (and `--concurrency` for large objects) on small machines.
+- **Memory.** The default path streams: uploads over 256 KiB are read in 128 KiB chunks and
+  downloads are written as they arrive, so 256 transfers of 1 MiB objects take tens of MB.
+  `--fast` holds each object, up to its 8 MiB part, in memory per transfer in flight: 50,000
+  objects of 1 MiB with the default 256 workers peaked at 0.9 to 1.2 GB (v0.1.0). `pipe` holds
+  up to `--concurrency` parts of `--part-size`, 5 x 50 MiB by default, as s5cmd does. Lower
+  `--numworkers` (with `--fast`) or `pipe`'s settings on small machines.
 - **Open files.** rs5cmd raises its own open-file limit at start when it can. If it warns that
   `RLIMIT_NOFILE` is too low, or fails with `Too many open files`, run `ulimit -n <N>` first or
   lower `--numworkers`.
