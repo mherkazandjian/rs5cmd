@@ -86,12 +86,11 @@ const DEFAULT_PART_SIZE: u64 = 8 << 20;
 impl FastClient {
     pub fn new(endpoint: Endpoint, signer: Signer) -> anyhow::Result<FastClient> {
         let transport = if endpoint.is_tls() {
-            // Ensure a process-wide rustls crypto provider exists (aws-lc-rs, as the default
-            // path's: `build_tls_http1_only` below takes the process default).
-            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            // The default path's provider (`crate::tls`: the key exchange --tls-post-quantum
+            // chooses). It is the process default, which `build_tls_http1_only` below takes.
+            let provider = crate::tls::provider();
 
             let connector: HttpsPool = if endpoint.no_verify {
-                let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
                 let mut cfg = rustls::ClientConfig::builder_with_provider(provider.clone())
                     .with_safe_default_protocol_versions()?
                     .dangerous()

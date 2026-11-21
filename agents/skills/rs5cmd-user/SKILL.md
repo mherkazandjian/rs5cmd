@@ -88,7 +88,12 @@ rs5cmd ls                                                 # lists buckets
   addressing unless `--addressing-style virtual` is given.
 - **Region**: `--region` or `AWS_REGION`, else the profile, else `us-east-1`.
 - **TLS**: `--ca-certs-file bundle.pem` trusts a private CA. `--no-verify-ssl` turns off
-  certificate and hostname checks; use it only for a trusted test endpoint.
+  certificate and hostname checks; use it only for a trusted test endpoint. Key exchange is
+  classic (X25519, P-256, P-384) unless `--tls-post-quantum` is given, which offers the
+  post-quantum hybrid X25519MLKEM768 first, `--fast` included. That makes setting up each TLS
+  connection somewhat slower (about 22 % more CPU per new connection; 1-4 % on 10,000 small
+  objects, nothing on large transfers), and prints a notice saying so on stderr (none with
+  `--json`).
 - **From s3cmd**: `rs5cmd --s3cfg ~/.s3cfg ls` uses an s3cmd config for one run.
   `rs5cmd import-s3cfg ~/.s3cfg` saves it for later runs. It writes `~/.rs5cmd` and replaces
   the `[default]` profile in `~/.aws/credentials`; pass `--profile NAME` or `--no-credentials`

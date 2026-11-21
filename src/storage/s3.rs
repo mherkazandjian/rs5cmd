@@ -300,8 +300,8 @@ fn cached_http_client(
 /// - Reads over TLS gather what is ready, up to 64 KiB (`FillingReads`), instead of one TLS record;
 ///   reads on plain connections return up to 2 MiB shared by the connections open (64-512 KiB).
 ///   Either bounds each connection's read buffer.
-/// - Crypto: aws-lc-rs, as the SDK's client: it offers post-quantum hybrid key exchange
-///   (X25519MLKEM768) first, and its AES-GCM costs less CPU than ring's.
+/// - Crypto: aws-lc-rs, as the SDK's client (its AES-GCM costs less CPU than ring's), with the
+///   key exchange `--tls-post-quantum` chooses (`crate::tls`): classic unless it is given.
 fn build_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
@@ -312,10 +312,7 @@ fn build_http_client(
     use hyper_util::client::legacy::connect::HttpConnector;
     use std::sync::Arc;
 
-    // Process-wide default crypto provider (idempotent; the fast path may also
-    // install one). Ignore the error if it's already installed.
-    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let provider = crate::tls::provider();
 
     let tls = if no_verify {
         // Verification disabled — a custom CA bundle would be moot, so skip it.
