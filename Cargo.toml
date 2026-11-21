@@ -26,8 +26,14 @@ futures = "0.3"
 async-trait = "0.1"
 
 # AWS S3
-aws-config = { version = "1", features = ["behavior-version-latest"] }
-aws-sdk-s3 = "1"
+# The default features less `sso`, which is rs5cmd's own feature `sso` (on by default), so a
+# build can leave out the SSO and SSO-OIDC clients.
+aws-config = { version = "1", default-features = false, features = ["behavior-version-latest", "default-https-client", "rt-tokio", "credentials-process"] }
+# Without the default features: every S3 client gets rs5cmd's HTTP client (`build_http_client`),
+# and the default `rustls` feature linked the SDK's legacy client in as well (hyper 0.14,
+# rustls 0.21 and ring, h2 0.3; F75). The credential providers keep the SDK's default HTTPS
+# client through aws-config.
+aws-sdk-s3 = { version = "1", default-features = false, features = ["sigv4a", "http-1x", "rt-tokio"] }
 aws-smithy-runtime-api = "1"
 aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 bytes = "1"
@@ -37,13 +43,13 @@ aws-credential-types = "1"
 # rs5cmd's HTTP client for S3 (src/storage/s3.rs `build_http_client`): hyper + hyper-rustls,
 # HTTP/1.1 only (#14), adapted to the smithy `HttpClient` trait; it also carries
 # `--no-verify-ssl`, `--proxy` and `--ca-certs-file`. `rustls`/`http` are also used by `fast`.
-# `ring` provider matches the fast path's crypto backend.
-rustls = { version = "0.23", features = ["ring", "aws_lc_rs"] }
+# One crypto provider, aws-lc-rs, on both paths (F75): ring is not linked.
+rustls = { version = "0.23", features = ["aws_lc_rs"] }
 # The platform's trust store (with SSL_CERT_FILE / SSL_CERT_DIR), as the SDK's client used.
 rustls-native-certs = "0.8"
 # Parse a custom CA bundle (`--ca-certs-file`) into rustls certificates.
 rustls-pemfile = "2"
-hyper-rustls = { version = "0.27", default-features = false, features = ["ring", "http1", "http2", "tls12", "native-tokio"] }
+hyper-rustls = { version = "0.27", default-features = false, features = ["aws-lc-rs", "http1", "http2", "tls12", "native-tokio"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "http1", "http2", "tokio"] }
 hyper = "1"
 http = "1"
@@ -80,6 +86,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Gated behind the `fast` feature so the default build is unaffected and still
 # compiles on non-Linux / without io_uring.
 [features]
+default = ["sso"]
+# Credentials from AWS IAM Identity Center (SSO) profiles: `sso_session` / `sso_start_url` in
+# ~/.aws/config, as `aws sso login` sets up. Without it such a profile yields no credentials.
+sso = ["aws-config/sso"]
 fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:sha2", "dep:hex", "dep:core_affinity"]
 # FUSE mount (`rs5cmd mount`): rclone-style local mount of a remote S3 path.
 # Linux mounts via libfuse3's `fusermount3` helper at runtime — the `fuse3`

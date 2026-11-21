@@ -84,7 +84,7 @@ fn start_tls_server() -> (u16, Arc<Mutex<Vec<Option<Vec<u8>>>>>) {
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let key = rustls_pemfile::private_key(&mut open("server.key")).unwrap().unwrap();
-    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .unwrap()
