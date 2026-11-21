@@ -182,6 +182,16 @@ impl FastClient {
     /// Sends a pre-built request over the configured transport, returning the
     /// status and full response body.
     async fn send(&self, req: Request<HttpBody>) -> anyhow::Result<(StatusCode, Bytes)> {
+        let (status, _headers, body) = self.send_full(req).await?;
+        Ok((status, body))
+    }
+
+    /// As `send`, with the response headers. The body is read while the connection is held, so
+    /// the connection goes back to the pool only once its response is complete.
+    async fn send_full(
+        &self,
+        req: Request<HttpBody>,
+    ) -> anyhow::Result<(StatusCode, http::HeaderMap, Bytes)> {
         match &self.transport {
             Transport::Http(connector, key) => {
                 let mut conn = connector
@@ -190,13 +200,7 @@ impl FastClient {
                     .map_err(|e| anyhow::anyhow!("connect: {e:?}"))?;
                 let (res, _reuse) = conn.send_request(req).await;
                 let resp = res.map_err(|e| anyhow::anyhow!("send: {e:?}"))?;
-                let status = resp.status();
-                let (_p, rbody) = resp.into_parts();
-                let bytes = rbody
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("read body: {e:?}"))?;
-                Ok((status, bytes))
+                read_response(resp).await
             }
             Transport::Https(connector, addr) => {
                 let mut conn = connector
@@ -205,13 +209,7 @@ impl FastClient {
                     .map_err(|e| anyhow::anyhow!("tls connect: {e:?}"))?;
                 let (res, _reuse) = conn.send_request(req).await;
                 let resp = res.map_err(|e| anyhow::anyhow!("send: {e:?}"))?;
-                let status = resp.status();
-                let (_p, rbody) = resp.into_parts();
-                let bytes = rbody
-                    .bytes()
-                    .await
-                    .map_err(|e| anyhow::anyhow!("read body: {e:?}"))?;
-                Ok((status, bytes))
+                read_response(resp).await
             }
         }
     }
@@ -233,7 +231,7 @@ impl FastClient {
         Ok(())
     }
 
-    /// GET an object, returning its bytes (downloads use `get_into`).
+    /// GET an object, returning its bytes (downloads use `get_part`).
     #[cfg(test)]
     pub async fn get(&self, bucket: &str, key: &str) -> anyhow::Result<Bytes> {
         let req = self.build_request(http::Method::GET, bucket, key, Bytes::new())?;
@@ -257,54 +255,23 @@ impl FastClient {
         self
     }
 
-    /// GET an object into `file`, as ranges of at most the part size, each written at its
-    /// offset. monoio-http hands over a body with a Content-Length as one buffer, so asking for
-    /// a part at a time is what bounds the memory a download holds (F43) and keeps every write
-    /// within the 32-bit length io_uring takes (#15). The first range's Content-Range gives the
-    /// object's size; an empty object, which no range fits (416), is fetched with a plain GET.
-    /// Returns the bytes written.
-    pub async fn get_into(
-        &self,
-        bucket: &str,
-        key: &str,
-        file: &monoio::fs::File,
-    ) -> anyhow::Result<u64> {
-        let part = self.part_size;
-        let (first, total) = match self.get_range(bucket, key, file, 0, Some(part)).await {
-            Err(e) if has_status(&e, StatusCode::RANGE_NOT_SATISFIABLE) => {
-                return Ok(self.get_range(bucket, key, file, 0, None).await?.0);
-            }
-            other => other?,
-        };
-        // No Content-Range: the server ignored the Range header and sent the whole object.
-        let Some(total) = total else {
-            return Ok(first);
-        };
-        let mut offset = first;
-        anyhow::ensure!(
-            offset == part.min(total),
-            "GET {bucket}/{key}: got {offset} of the first {} bytes",
-            part.min(total)
-        );
-        while offset < total {
-            let len = part.min(total - offset);
-            let (n, _) = self.get_range(bucket, key, file, offset, Some(len)).await?;
-            anyhow::ensure!(n == len, "GET {bucket}/{key}: got {n} of {len} bytes at {offset}");
-            offset += n;
-        }
-        Ok(offset)
+    /// The most bytes one GET asks for.
+    pub fn part_size(&self) -> u64 {
+        self.part_size
     }
 
-    /// One GET, of `len` bytes from `offset` when given, written into `file` at `offset`.
-    /// Returns the bytes written and, for a ranged response, the object's size.
-    async fn get_range(
+    /// GET `len` bytes of an object from `offset`, or the whole object when `len` is None.
+    /// Returns the body and, for a ranged response, the object's size from Content-Range.
+    /// monoio-http hands over a body with a Content-Length as one buffer, so a download asks
+    /// for a part at a time: that bounds the memory it holds (F43) and keeps every write within
+    /// the 32-bit length io_uring takes (#15).
+    pub async fn get_part(
         &self,
         bucket: &str,
         key: &str,
-        file: &monoio::fs::File,
         offset: u64,
         len: Option<u64>,
-    ) -> anyhow::Result<(u64, Option<u64>)> {
+    ) -> anyhow::Result<(Bytes, Option<u64>)> {
         let req = match len {
             Some(len) => self.build_request_with_headers(
                 http::Method::GET,
@@ -315,26 +282,25 @@ impl FastClient {
             )?,
             None => self.build_request(http::Method::GET, bucket, key, Bytes::new())?,
         };
-        match &self.transport {
-            Transport::Http(connector, host) => {
-                let mut conn = connector
-                    .connect(host.clone())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("connect: {e:?}"))?;
-                let (res, _reuse) = conn.send_request(req).await;
-                let resp = res.map_err(|e| anyhow::anyhow!("send: {e:?}"))?;
-                receive_into(resp, bucket, key, file, offset).await
+        let (status, headers, body) = self.send_full(req).await?;
+        if !status.is_success() {
+            return Err(HttpStatusError {
+                status,
+                message: format!(
+                    "GET {bucket}/{key} -> {status}: {}",
+                    String::from_utf8_lossy(&body)
+                ),
             }
-            Transport::Https(connector, addr) => {
-                let mut conn = connector
-                    .connect(addr.clone())
-                    .await
-                    .map_err(|e| anyhow::anyhow!("tls connect: {e:?}"))?;
-                let (res, _reuse) = conn.send_request(req).await;
-                let resp = res.map_err(|e| anyhow::anyhow!("send: {e:?}"))?;
-                receive_into(resp, bucket, key, file, offset).await
-            }
+            .into());
         }
+        if let Some(n) = headers
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        {
+            let got = body.len() as u64;
+            anyhow::ensure!(got == n, "GET {bucket}/{key}: got {got} of {n} bytes");
+        }
+        Ok((body, content_range_total(&headers)))
     }
 
     /// DELETE an object. A 404 is treated as success (already absent), matching
@@ -446,7 +412,7 @@ fn memmem(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 /// Whether `e` is an HTTP error with `status`.
-fn has_status(e: &anyhow::Error, status: StatusCode) -> bool {
+pub(crate) fn has_status(e: &anyhow::Error, status: StatusCode) -> bool {
     e.downcast_ref::<HttpStatusError>().is_some_and(|h| h.status == status)
 }
 
@@ -456,57 +422,21 @@ fn content_range_total(headers: &http::HeaderMap) -> Option<u64> {
     v.rsplit('/').next()?.trim().parse().ok()
 }
 
-/// Writes a GET response's body into `file` from `start`, a chunk per write, and checks it
-/// against Content-Length; an error status becomes an `HttpStatusError` with the body. Returns
-/// the bytes written and the object size from Content-Range, if the response has one.
-async fn receive_into<B>(
+/// A response's status, headers and whole body.
+async fn read_response<B>(
     resp: http::Response<B>,
-    bucket: &str,
-    key: &str,
-    file: &monoio::fs::File,
-    start: u64,
-) -> anyhow::Result<(u64, Option<u64>)>
+) -> anyhow::Result<(StatusCode, http::HeaderMap, Bytes)>
 where
     B: Body<Data = Bytes>,
     B::Error: std::fmt::Debug,
 {
     let status = resp.status();
-    let (parts, mut body) = resp.into_parts();
-    if !status.is_success() {
-        let mut message = Vec::new();
-        while let Some(Ok(chunk)) = body.next_data().await {
-            message.extend_from_slice(&chunk);
-        }
-        return Err(HttpStatusError {
-            status,
-            message: format!(
-                "GET {bucket}/{key} -> {status}: {}",
-                String::from_utf8_lossy(&message)
-            ),
-        }
-        .into());
-    }
-    let expected = parts
-        .headers
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-    let total = content_range_total(&parts.headers);
-    let mut offset = start;
-    while let Some(chunk) = body.next_data().await {
-        let chunk = chunk.map_err(|e| anyhow::anyhow!("read body: {e:?}"))?;
-        if chunk.is_empty() {
-            continue;
-        }
-        let len = chunk.len() as u64;
-        let (written, _) = file.write_all_at(chunk, offset).await;
-        written?;
-        offset += len;
-    }
-    let written = offset - start;
-    if let Some(n) = expected {
-        anyhow::ensure!(written == n, "GET {bucket}/{key}: got {written} of {n} bytes");
-    }
-    Ok((written, total))
+    let (parts, body) = resp.into_parts();
+    let bytes = body
+        .bytes()
+        .await
+        .map_err(|e| anyhow::anyhow!("read body: {e:?}"))?;
+    Ok((status, parts.headers, bytes))
 }
 
 /// An HTTP response with a non-success status. Carries the status so the retry

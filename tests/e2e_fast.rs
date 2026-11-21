@@ -208,6 +208,56 @@ fn answer_ranges(stream: TcpStream, data: &[u8], seen: &Ranges) {
     }
 }
 
+/// Serves a `total`-byte object of zeros: the first range in full, every later one as 64 KiB
+/// of its body, then holds the connection.
+fn start_stalling_range_server(total: u64) -> u16 {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut stream = stream;
+                loop {
+                    let mut range = (0, total - 1);
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        let lower = line.trim_end().to_ascii_lowercase();
+                        if lower.is_empty() {
+                            break;
+                        }
+                        if let Some(v) = lower.strip_prefix("range: bytes=") {
+                            let (a, b) = v.split_once('-').unwrap();
+                            range = (a.parse().unwrap(), b.parse::<u64>().unwrap().min(total - 1));
+                        }
+                    }
+                    let (a, b) = range;
+                    let len = b - a + 1;
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {len}\r\n\
+                         Content-Range: bytes {a}-{b}/{total}\r\n\r\n"
+                    );
+                    let mut out = head.into_bytes();
+                    let first = a == 0;
+                    let sent = if first { len } else { 64 << 10 };
+                    out.resize(out.len() + sent as usize, 0);
+                    if stream.write_all(&out).is_err() {
+                        return;
+                    }
+                    if !first {
+                        std::thread::sleep(Duration::from_secs(60));
+                        return;
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
 /// `rs5cmd --fast cp s3://bucket/object <dst>` against the in-test server on `port`.
 fn fast_download(port: u16, dst: &std::path::Path) -> Command {
     fast_download_with(port, dst, &[])
@@ -271,13 +321,14 @@ fn entries(dir: &std::path::Path) -> Vec<String> {
 
 /// SIGTERM in the middle of a `--fast` download ends the run at once with 130 and leaves no
 /// file behind. The fast path's transfers used to hold the task that answers signals, so the
-/// run went on until every transfer finished (#16).
+/// run went on until every transfer finished (#16). The object is larger than a part, so its
+/// download writes a temporary file, which the signal must remove.
 #[test]
 fn fast_sigterm_ends_the_run_and_leaves_no_file() {
-    let port = start_partial_server(64 << 20, 64 << 10, true);
+    let port = start_stalling_range_server(64 << 20);
     let dir = tempfile::tempdir().unwrap();
     let mut child = fast_download(port, &dir.path().join("object")).spawn().unwrap();
-    // The download has started once its temporary file exists.
+    // The first part has arrived once the temporary file exists; the second one stalls.
     let start = Instant::now();
     while entries(dir.path()).is_empty() {
         assert!(start.elapsed() < Duration::from_secs(20), "the download did not start");

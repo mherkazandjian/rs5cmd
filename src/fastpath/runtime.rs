@@ -9,7 +9,7 @@ use std::thread;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
-use super::client::{Endpoint, FastClient};
+use super::client::{has_status, Endpoint, FastClient};
 use super::sign::Signer;
 
 /// A single transfer unit.
@@ -338,17 +338,38 @@ async fn read_file(path: &std::path::Path) -> anyhow::Result<bytes::Bytes> {
     }
 }
 
-/// Downloads an object into a temporary file renamed over `local` once complete (F03), a part
-/// at a time (see `FastClient::get_into`). Fetched whole, every object in flight was held in
-/// memory (F43: ~4.1 GB RSS for 1 GiB objects, 12 GB for 4 GiB), and one of 4 GiB or more was a
-/// single io_uring write whose length does not fit the 32 bits monoio gives it, so it failed
-/// (#15).
+/// Downloads an object a part at a time (see `FastClient::get_part`). Fetched whole, every
+/// object in flight was held in memory (F43: ~4.1 GB RSS for 1 GiB objects, 12 GB for 4 GiB),
+/// and one of 4 GiB or more was a single io_uring write whose length does not fit the 32 bits
+/// monoio gives it, so it failed (#15).
+///
+/// An object that fits in one part is written once its body is complete, so a failed GET
+/// leaves no file. A larger one goes into a temporary file, renamed over `local` once complete
+/// (F03) and removed on an error or a signal (#16).
 async fn download(
     client: &FastClient,
     bucket: &str,
     key: &str,
     local: &std::path::Path,
 ) -> anyhow::Result<()> {
+    let part = client.part_size();
+    let (body, total) = match client.get_part(bucket, key, 0, Some(part)).await {
+        // An empty object: no range fits it.
+        Err(e) if has_status(&e, http::StatusCode::RANGE_NOT_SATISFIABLE) => {
+            client.get_part(bucket, key, 0, None).await?
+        }
+        other => other?,
+    };
+    // No Content-Range (the server sent the whole object), or the object is this one part.
+    let total = match total {
+        Some(t) if t > body.len() as u64 => t,
+        _ => return write_file(local, body).await,
+    };
+    anyhow::ensure!(
+        body.len() as u64 == part,
+        "GET {bucket}/{key}: got {} of the first {part} bytes",
+        body.len()
+    );
     if let Some(parent) = local.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {
             std::fs::create_dir_all(parent)?;
@@ -356,10 +377,46 @@ async fn download(
     }
     let (partial, file) = crate::storage::partial::PartialFile::create(local)?;
     let file = monoio::fs::File::from_std(file)?;
-    let received = client.get_into(bucket, key, &file).await;
+    // Each part is written while the next one is fetched.
+    let written = async {
+        let (mut body, mut offset) = (body, 0u64);
+        loop {
+            let next = offset + body.len() as u64;
+            let write = file.write_all_at(body, offset);
+            if next >= total {
+                return anyhow::Ok(write.await.0?);
+            }
+            let len = part.min(total - next);
+            let ((res, _), got) =
+                futures::future::join(write, client.get_part(bucket, key, next, Some(len))).await;
+            res?;
+            let (got, _) = got?;
+            anyhow::ensure!(
+                got.len() as u64 == len,
+                "GET {bucket}/{key}: got {} of {len} bytes at {next}",
+                got.len()
+            );
+            (body, offset) = (got, next);
+        }
+    }
+    .await;
     let _ = file.close().await;
-    received?;
+    written?;
     partial.commit()?;
+    Ok(())
+}
+
+/// Writes bytes to a file via io_uring (monoio::fs).
+async fn write_file(path: &std::path::Path, data: bytes::Bytes) -> anyhow::Result<()> {
+    if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let file = monoio::fs::File::create(path).await?;
+    let (res, _buf) = file.write_all_at(data, 0).await;
+    let _ = file.close().await;
+    res?;
     Ok(())
 }
 
