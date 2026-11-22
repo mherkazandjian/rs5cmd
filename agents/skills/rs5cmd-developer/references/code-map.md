@@ -123,7 +123,6 @@ entry from both files when it is fixed, and add a regression test with the fix.
 | Exit 101 when stdout is closed early | `println!` panics on a broken pipe; nothing handles `EPIPE` |
 | `du -H` prints `18 B bytes` | `size_message` in `command/du.rs` appends `bytes` to an already humanized size |
 | `--follow-symlinks` cannot be switched off | Declared as a plain flag with `default_value_t = true` in `CpArgs` and `SyncArgs` |
-| A wildcard source fails on a symlink to a directory | Source expansion in `storage/fs.rs` (`expand_glob`) returns the link as one entry; a directory source walks it |
 | Slow start without a region | `S3::new` uses the SDK region chain, which queries instance metadata before the `us-east-1` fallback |
 | Some global flags are lost inside `run` | `build_argv` in `command/run.rs` forwards a fixed list |
 | `tests/e2e_region.rs` fails outside compose | No endpoint guard at the top of its tests |

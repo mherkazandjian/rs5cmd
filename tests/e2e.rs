@@ -726,6 +726,39 @@ fn list_objects_v1_fallback() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+/// #9: a wildcard source walks a symbolic link to a directory, as a directory source does.
+#[cfg(unix)]
+#[test]
+fn wildcard_source_walks_a_link_to_a_directory() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let s = tmp.path().join("s");
+    std::fs::create_dir_all(s.join("real")).unwrap();
+    std::fs::write(s.join("real").join("r.txt"), b"y").unwrap();
+    std::fs::write(s.join("plain.txt"), b"z").unwrap();
+    std::os::unix::fs::symlink("real", s.join("link")).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", &format!("{}/*", s.display()), &s3("/s/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cp ").count(3));
+    rs5cmd()
+        .args(["cat", &s3("/s/link/r.txt")])
+        .assert()
+        .success()
+        .stdout("y");
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
 #[test]
 fn head_and_presign_json() {
     if !endpoint_configured() {

@@ -117,14 +117,12 @@ Copies from S3 to S3 keep the source object's content type.
 unknown argument.
 
 - A link to a file is copied as the file's content.
-- A link to a directory depends on how the source is written. With a directory source (`data/`)
-  the linked directory is walked and its files are copied. With a wildcard source (`'data/*'`)
-  the link is one entry that fails (`Is a directory`, or `the source path is neither a regular
-  file nor a symlink to a regular file`). The other files are still copied and the exit code
-  is 1.
+- A link to a directory is walked and its files are copied, whether the source is a directory
+  (`data/`), a wildcard (`'data/*'`) or the link itself.
 - `cp --links` uploads a link as a small object named `<name>.s5cmdlink` that holds the link
   target, and recreates the link on download. The printed line shows the name without the
-  suffix. With a directory source, links to directories are still walked, not stored.
+  suffix. A link to a directory is stored as a link when a wildcard matches it or it is the
+  source itself; inside a directory source, links to directories are still walked.
 
 ### 2.9 `--fast` ignores many flags without warning
 

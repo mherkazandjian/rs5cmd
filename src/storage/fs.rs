@@ -13,11 +13,18 @@ use super::{Metadata, Object, ObjectNotFound, ObjectType, Storage};
 #[derive(Debug, Clone)]
 pub struct Filesystem {
     dry_run: bool,
+    keep_links: bool,
 }
 
 impl Filesystem {
     pub fn new(dry_run: bool) -> Filesystem {
-        Filesystem { dry_run }
+        Filesystem { dry_run, keep_links: false }
+    }
+
+    /// See `Options::keep_links`.
+    pub fn keeping_links(mut self, on: bool) -> Filesystem {
+        self.keep_links = on;
+        self
     }
 
     fn stat_sync(&self, u: &Url) -> anyhow::Result<Object> {
@@ -73,7 +80,7 @@ impl Storage for Filesystem {
             }
 
             match this.stat_sync(&src) {
-                Ok(obj) if obj.typ.is_dir() => {
+                Ok(obj) if this.walks(&obj, &src) => {
                     walk_dir(&this, &src, follow_symlinks, &tx);
                 }
                 Ok(obj) => {
@@ -165,10 +172,12 @@ fn expand_glob(f: &Filesystem, src: &Url, follow_symlinks: bool, tx: &mpsc::Send
         fileurl.set_relative(src);
 
         match f.stat_sync(&fileurl) {
-            Ok(obj) if !obj.typ.is_dir() => {
+            Ok(obj) if f.walks(&obj, &fileurl) => {
+                walk_dir(f, &fileurl, follow_symlinks, tx)
+            }
+            Ok(obj) => {
                 let _ = tx.blocking_send(obj);
             }
-            Ok(_) => walk_dir(f, &fileurl, follow_symlinks, tx),
             Err(e) => {
                 let _ = tx.blocking_send(Object::with_error(e));
                 return;
@@ -178,6 +187,20 @@ fn expand_glob(f: &Filesystem, src: &Url, follow_symlinks: bool, tx: &mpsc::Send
 
     if !found {
         let _ = tx.blocking_send(Object::with_error(super::NoMatchFound(src.to_string()).into()));
+    }
+}
+
+impl Filesystem {
+    /// Whether a listed source (from `stat_sync`) is walked: a directory, or a symbolic link to
+    /// one. A link to a directory is walked like the directory, as s5cmd's Stat, which follows
+    /// links, has it; it was sent on as one object, which failed with "Is a directory" (#9).
+    /// `walk_dir` skips the link when links are not followed; with `keep_links` (`--links`) the
+    /// link is sent as itself, to be stored as a link.
+    fn walks(&self, obj: &Object, u: &Url) -> bool {
+        obj.typ.is_dir()
+            || (!self.keep_links
+                && obj.typ == ObjectType::Symlink
+                && fs::metadata(u.absolute()).is_ok_and(|m| m.is_dir()))
     }
 }
 
@@ -336,5 +359,58 @@ mod tests {
         }
         names.sort();
         assert_eq!(names, vec!["a.txt", "b.txt"]);
+    }
+
+    /// s/plain.txt, s/real/r.txt and s/link -> real (#9).
+    #[cfg(unix)]
+    fn tree_with_a_linked_dir() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let s = dir.path().join("s");
+        std::fs::create_dir_all(s.join("real")).unwrap();
+        std::fs::write(s.join("real").join("r.txt"), b"y").unwrap();
+        std::fs::write(s.join("plain.txt"), b"z").unwrap();
+        std::os::unix::fs::symlink("real", s.join("link")).unwrap();
+        dir
+    }
+
+    #[cfg(unix)]
+    async fn relative_names(src: &str, follow_symlinks: bool) -> Vec<String> {
+        relative_names_in(Filesystem::new(false), src, follow_symlinks).await
+    }
+
+    #[cfg(unix)]
+    async fn relative_names_in(fs: Filesystem, src: &str, follow_symlinks: bool) -> Vec<String> {
+        let mut rx = fs.list(&Url::parse(src).unwrap(), follow_symlinks);
+        let mut names = vec![];
+        while let Some(obj) = rx.recv().await {
+            assert!(obj.err.is_none(), "{src}: unexpected err: {:?}", obj.err);
+            names.push(obj.url.unwrap().relative().replace('\\', "/"));
+        }
+        names.sort();
+        names
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_link_to_a_directory_is_walked_like_the_directory() {
+        let dir = tree_with_a_linked_dir();
+        let s = dir.path().join("s");
+        let glob = format!("{}/*", s.display());
+        assert_eq!(
+            relative_names(&glob, true).await,
+            vec!["link/r.txt", "plain.txt", "real/r.txt"]
+        );
+        assert_eq!(relative_names(&glob, false).await, vec!["plain.txt", "real/r.txt"]);
+        let link = s.join("link").display().to_string();
+        assert_eq!(relative_names(&link, true).await, vec!["link/r.txt"]);
+
+        // --links keeps the link as one entry, to be stored as a link.
+        let keeping = || Filesystem::new(false).keeping_links(true);
+        assert_eq!(
+            relative_names_in(keeping(), &glob, true).await,
+            vec!["link", "plain.txt", "real/r.txt"]
+        );
+        // (A source that is not a wildcard has no base: its own path is its relative one.)
+        assert_eq!(relative_names_in(keeping(), &link, true).await, vec![link.clone()]);
     }
 }

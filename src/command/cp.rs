@@ -148,6 +148,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     opts.preserve_timestamps = args.preserve_timestamps;
     opts.client_copy = args.client_copy;
     opts.remove_empty_dirs = args.remove_empty_dirs;
+    opts.keep_links = args.links;
     let op = if is_move { "mv" } else { "cp" };
 
     // The final positional is the destination; everything before it is a source.
