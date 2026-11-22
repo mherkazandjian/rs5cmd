@@ -67,16 +67,6 @@ It replaces the `[default]` section of `~/.aws/credentials`. Use `--profile NAME
 
 ## 2. Fails or misleads
 
-### 2.1 `sync` into a missing or empty local directory
-
-```
-$ rs5cmd sync 's3://bucket/p/*' newdir/
-error: no match found for "newdir/*"
-```
-
-The first download into a new directory must be a `cp`. Once the directory holds at least one
-file, `sync` works. S3 destinations are not affected: syncing to an empty prefix works.
-
 ### 2.2 `--dry-run rm` prints nothing for a remote wildcard or prefix
 
 `rs5cmd --dry-run rm 's3://bucket/tmp/*'` exits 0 without output, and deletes nothing. The same

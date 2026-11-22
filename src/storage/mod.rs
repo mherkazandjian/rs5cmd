@@ -32,6 +32,11 @@ pub struct ObjectNotFound(pub String);
 #[error("no object found")]
 pub struct NoObjectFound;
 
+/// A local wildcard that matched nothing (the local backend's counterpart of `NoObjectFound`).
+#[derive(Debug, thiserror::Error)]
+#[error("no match found for {0:?}")]
+pub struct NoMatchFound(pub String);
+
 /// The kind of a filesystem object.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ObjectType {

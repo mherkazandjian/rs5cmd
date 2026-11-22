@@ -177,10 +177,7 @@ fn expand_glob(f: &Filesystem, src: &Url, follow_symlinks: bool, tx: &mpsc::Send
     }
 
     if !found {
-        let _ = tx.blocking_send(Object::with_error(anyhow::anyhow!(
-            "no match found for {:?}",
-            src.to_string()
-        )));
+        let _ = tx.blocking_send(Object::with_error(super::NoMatchFound(src.to_string()).into()));
     }
 }
 
