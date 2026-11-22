@@ -340,3 +340,39 @@ bench/review/build.sh: line 218: t_c-mem: command not found
 2026-11-22T03:11:02Z f-10 tests ok (226 passed, 0 failed) 
 2026-11-22T03:11:02Z f-10 not built (NO_BUILD)
 2026-11-22T03:16:57Z f-older e86968f fast suite (D1 window): 248 passed, 0 failed
+2026-11-22T03:31:59Z l-p1 rebased onto perf/stage-b: 4634ef3 (1 commits)
+2026-11-22T03:32:09Z l-p1 TESTS FAILED (exit 101; 152 passed, 1 failed): see results/l-p1-tests.log
+2026-11-22T03:32:36Z l-p1 rebased onto perf/stage-b: 5958418 (1 commits)
+2026-11-22T03:32:59Z l-p1 TESTS FAILED (exit 101; 233 passed, 2 failed): see results/l-p1-tests.log
+2026-11-22T03:33:23Z l-p1 rebased onto perf/stage-b: 4039a51 (1 commits)
+2026-11-22T03:33:44Z l-p1 tests ok (235 passed, 0 failed) 
+==> zigbuild l-p1 from /src/wt/l-p1 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  l-p1: 17,005,376 bytes
+==> done: l-p1
+2026-11-22T03:34:58Z l-p1 built /opt/bins/l-p1
+2026-11-22T03:35:41Z l-p2 rebased onto perf/l-p1: 55770c9 (1 commits)
+2026-11-22T03:36:04Z l-p2 tests ok (245 passed, 0 failed) 
+==> zigbuild l-p2 from /src/wt/l-p2 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  l-p2: 17,109,440 bytes
+==> done: l-p2
+2026-11-22T03:37:18Z l-p2 built /opt/bins/l-p2
+2026-11-22T03:40:04Z l-p2 rebased onto perf/l-p1: 8714f5b (1 commits)
+2026-11-22T03:40:14Z l-p2 TESTS FAILED (exit 101; 157 passed, 1 failed): see results/l-p2-tests.log
+2026-11-22T03:40:26Z l-p2 rebased onto perf/l-p1: 1cd67e0 (1 commits)
+2026-11-22T03:40:52Z l-p2 tests ok (245 passed, 0 failed) 
+==> zigbuild l-p2 from /src/wt/l-p2 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  l-p2: 17,111,424 bytes
+==> done: l-p2
+2026-11-22T03:42:06Z l-p2 built /opt/bins/l-p2
+2026-11-22T03:43:14Z l-p3 rebased onto perf/l-p2: 5246f4b (1 commits)
+2026-11-22T03:43:38Z l-p3 TESTS FAILED (exit 101; 240 passed, 1 failed): see results/l-p3-tests.log
+2026-11-22T03:44:05Z l-p3 rebased onto perf/l-p2: 3bc3317 (1 commits)
+2026-11-22T03:44:29Z l-p3 tests ok (250 passed, 0 failed) 
+==> zigbuild l-p3 from /src/wt/l-p3 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  l-p3: 17,159,104 bytes
+==> done: l-p3
+2026-11-22T03:45:43Z l-p3 built /opt/bins/l-p3
