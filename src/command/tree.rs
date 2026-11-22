@@ -82,6 +82,10 @@ impl Node {
 }
 
 pub async fn run(global: &GlobalOpts, args: TreeArgs) -> anyhow::Result<()> {
+    // A tree is a picture of a listing; records for programs come from `ls` (#8).
+    if global.json {
+        anyhow::bail!("tree has no JSON output: use `ls --json` for one record per object");
+    }
     let opts = global.storage_options();
     // The URL shown as the root label and used to build the client.
     let display_url = Url::new(&args.target, crate::storage::url::UrlOptions::default())

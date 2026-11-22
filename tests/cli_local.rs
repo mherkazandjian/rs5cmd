@@ -41,6 +41,19 @@ fn mv_bare_relative_dir_moves_the_files() {
     assert!(!tmp.path().join("data2/b.txt").exists());
 }
 
+/// #8: `tree` refuses --json (before any request) instead of printing a text tree.
+#[test]
+fn tree_refuses_json() {
+    let out = rs5cmd()
+        .args(["--json", "--endpoint-url", "http://127.0.0.1:9", "tree", "s3://bucket/"])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("tree has no JSON output") && stderr.contains("ls --json"), "{stderr}");
+}
+
 #[test]
 fn copying_a_file_onto_itself_fails_and_keeps_it() {
     let tmp = tempfile::tempdir().unwrap();

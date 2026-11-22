@@ -655,6 +655,49 @@ fn json_output_mode() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+/// #8: `pipe` reports its result as s5cmd does, a JSON object with --json; `tree` refuses
+/// --json instead of printing text.
+#[test]
+fn pipe_and_tree_with_json() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    let piped = || assert_cmd::Command::cargo_bin("rs5cmd").unwrap();
+    let out = piped()
+        .args(["--json", "pipe", &s3("/pipe.txt")])
+        .write_stdin("x")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["operation"], "pipe");
+    assert_eq!(v["success"], true);
+    assert_eq!(v["destination"], s3("/pipe.txt"));
+    assert!(v.get("source").is_none(), "{v}");
+
+    piped()
+        .args(["pipe", &s3("/text.txt")])
+        .write_stdin("y")
+        .assert()
+        .success()
+        .stdout(format!("pipe {}\n", s3("/text.txt")));
+
+    rs5cmd()
+        .args(["--json", "tree", &s3("/")])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("ls --json"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
 #[test]
 fn list_objects_v1_fallback() {
     if !endpoint_configured() {
