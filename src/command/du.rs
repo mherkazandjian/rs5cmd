@@ -179,14 +179,31 @@ fn size_json(source: &str, class: Option<&str>, sc: SizeAndCount) -> serde_json:
     v
 }
 
-/// Formats a size in bytes, optionally humanizing it (binary units, matching
-/// `ls`'s convention).
+/// Formats a size in bytes, optionally humanized as s5cmd's `du -H` does it (`humanize_bytes`):
+/// the line already says `bytes`, so the humanized size carries no unit of its own (#12).
 fn humanize_size(size: i64, humanize: bool) -> String {
     if humanize {
-        humansize::format_size(size.max(0) as u64, humansize::BINARY)
+        humanize_bytes(size)
     } else {
         size.to_string()
     }
+}
+
+/// s5cmd's `strutil.HumanizeBytes`: below 1024 the bare number, otherwise one decimal and the
+/// letter of the largest power of 1024 that fits (`1.2K`, `3.0M`, ...).
+fn humanize_bytes(size: i64) -> String {
+    const UNIT: i64 = 1024;
+    if size < UNIT {
+        return size.to_string();
+    }
+    let (mut div, mut exp) = (UNIT, 0);
+    let mut n = size / UNIT;
+    while n >= UNIT {
+        div *= UNIT;
+        exp += 1;
+        n /= UNIT;
+    }
+    format!("{:.1}{}", size as f64 / div as f64, b"KMGTPE"[exp] as char)
 }
 
 /// Builds the summary line for a (source, optional storage class) tuple.
@@ -235,12 +252,32 @@ mod tests {
     }
 
     #[test]
-    fn humanizes_size() {
-        let mut sc = SizeAndCount::default();
-        sc.add(1024);
-        let msg = size_message("s3://b/*", None, sc, true);
-        // humansize BINARY renders 1024 bytes as "1 KiB".
-        assert!(msg.starts_with("1 KiB bytes in 1 objects:"), "{msg}");
+    fn humanizes_size_as_s5cmd_with_the_unit_once() {
+        let line = |n: i64| {
+            let mut sc = SizeAndCount::default();
+            sc.add(n);
+            size_message("s3://b/*", None, sc, true)
+        };
+        assert_eq!(line(6), "6 bytes in 1 objects: s3://b/*");
+        assert_eq!(line(1024), "1.0K bytes in 1 objects: s3://b/*");
+        assert_eq!(line(1260), "1.2K bytes in 1 objects: s3://b/*");
+    }
+
+    #[test]
+    fn humanize_bytes_matches_s5cmd() {
+        for (n, want) in [
+            (0, "0"),
+            (1023, "1023"),
+            (1024, "1.0K"),
+            (1536, "1.5K"),
+            (1024 * 1024 - 1, "1024.0K"),
+            (1024 * 1024, "1.0M"),
+            (5 << 30, "5.0G"),
+            (3 << 40, "3.0T"),
+            (i64::MAX, "8.0E"),
+        ] {
+            assert_eq!(humanize_bytes(n), want, "{n}");
+        }
     }
 
     #[test]

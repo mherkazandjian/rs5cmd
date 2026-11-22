@@ -160,10 +160,6 @@ differ. S3 stores modification times in whole seconds, so a file changed in the 
 was uploaded can be copied again by the next `sync`. This matches s5cmd. Use `--size-only` when
 you need repeat runs to be exact no-ops.
 
-### 2.12 Cosmetic
-
-`du -H` prints the unit twice: `18 B bytes in 3 objects`.
-
 ## 3. Resource use
 
 - **Memory.** The default path streams: uploads over 256 KiB are read in 128 KiB chunks and
