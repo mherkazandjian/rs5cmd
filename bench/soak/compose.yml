@@ -1,0 +1,107 @@
+# Compose project for the soak against real S3 endpoints (bench/soak/README.md).
+# Always through the wrapper, which sets IO_DEVICE and adds the credentials overlay:
+#
+#   bench/soak/dc up -d soak                    # the runner container
+#   bench/soak/dc --profile dry up -d           # plus the MinIO sidecar for the dry run
+#   bench/soak/dc down -v                       # remove containers, network and volumes
+#
+# Never `dc run`: a one-off container would add its memory limit to the project's total.
+#
+# Footprint on a shared host. Every value here is a hard limit of the soak, not a default:
+#   - cpuset 3,11 (one physical core, both hyperthreads) for every container
+#   - memory limits add up to 2 GiB with the tmpfs: soak 1280m (16m tmpfs) + minio 768m
+#   - io.max on the device behind the docker root: 300 MB/s read, 200 MB/s write, 3000 / 2000 IOPS
+#   - no published ports; one bridge of its own (br-rs5cmd-soak), which tc.sh checks before it
+#     shapes the soak container's interfaces to 40 MB/s each way
+#   - nothing is built: the image is the review harness's toolchain image, already on the host,
+#     and the measured binaries are copied from the review's `bins` volume (mounted read-only)
+name: rs5cmd-soak
+
+x-io: &io
+  weight: 100
+  device_read_bps: [{path: "${IO_DEVICE:?run through bench/soak/dc}", rate: "300mb"}]
+  device_write_bps: [{path: "${IO_DEVICE:?run through bench/soak/dc}", rate: "200mb"}]
+  device_read_iops: [{path: "${IO_DEVICE:?run through bench/soak/dc}", rate: 3000}]
+  device_write_iops: [{path: "${IO_DEVICE:?run through bench/soak/dc}", rate: 2000}]
+
+services:
+  # Runner, clients and scratch files. The only container that talks to the real endpoints, and
+  # the only one whose interfaces are shaped.
+  soak:
+    image: "${SOAK_IMAGE:-rs5cmd-optreview-bench}"
+    pull_policy: never
+    init: true
+    cpuset: "3,11"
+    mem_limit: 1280m
+    memswap_limit: 1280m
+    blkio_config: *io
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    environment:
+      HOST_UID: "${HOST_UID:-0}"
+      HOST_GID: "${HOST_GID:-0}"
+      SOAK_CPUS: "3,11"
+      PYTHONDONTWRITEBYTECODE: "1"
+    volumes:
+      - ../..:/src/soak:ro                              # this worktree: the harness, read-only
+      - ./results:/src/soak/bench/soak/results          # the only writable part of it
+      - bins:/opt/bins                                  # the measured binaries (our copy)
+      - review-bins:/opt/review-bins:ro                 # where they are copied from
+      - scratch:/mnt/scratch                            # local test files, on disk
+      - ./.run:/run/soak-host                           # host guard heartbeat, rate requests
+      - type: tmpfs                                     # generated profile files, never on disk
+        target: /run/soak
+        tmpfs:
+          size: 16777216
+          mode: 0700
+    working_dir: /src/soak
+    networks: [net]
+    command: ["sleep", "infinity"]
+
+  # Dry run only: an S3 endpoint inside the same limits. Data on disk (a tmpfs would count
+  # against the 2 GiB).
+  minio:
+    profiles: ["dry"]
+    # RELEASE.2025-09-07, pinned by digest (the review harness's image, already on the host).
+    image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    pull_policy: never
+    command: server /data
+    cpuset: "3,11"
+    mem_limit: 768m
+    memswap_limit: 768m
+    blkio_config: *io
+    environment:
+      # Dry-run credentials of a sidecar with no published port.
+      MINIO_ROOT_USER: soakroot
+      MINIO_ROOT_PASSWORD: soakrootsecret
+      MINIO_API_DELETE_CLEANUP_INTERVAL: 10s
+      # MinIO sizes its request limit from the memory it sees; from 768 MiB it comes out so low
+      # that 256 workers get `429 TooManyRequests`. A fixed limit keeps the dry run about the
+      # harness (S9 tests throttling on purpose, through throttle_proxy.py).
+      MINIO_API_REQUESTS_MAX: "1024"
+      GOMEMLIMIT: 560MiB
+      GOMAXPROCS: "2"
+    volumes:
+      - minio-data:/data
+    networks: [net]
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+networks:
+  net:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: br-rs5cmd-soak
+
+volumes:
+  bins:
+  scratch:
+  minio-data:
+  review-bins:
+    external: true
+    name: "${REVIEW_BINS_VOLUME:-rs5cmd-optreview_bins}"

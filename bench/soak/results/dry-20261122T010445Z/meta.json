@@ -1,0 +1,65 @@
+{
+ "run_id": "dry-20261122T010445Z",
+ "target": "dry",
+ "target_kind": "minio",
+ "scale": "dry",
+ "region_set": true,
+ "addressing": null,
+ "server_version": null,
+ "stage_b": "9693674 2026-11-22T00:14:58Z",
+ "image": "sha256:7e3b13708dd6b96823aade79c7775711b3fa65dc339a8204d614eed869662831",
+ "cpus": "3,11",
+ "cap_bytes_per_s": 40000000,
+ "load_max": 11.0,
+ "bins": {
+  "b-stage": {
+   "sha256": "055b993ae213e7fe10ff077452cf1c2f9386a5f504df70ca7fd5b961b9f014cc",
+   "size": 16943552,
+   "in_manifest": true,
+   "mtime": "2026-11-22T00:16:10Z"
+  },
+  "s5cmd": {
+   "sha256": "672299fea8941281702bd52a4e51c330a4e39c1540f4bdfc3b4e737823ac2878",
+   "size": 17658008,
+   "in_manifest": true,
+   "mtime": "2026-11-19T11:48:31Z"
+  },
+  "launch": {
+   "sha256": "191181576619b8bb97e7fbc4465f031b0e2a9c62c145eb3fe13396a5927565bc",
+   "size": 815456,
+   "in_manifest": false,
+   "mtime": "2026-11-19T11:45:26Z"
+  }
+ },
+ "clients": [
+  {
+   "name": "rs5cmd",
+   "bin": "/opt/bins/b-stage",
+   "kind": "rs5cmd",
+   "sha256": "055b993ae213e7fe10ff077452cf1c2f9386a5f504df70ca7fd5b961b9f014cc",
+   "version": "rs5cmd 0.1.0",
+   "flags": [],
+   "env": []
+  },
+  {
+   "name": "s5cmd",
+   "bin": "/opt/bins/s5cmd",
+   "kind": "s5cmd",
+   "sha256": "672299fea8941281702bd52a4e51c330a4e39c1540f4bdfc3b4e737823ac2878",
+   "version": "v2.3.0-991c9fb",
+   "flags": [],
+   "env": []
+  }
+ ],
+ "started": "2026-11-22T01:04:45Z",
+ "outcome": "finished",
+ "finished": "2026-11-22T01:13:00Z",
+ "seconds": 495,
+ "guard": {
+  "max_conntrack": 126,
+  "load_holds": 0,
+  "load_hold_s": 0,
+  "max_tx_bps": 38356945,
+  "max_rx_bps": 38348908
+ }
+}
