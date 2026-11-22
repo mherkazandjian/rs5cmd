@@ -14,11 +14,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 
-fn endpoint() -> Option<String> {
-    std::env::var("AWS_ENDPOINT_URL")
-        .or_else(|_| std::env::var("S3_ENDPOINT_URL"))
-        .ok()
-}
+mod common;
+use common::endpoint;
 
 fn unique_bucket() -> String {
     let nanos = SystemTime::now()

@@ -106,7 +106,7 @@ ACL, content type and the other copy flags are ignored there.
 | unit tests in `src/**` | always | Pure logic: URL arithmetic, filters, sync strategy, argv rebuild, parsers |
 | `tests/e2e.rs` | endpoint set (else skips) | Most commands against MinIO, through the built binary |
 | `tests/e2e_s3cmd_compat.rs`, `tests/e2e_cp_all_versions.rs` | endpoint set (else skips) | `.s3cfg` handling; `cp --all-versions` |
-| `tests/e2e_region.rs` | **always** | Per-side region and endpoint flags. No skip guard |
+| `tests/e2e_region.rs` | endpoint set (else skips) | Per-side region and endpoint flags |
 | `tests/e2e_fast.rs` | feature `fast`, endpoint set | `cp --fast` round trips |
 | `tests/e2e_mount.rs` | feature `mount`, Linux, endpoint and `/dev/fuse` | FUSE mount |
 
@@ -129,4 +129,3 @@ entry from both files when it is fixed, and add a regression test with the fix.
 | A wildcard source fails on a symlink to a directory | Source expansion in `storage/fs.rs` (`expand_glob`) returns the link as one entry; a directory source walks it |
 | Slow start without a region | `S3::new` uses the SDK region chain, which queries instance metadata before the `us-east-1` fallback |
 | Some global flags are lost inside `run` | `build_argv` in `command/run.rs` forwards a fixed list |
-| `tests/e2e_region.rs` fails outside compose | No endpoint guard at the top of its tests |
