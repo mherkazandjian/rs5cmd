@@ -147,12 +147,6 @@ unknown argument.
 See `fast-path-and-mount.md`. If a flag such as `--storage-class`, `--acl`, `--content-type`,
 `--proxy` or a bandwidth limit matters, do not use `--fast`.
 
-### 2.10 `run` does not inherit every global flag
-
-`--limit-upload`, `--limit-download`, the per-side region and endpoint flags, the dual-stack and
-FIPS flags and `--color` given before `run` are not applied to the lines. Repeat them in each
-line. See `commands.md`.
-
 ### 2.11 `sync` may copy a just-uploaded file once more
 
 The default comparison copies a file when the source is newer than the destination or the sizes

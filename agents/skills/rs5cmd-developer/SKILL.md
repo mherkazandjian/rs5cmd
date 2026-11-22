@@ -151,8 +151,8 @@ nothing somewhere.
    `impl Default`.
 3. Consume it where clients are built (`S3::new`) or where the command runs.
 4. `build_argv` in `src/command/run.rs`, or the flag is lost for every line of a `run` file.
-5. The explicit `GlobalOpts { .. }` literal in the `run.rs` test module, or the tests stop
-   compiling.
+5. The two explicit `GlobalOpts { .. }` literals in the `run.rs` test module, or the tests stop
+   compiling. In `argv_round_trips_every_global_flag` give it a value that is not its default.
 
 Then decide: should `--s3cfg` / `~/.rs5cmd` set it (`apply_translated`), and should the fast
 path (`try_fast_path` in `cp.rs`) honour it?

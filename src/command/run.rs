@@ -108,6 +108,9 @@ async fn run_line(global: &GlobalOpts, line: &str, lineno: usize) -> anyhow::Res
 
 /// Reconstructs argv for one line: program name, the run invocation's global
 /// flags (so each sub-command inherits them, matching s5cmd), then the tokens.
+/// Every `GlobalOpts` field is forwarded except `--s3cfg`, whose values are already in the
+/// others, and `--install-completion`, which exits before `run` (#11); the test
+/// `argv_round_trips_every_global_flag` checks it.
 fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
     let mut argv: Vec<String> = Vec::with_capacity(tokens.len() + 16);
     argv.push("rs5cmd".to_string());
@@ -166,6 +169,36 @@ fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
         argv.push("--limitrate".to_string());
         argv.push(rate.clone());
     }
+    // These were lost for every line (#11).
+    let valued = [
+        ("--limit-upload", &global.limit_upload),
+        ("--limit-download", &global.limit_download),
+        ("--source-region", &global.source_region),
+        ("--destination-region", &global.destination_region),
+        ("--source-endpoint-url", &global.source_endpoint_url),
+        ("--destination-endpoint-url", &global.destination_endpoint_url),
+        ("--credentials-file", &global.credentials_file),
+    ];
+    for (flag, value) in valued {
+        if let Some(v) = value {
+            argv.push(flag.to_string());
+            argv.push(v.clone());
+        }
+    }
+    let switches = [
+        ("--use-dualstack-endpoint", global.use_dualstack_endpoint),
+        ("--use-fips-endpoint", global.use_fips_endpoint),
+        ("--tls-post-quantum", global.tls_post_quantum),
+    ];
+    for (flag, on) in switches {
+        if on {
+            argv.push(flag.to_string());
+        }
+    }
+    if global.color != super::ColorMode::Auto {
+        argv.push("--color".to_string());
+        argv.push(global.color.to_string());
+    }
 
     argv.extend(tokens.iter().cloned());
     argv
@@ -222,6 +255,49 @@ mod tests {
         let nw = argv.iter().position(|a| a == "--numworkers").unwrap();
         assert_eq!(argv[nw + 1], "256");
         assert_eq!(&argv[argv.len() - 2..], &["rm".to_string(), "s3://b/y".to_string()]);
+    }
+
+    /// #11: every global flag given to `run` reaches its lines. The literal names every field
+    /// (a new one does not compile until it is added here); give each a value that is not its
+    /// default, so a field `build_argv` does not forward fails the comparison.
+    #[test]
+    fn argv_round_trips_every_global_flag() {
+        let s = |v: &str| Some(v.to_string());
+        let g = GlobalOpts {
+            endpoint_url: s("http://h:9000"),
+            no_sign_request: true,
+            no_verify_ssl: true,
+            use_list_objects_v1: true,
+            dry_run: true,
+            json: true,
+            region: s("eu-west-1"),
+            source_region: s("eu-west-2"),
+            destination_region: s("eu-west-3"),
+            source_endpoint_url: s("http://src:9000"),
+            destination_endpoint_url: s("http://dst:9000"),
+            profile: s("p"),
+            addressing_style: s("virtual"),
+            use_dualstack_endpoint: true,
+            use_fips_endpoint: true,
+            proxy: s("http://proxy:3128"),
+            numworkers: 7,
+            retry_count: 3,
+            color: crate::command::ColorMode::Never,
+            limit_upload: s("1MB"),
+            limit_download: s("2MB"),
+            limitrate: s("3MB"),
+            ca_certs_file: s("/ca.pem"),
+            tls_post_quantum: true,
+            request_payer: s("requester"),
+            credentials_file: s("/creds"),
+            // Not forwarded: applied to the fields above before the lines run.
+            s3cfg: None,
+            // Not forwarded: exits before `run`.
+            install_completion: false,
+        };
+        let argv = build_argv(&g, &["ls".to_string(), "s3://b/".to_string()]);
+        let cli = <crate::command::Cli as clap::Parser>::try_parse_from(&argv).unwrap();
+        assert_eq!(format!("{:?}", cli.global), format!("{g:?}"));
     }
 
     #[test]
