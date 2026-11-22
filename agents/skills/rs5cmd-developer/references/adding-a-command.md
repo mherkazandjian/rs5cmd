@@ -178,7 +178,7 @@ Trace an existing one first: `grep -rn request_payer src` shows every stop that
 | 3 | `storage::Options` in `src/storage/mod.rs` | The field **and** its line in the manual `impl Default for Options` |
 | 4 | `S3::new` in `src/storage/s3.rs` (or the command) | Use it. A flag that only reaches `Options` does nothing: `--no-sign-request` did nothing until it was read there (#6) |
 | 5 | `build_argv` in `src/command/run.rs` | Forward it, or every line of a `run` file loses it |
-| 6 | `fn opts()` in the `run.rs` test module | Add the field to the explicit `GlobalOpts { .. }` literal, or the unit tests stop compiling. Extend `argv_reconstructs_flags` to cover the new flag |
+| 6 | The `run.rs` test module | Add the field to both explicit `GlobalOpts { .. }` literals, or the unit tests stop compiling: `fn opts()` (its default) and `argv_round_trips_every_global_flag` (a value that is not the default, so the test fails if step 5 is missed) |
 | 7 | `apply_translated` in `src/command/mod.rs`, `Translated` in `src/s3cfg.rs` | Only if `.s3cfg` or `~/.rs5cmd` should be able to set it. Fill the field only when the user left it unset |
 | 8 | `fast_unsupported` / `try_fast_path` in `src/command/cp.rs` | Decide whether `--fast` honours it. If not, add it to `fast_unsupported` and to the user skill's list |
 | 9 | Per-side behaviour | If it is a connection setting, decide whether `Options::for_side` needs a source and a destination variant |

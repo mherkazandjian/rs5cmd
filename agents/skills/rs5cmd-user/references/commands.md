@@ -310,10 +310,8 @@ them.
 - Order is not kept. Do not rely on one line finishing before the next starts.
 - A failing line prints `ERROR <line>: <reason>` to stderr. The others still run, and the exit
   code is 1.
-- These outer flags are passed to every line: `--endpoint-url`, `--region`, `--profile`,
-  `--addressing-style`, `--proxy`, `--no-verify-ssl`, `--no-sign-request`, `--ca-certs-file`,
-  `--request-payer`, `--use-list-objects-v1`, `--numworkers`, `--retry-count`, `--limitrate`,
-  `--dry-run`, `--json`.
+- Every global flag given before `run` is passed to every line, except `--s3cfg` (its settings
+  are already applied to the others) and `--install-completion`.
 - These are **not** passed on: `--limit-upload`, `--limit-download`, `--source-region`,
   `--destination-region`, `--source-endpoint-url`, `--destination-endpoint-url`,
   `--use-dualstack-endpoint`, `--use-fips-endpoint`, `--color`. Write them in each line that

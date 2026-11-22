@@ -124,12 +124,6 @@ unknown argument.
   suffix. A link to a directory is stored as a link when a wildcard matches it or it is the
   source itself; inside a directory source, links to directories are still walked.
 
-### 2.10 `run` does not inherit every global flag
-
-`--limit-upload`, `--limit-download`, the per-side region and endpoint flags, the dual-stack and
-FIPS flags and `--color` given before `run` are not applied to the lines. Repeat them in each
-line. See `commands.md`.
-
 ### 2.11 `sync` may copy a just-uploaded file once more
 
 The default comparison copies a file when the source is newer than the destination or the sizes
