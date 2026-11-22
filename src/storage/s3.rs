@@ -1392,6 +1392,7 @@ impl S3 {
                         .grace_period(std::time::Duration::from_secs(5))
                         .build()
                 }),
+                trailers: opts.checksum_trailers,
             }))
         });
         Ok(S3 {
@@ -1440,6 +1441,13 @@ impl S3 {
                 .cloned(),
             body: out.body,
         })
+    }
+
+    /// The lean client, when `--data-path lean` is on and it serves `bucket`; else the request
+    /// goes through the SDK.
+    pub(crate) async fn lean_for(&self, bucket: &str) -> Option<std::sync::Arc<super::lean::Lean>> {
+        let lean = self.lean.as_ref()?;
+        lean.serves(bucket).await.then(|| std::sync::Arc::clone(lean))
     }
 
     /// HeadObject, on the lean data path when it serves the bucket, else through the SDK.
@@ -1715,6 +1723,17 @@ impl S3 {
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
+        if let Some(lean) = self.lean_for(&dst.bucket).await {
+            let mut headers = object_headers(Some(content_type), metadata, true, false);
+            if metadata.if_none_match {
+                headers.push(("if-none-match".to_string(), "*".to_string()));
+            }
+            return lean
+                .put_object(dst, body.into_inner(), headers)
+                .await
+                .map_err(|e| map_conditional_write_error(e, dst));
+        }
+
         let mut req = self
             .client
             .put_object()
@@ -1742,6 +1761,11 @@ impl S3 {
         metadata: &Metadata,
         size: u64,
     ) -> anyhow::Result<()> {
+        if let Some(lean) = self.lean_for(&dst.bucket).await {
+            return self
+                .upload_multipart_lean(&lean, src, dst, metadata, size)
+                .await;
+        }
         let content_type = metadata
             .content_type
             .clone()
@@ -1819,6 +1843,48 @@ impl S3 {
         }
     }
 
+    /// `upload_multipart` on the lean data path: the same requests, with the same headers.
+    /// File parts are streamed, so they carry a checksum only with `--checksum-trailers`, and the
+    /// upload declares the algorithm only then.
+    async fn upload_multipart_lean(
+        &self,
+        lean: &super::lean::Lean,
+        src: &Path,
+        dst: &Url,
+        metadata: &Metadata,
+        size: u64,
+    ) -> anyhow::Result<()> {
+        let content_type = metadata
+            .content_type
+            .clone()
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let headers = object_headers(Some(content_type), metadata, false, false);
+        let upload_id = lean
+            .create_multipart_upload(dst, headers, lean.trailers())
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("CreateMultipartUpload returned no upload id"))?;
+        match self.upload_parts(src, dst, &upload_id, size).await {
+            Ok(parts) => {
+                let mut headers = Vec::new();
+                if metadata.if_none_match {
+                    headers.push(("if-none-match".to_string(), "*".to_string()));
+                }
+                lean.complete_multipart_upload(dst, &upload_id, &parts, headers)
+                    .await
+                    .map_err(|e| map_conditional_write_error(e, dst))
+            }
+            Err(e) => {
+                if let Err(ae) = lean.abort_multipart_upload(dst, &upload_id).await {
+                    eprintln!(
+                        "warning: could not abort multipart upload {upload_id} of {dst}: {}",
+                        crate::error::format_error(&ae)
+                    );
+                }
+                Err(e)
+            }
+        }
+    }
+
     async fn upload_parts(
         &self,
         src: &Path,
@@ -1827,6 +1893,8 @@ impl S3 {
         size: u64,
     ) -> anyhow::Result<Vec<CompletedPart>> {
         use futures::TryStreamExt;
+        let lean = self.lean_for(&dst.bucket).await;
+        let lean = lean.as_deref();
         let part_size = self.part_size;
         let n_parts = size.div_ceil(part_size) as i32;
         let src = src.to_path_buf();
@@ -1849,6 +1917,11 @@ impl S3 {
                     limiter.acquire(len).await;
                 }
                 let body = super::upload_body::file_range(&src, offset, len);
+                if let Some(lean) = lean {
+                    return lean
+                        .upload_part(dst, &upload_id, part_number, body.into_inner())
+                        .await;
+                }
                 let resp = client
                     .upload_part()
                     .bucket(bucket)
@@ -2395,6 +2468,12 @@ impl S3 {
     /// symlink round-trip to store a small placeholder object whose body is the
     /// link target string. (#785)
     pub async fn put_object_bytes(&self, dst: &Url, body: Vec<u8>) -> anyhow::Result<()> {
+        if let Some(lean) = self.lean_for(&dst.bucket).await {
+            return lean
+                .put_object(dst, aws_smithy_types::body::SdkBody::from(body), Vec::new())
+                .await
+                .map_err(|e| anyhow::anyhow!("put object s3://{}/{}: {e}", dst.bucket, dst.path));
+        }
         self.client
             .put_object()
             .bucket(&dst.bucket)
@@ -2868,6 +2947,45 @@ fn set_file_mtime_from_value(path: &Path, value: &str) -> anyhow::Result<()> {
     let ft = filetime::FileTime::from_unix_time(secs, nanos);
     filetime::set_file_mtime(path, ft)?;
     Ok(())
+}
+
+/// What an upload's SDK request sets from `metadata`, as headers for the lean data path: the
+/// content type, storage class, ACL and user metadata; with `details`, cache control, content
+/// encoding and disposition; with `sse`, server-side encryption. Each caller asks for the set its
+/// SDK request sets.
+pub(crate) fn object_headers(
+    content_type: Option<String>,
+    metadata: &Metadata,
+    details: bool,
+    sse: bool,
+) -> Vec<(String, String)> {
+    let mut h = Vec::new();
+    if let Some(ct) = content_type {
+        h.push(("content-type".to_string(), ct));
+    }
+    let mut set = |name: &str, value: &Option<String>| {
+        if let Some(v) = value.as_ref().filter(|v| !v.is_empty()) {
+            h.push((name.to_string(), v.clone()));
+        }
+    };
+    set("x-amz-storage-class", &metadata.storage_class);
+    set("x-amz-acl", &metadata.acl);
+    if details {
+        set("cache-control", &metadata.cache_control);
+        set("content-encoding", &metadata.content_encoding);
+        set("content-disposition", &metadata.content_disposition);
+    }
+    if sse {
+        set("x-amz-server-side-encryption", &metadata.encryption_method);
+        set(
+            "x-amz-server-side-encryption-aws-kms-key-id",
+            &metadata.encryption_key_id,
+        );
+    }
+    for (k, v) in &metadata.user_defined {
+        h.push((format!("x-amz-meta-{k}"), v.clone()));
+    }
+    h
 }
 
 fn apply_put_metadata(

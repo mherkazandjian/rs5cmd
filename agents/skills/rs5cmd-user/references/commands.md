@@ -51,7 +51,8 @@ Accepted before or after the command name.
 | `--limit-upload RATE`, `--limit-download RATE` | Bandwidth cap in bytes per second: `512KB`, `100MB`, `1GB`. One budget shared by all workers of a command |
 | `--limitrate RATE` | Caps both directions; the two flags above override it per direction |
 | `--use-list-objects-v1` | Use ListObjects v1 (for providers without v2) |
-| `--data-path sdk\|lean` | Who sends object requests on the default engine. `sdk` (default): the AWS SDK. `lean`: rs5cmd itself, on the same connections, credentials, endpoint rules and retries, with less CPU per request; it covers downloads, `cat` and object metadata so far. Opt-in while it is being tested. Env: `RS5CMD_DATA_PATH` |
+| `--data-path sdk\|lean` | Who sends object requests on the default engine. `sdk` (default): the AWS SDK. `lean`: rs5cmd itself, on the same connections, credentials, endpoint rules and retries, with less CPU per request; it covers downloads, uploads (`cp`, `sync`, `pipe`), `cat` and object metadata so far. Its uploads carry a CRC32C checksum that S3 verifies and stores: in a header when the body is in memory (files up to 256 KiB, `pipe` parts). Opt-in while it is being tested. Env: `RS5CMD_DATA_PATH` |
+| `--checksum-trailers` | With `--data-path lean`: larger files and their multipart parts, which are streamed, carry the CRC32C too, as an aws-chunked trailer. Some S3-compatible servers refuse aws-chunked bodies, so it is off by default. No effect on the SDK path |
 | `--dry-run` | Print what would be done; change nothing |
 | `--json` | One JSON object per line on stdout |
 | `--color auto\|always\|never` | Default `auto`: colour only on a terminal, off when `NO_COLOR` is set or with `--json` |
