@@ -166,6 +166,9 @@ fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
         argv.push("--limitrate".to_string());
         argv.push(rate.clone());
     }
+    if global.checksum_trailers {
+        argv.push("--checksum-trailers".to_string());
+    }
     if global.data_path != super::DataPath::Sdk {
         argv.push("--data-path".to_string());
         argv.push(global.data_path.to_string());
@@ -213,6 +216,7 @@ mod tests {
             ca_certs_file: None,
             tls_post_quantum: false,
             data_path: crate::command::DataPath::Sdk,
+            checksum_trailers: false,
             request_payer: None,
             credentials_file: None,
             s3cfg: None,
@@ -244,5 +248,9 @@ mod tests {
         let argv = build_argv(&g, &["ls".to_string()]);
         let i = argv.iter().position(|a| a == "--data-path").unwrap();
         assert_eq!(argv[i + 1], "lean");
+        assert!(!argv.iter().any(|a| a == "--checksum-trailers"));
+        g.checksum_trailers = true;
+        let argv = build_argv(&g, &["ls".to_string()]);
+        assert!(argv.iter().any(|a| a == "--checksum-trailers"));
     }
 }

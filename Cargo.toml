@@ -47,6 +47,8 @@ aws-types = "1"
 # The SDK's stalled-stream body for lean downloads; both already built with these features.
 aws-smithy-runtime = { version = "1", default-features = false, features = ["client"] }
 aws-smithy-async = { version = "1", features = ["rt-tokio"] }
+# CRC32C of lean uploads (D6): the SDK's own CRC crate, so nothing new is compiled.
+crc-fast = "1.9"
 fastrand = "2"
 
 # rs5cmd's HTTP client for S3 (src/storage/s3.rs `build_http_client`): hyper + hyper-rustls,

@@ -64,8 +64,9 @@ pub struct GlobalOpts {
 
     /// How object requests are sent on the default engine: `sdk`, through the AWS SDK (the
     /// default), or `lean`, by rs5cmd itself on the SDK's connections, credentials and endpoint
-    /// rules, which costs less CPU per request. `lean` covers downloads, `cat` and object
-    /// metadata so far; the rest goes through the SDK either way. `--fast` is separate.
+    /// rules, which costs less CPU per request. `lean` covers downloads, uploads (`cp`, `sync`,
+    /// `pipe`), `cat` and object metadata so far; the rest goes through the SDK either way. Its
+    /// uploads carry a CRC32C checksum (see `--checksum-trailers`). `--fast` is separate.
     #[arg(
         long,
         global = true,
@@ -74,6 +75,13 @@ pub struct GlobalOpts {
         env = "RS5CMD_DATA_PATH"
     )]
     pub data_path: DataPath,
+
+    /// With `--data-path lean`: streamed uploads (files over 256 KiB, multipart parts of files)
+    /// carry a CRC32C checksum too, as an aws-chunked trailer, as in-memory ones carry it in a
+    /// header. Some S3-compatible servers refuse aws-chunked bodies. No effect on the SDK path,
+    /// which sends no checksums.
+    #[arg(long, global = true)]
+    pub checksum_trailers: bool,
 
     /// Print what would be done without actually doing it.
     #[arg(long, global = true)]
@@ -269,6 +277,7 @@ impl GlobalOpts {
             upload_limiter,
             download_limiter,
             lean: self.data_path == DataPath::Lean,
+            checksum_trailers: self.checksum_trailers,
             ..Default::default()
         }
     }

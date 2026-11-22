@@ -227,6 +227,8 @@ pub struct Options {
     /// `--data-path lean`: S3 clients send the object requests the lean path covers themselves
     /// (`lean.rs`).
     pub lean: bool,
+    /// `--checksum-trailers`: lean streamed uploads carry a CRC32C trailer.
+    pub checksum_trailers: bool,
 }
 
 /// Default multipart part size (bytes): 50 MiB, s5cmd's `--part-size` default (`cp`, `mv`,
@@ -264,6 +266,7 @@ impl Default for Options {
             upload_limiter: None,
             download_limiter: None,
             lean: false,
+            checksum_trailers: false,
         }
     }
 }

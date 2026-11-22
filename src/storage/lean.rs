@@ -21,7 +21,17 @@
 //! Requests are signed with SigV4 through `aws-sigv4` (as the SDK, with S3's settings: single
 //! URI encoding, no path normalisation, `x-amz-content-sha256`).
 //!
-//! Phase 1: GetObject (whole and ranged) and HeadObject.
+//! Uploads carry a CRC32C (D6): a header for an in-memory body (files up to 256 KiB, `pipe`'s
+//! parts), and, with `--checksum-trailers`, an aws-chunked trailer for a streamed one (larger
+//! files and their parts); some S3-compatible servers refuse aws-chunked bodies, so it is opt-in.
+//! The SDK path sends none. Payloads are signed as the SDK signs them: the hash of an in-memory
+//! body, UNSIGNED-PAYLOAD for a streamed one.
+//!
+//! Not yet the SDK's: its upload stall check (`UploadThroughput`, crate-private), which fails an
+//! upload whose server stops reading for longer than the grace period. A lean upload waits.
+//!
+//! Phase 1: GetObject (whole and ranged) and HeadObject. Phase 2: PutObject and multipart
+//! uploads (Create, UploadPart, Complete, Abort).
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -31,11 +41,18 @@ use aws_credential_types::provider::error::CredentialsError;
 use aws_credential_types::provider::{ProvideCredentials, SharedCredentialsProvider};
 use aws_credential_types::Credentials;
 use aws_sdk_s3::config::endpoint::{DefaultResolver, Params, ResolveEndpoint};
+use aws_sdk_s3::operation::abort_multipart_upload::AbortMultipartUploadError;
+use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
+use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
+use aws_sdk_s3::operation::put_object::PutObjectError;
+use aws_sdk_s3::operation::upload_part::UploadPartError;
+use aws_sdk_s3::types::CompletedPart;
 use aws_smithy_async::rt::sleep::TokioSleep;
 use aws_smithy_async::time::SystemTimeSource;
 use aws_smithy_runtime::client::http::body::minimum_throughput::MinimumThroughputDownloadBody;
+use aws_smithy_runtime_api::box_error::BoxError;
 use aws_smithy_runtime_api::client::http::{HttpConnector, SharedHttpConnector};
 use aws_smithy_runtime_api::client::orchestrator::{HttpRequest, HttpResponse};
 use aws_smithy_runtime_api::client::result::{ConnectorError, SdkError};
@@ -213,6 +230,8 @@ pub(crate) struct LeanConfig {
     pub request_payer: Option<String>,
     /// The SDK client's stalled-stream protection (its default: on, 5 s grace period).
     pub stalled_stream: StalledStreamProtectionConfig,
+    /// `--checksum-trailers`: streamed uploads carry a CRC32C too, as an aws-chunked trailer.
+    pub trailers: bool,
 }
 
 pub(crate) struct Lean {
@@ -224,12 +243,64 @@ pub(crate) struct Lean {
 
 /// What a request that did not succeed ended with, after its retries.
 enum Failure {
-    /// The service answered with an error status; its body has been read.
+    /// The service answered with an error: an error status, or a success carrying an `<Error>`
+    /// document. Its body has been read.
     Status(HttpResponse, bytes::Bytes),
     Connector(ConnectorError),
     Credentials(CredentialsError),
     /// The request could not be built or signed.
     Build(anyhow::Error),
+}
+
+/// One lean request: what it sends besides the signature, the date and the fixed headers.
+struct Request<'a> {
+    method: &'static str,
+    key: &'a str,
+    /// In order; an empty value is sent as the bare name (`?uploads`).
+    query: Vec<(&'static str, String)>,
+    headers: Vec<(String, String)>,
+    /// Rebuilt for each attempt when it can be (`SdkBody::try_clone`). A body that cannot be is
+    /// sent once, without retries, as the SDK does.
+    body: SdkBody,
+    /// Send the body's CRC32C as an aws-chunked trailer (a streamed body; an in-memory one gets
+    /// it as a header, `checksum_header`).
+    trailer: bool,
+    /// Read the response whole: a success carrying an `<Error>` document is an error, as the SDK
+    /// decides for the operations without a streamed response.
+    buffered: bool,
+}
+
+impl<'a> Request<'a> {
+    fn new(method: &'static str, key: &'a str) -> Request<'a> {
+        Request {
+            method,
+            key,
+            query: Vec::new(),
+            headers: Vec::new(),
+            body: SdkBody::empty(),
+            trailer: false,
+            buffered: true,
+        }
+    }
+
+    fn version(mut self, src: &Url) -> Self {
+        if !src.version_id.is_empty() {
+            self.query.push(("versionId", src.version_id.clone()));
+        }
+        self
+    }
+
+    /// The body, with its CRC32C: as a header when it is in memory (returned), else as a trailer
+    /// when `trailers` (`--checksum-trailers`), else none.
+    fn checksummed(mut self, body: SdkBody, trailers: bool) -> (Self, Option<String>) {
+        let header = body.bytes().map(crc32c);
+        match &header {
+            Some(v) => self.headers.push((CHECKSUM_HEADER.to_string(), v.clone())),
+            None => self.trailer = trailers,
+        }
+        self.body = body;
+        (self, header)
+    }
 }
 
 impl Lean {
@@ -240,6 +311,18 @@ impl Lean {
         }
     }
 
+    /// Whether this client sends `bucket`'s requests itself (see `resolve`). When it does not,
+    /// the caller sends them through the SDK.
+    pub(crate) async fn serves(&self, bucket: &str) -> bool {
+        self.resolve(bucket).await.is_some()
+    }
+
+    /// Whether uploads that carry a checksum include the streamed ones (`--checksum-trailers`):
+    /// a multipart upload declares the algorithm only when every part will carry one.
+    pub(crate) fn trailers(&self) -> bool {
+        self.c.trailers
+    }
+
     /// GetObject, whole or with a `Range` header value. `None` when the bucket is not on the lean
     /// path: the caller sends the request through the SDK.
     pub(crate) async fn get_object(
@@ -248,12 +331,15 @@ impl Lean {
         range: Option<&str>,
     ) -> Option<anyhow::Result<HttpResponse>> {
         let r = self.resolve(&src.bucket).await?;
-        let headers: Vec<(&'static str, String)> =
-            range.map(|v| ("range", v.to_string())).into_iter().collect();
+        let mut req = Request::new("GET", &src.path).version(src);
+        req.buffered = false;
+        if let Some(v) = range {
+            req.headers.push(("range".to_string(), v.to_string()));
+        }
         Some(
-            self.send("GET", &r, src, &headers)
+            self.send(req, &r)
                 .await
-                .map(|resp| self.guard_download(resp))
+                .map(|(resp, _)| self.guard_download(resp))
                 .map_err(|f| into_error(f, get_object_error)),
         )
     }
@@ -280,11 +366,127 @@ impl Lean {
     /// HeadObject. `None` as for `get_object`.
     pub(crate) async fn head_object(&self, src: &Url) -> Option<anyhow::Result<HttpResponse>> {
         let r = self.resolve(&src.bucket).await?;
+        let mut req = Request::new("HEAD", &src.path).version(src);
+        req.buffered = false;
         Some(
-            self.send("HEAD", &r, src, &[])
+            self.send(req, &r)
                 .await
+                .map(|(resp, _)| resp)
                 .map_err(|f| into_error(f, head_object_error)),
         )
+    }
+
+    /// PutObject of `body` with the object's `headers` (content type, metadata, conditions), and
+    /// its CRC32C (`Request::checksummed`).
+    pub(crate) async fn put_object(
+        &self,
+        dst: &Url,
+        body: SdkBody,
+        headers: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        let mut req = Request::new("PUT", &dst.path);
+        req.headers = headers;
+        let (req, _) = req.checksummed(body, self.c.trailers);
+        self.call(&dst.bucket, req, put_object_error).await.map(drop)
+    }
+
+    /// CreateMultipartUpload; the upload id, if the response has one. `checksummed_parts`: every
+    /// part will carry a CRC32C, so the upload declares the algorithm (S3 then requires one with
+    /// each part and in CompleteMultipartUpload).
+    pub(crate) async fn create_multipart_upload(
+        &self,
+        dst: &Url,
+        headers: Vec<(String, String)>,
+        checksummed_parts: bool,
+    ) -> anyhow::Result<Option<String>> {
+        let mut req = Request::new("POST", &dst.path);
+        req.query.push(("uploads", String::new()));
+        req.headers = headers;
+        if checksummed_parts {
+            req.headers
+                .push(("x-amz-checksum-algorithm".to_string(), "CRC32C".to_string()));
+        }
+        let (_, body) = self.call(&dst.bucket, req, create_multipart_upload_error).await?;
+        Ok(xml_text(&body, "UploadId"))
+    }
+
+    /// UploadPart; the part as CompleteMultipartUpload lists it (its ETag and, when it carried
+    /// one, its CRC32C).
+    pub(crate) async fn upload_part(
+        &self,
+        dst: &Url,
+        upload_id: &str,
+        part_number: i32,
+        body: SdkBody,
+    ) -> anyhow::Result<CompletedPart> {
+        let mut req = Request::new("PUT", &dst.path);
+        req.query.push(("partNumber", part_number.to_string()));
+        req.query.push(("uploadId", upload_id.to_string()));
+        let (req, sent) = req.checksummed(body, self.c.trailers);
+        let checksummed = sent.is_some() || req.trailer;
+        let (resp, _) = self.call(&dst.bucket, req, upload_part_error).await?;
+        let h = resp.headers();
+        // The stored part's checksum, read from the response as the SDK path reads it (for a
+        // header it is the value sent); none for a part sent without one.
+        let crc = h
+            .get(CHECKSUM_HEADER)
+            .map(str::to_owned)
+            .or(sent)
+            .filter(|_| checksummed);
+        Ok(CompletedPart::builder()
+            .part_number(part_number)
+            .set_e_tag(h.get("etag").map(str::to_owned))
+            .set_checksum_crc32_c(crc)
+            .build())
+    }
+
+    /// CompleteMultipartUpload of `parts` (in part-number order), with `headers` (conditions).
+    pub(crate) async fn complete_multipart_upload(
+        &self,
+        dst: &Url,
+        upload_id: &str,
+        parts: &[CompletedPart],
+        headers: Vec<(String, String)>,
+    ) -> anyhow::Result<()> {
+        let mut req = Request::new("POST", &dst.path);
+        req.query.push(("uploadId", upload_id.to_string()));
+        req.headers = headers;
+        req.headers
+            .push(("content-type".to_string(), "application/xml".to_string()));
+        req.body = SdkBody::from(complete_body(parts));
+        self.call(&dst.bucket, req, complete_multipart_upload_error)
+            .await
+            .map(drop)
+    }
+
+    /// AbortMultipartUpload.
+    pub(crate) async fn abort_multipart_upload(
+        &self,
+        dst: &Url,
+        upload_id: &str,
+    ) -> anyhow::Result<()> {
+        let mut req = Request::new("DELETE", &dst.path);
+        req.query.push(("uploadId", upload_id.to_string()));
+        self.call(&dst.bucket, req, abort_multipart_upload_error)
+            .await
+            .map(drop)
+    }
+
+    /// Sends `req` to `bucket` (which `serves` confirmed) and returns the response and, for a
+    /// buffered one, its body; or the error the SDK returns for the same outcome.
+    async fn call<E>(
+        &self,
+        bucket: &str,
+        req: Request<'_>,
+        op_error: impl FnOnce(&HttpResponse, &[u8]) -> E,
+    ) -> anyhow::Result<(HttpResponse, bytes::Bytes)>
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        let Some(r) = self.resolve(bucket).await else {
+            anyhow::bail!("s3://{bucket}: not on the lean data path");
+        };
+        self.send(req, &r).await.map_err(|f| into_error(f, op_error))
     }
 
     async fn resolve(&self, bucket: &str) -> Option<Arc<Resolved>> {
@@ -331,39 +533,37 @@ impl Lean {
     }
 
     /// Sends the request (built anew for each attempt: a new date and signature) with the SDK's
-    /// standard retries, and returns the response if its status is a success.
+    /// standard retries, and returns the response, with its body when `buffered`, if it succeeded.
     async fn send(
         &self,
-        method: &str,
+        mut req: Request<'_>,
         r: &Resolved,
-        src: &Url,
-        headers: &[(&'static str, String)],
-    ) -> Result<HttpResponse, Failure> {
+    ) -> Result<(HttpResponse, bytes::Bytes), Failure> {
+        let mut template = Some(std::mem::replace(&mut req.body, SdkBody::taken()));
         let mut attempt = 1u32;
         let mut permit: Option<tokio::sync::SemaphorePermit<'static>> = None;
         loop {
             let creds = self.c.credentials.get().await.map_err(Failure::Credentials)?;
-            let req = self
-                .request(method, r, src, headers, creds.as_ref())
+            // A body that can be rebuilt stays the template for the next attempt; one that cannot
+            // is sent as it is, once.
+            let (body, retryable) = match template.as_ref().and_then(SdkBody::try_clone) {
+                Some(b) => (b, true),
+                None => (template.take().unwrap_or_else(SdkBody::taken), false),
+            };
+            let http_req = self
+                .request(r, &req, body, creds.as_ref())
                 .map_err(Failure::Build)?;
-            let (kind, retry_after, failure) = match self.c.connector.call(req).await {
-                Ok(resp) if resp.status().is_success() => {
+            let (kind, retry_after, failure) = match self.c.connector.call(http_req).await {
+                Ok(resp) if resp.status().is_success() && !req.buffered => {
                     reward_success(permit);
-                    return Ok(resp);
+                    return Ok((resp, bytes::Bytes::new()));
                 }
                 Ok(mut resp) => match read_body(&mut resp).await {
-                    Ok(body) => {
-                        let code = parse_error(&body).ok().and_then(|p| p.code);
-                        let kind = classify_status(resp.status().as_u16(), code.as_deref());
-                        // x-amz-retry-after (milliseconds) counts only with a code-based class.
-                        let retry_after = code
-                            .as_deref()
-                            .filter(|c| THROTTLING_CODES.contains(c) || TRANSIENT_CODES.contains(c))
-                            .and_then(|_| resp.headers().get("x-amz-retry-after"))
-                            .and_then(|v| v.parse::<u64>().ok())
-                            .map(Duration::from_millis);
-                        (kind, retry_after, Failure::Status(resp, body))
+                    Ok(body) if resp.status().is_success() && !body_is_error(&body) => {
+                        reward_success(permit);
+                        return Ok((resp, body));
                     }
+                    Ok(body) => judge(resp, body),
                     Err(e) => (classify_connector(&e), None, Failure::Connector(e)),
                 },
                 Err(e) => (classify_connector(&e), None, Failure::Connector(e)),
@@ -371,7 +571,7 @@ impl Lean {
             let Some(kind) = kind else {
                 return Err(failure);
             };
-            if attempt >= self.c.max_attempts {
+            if attempt >= self.c.max_attempts || !retryable {
                 return Err(failure);
             }
             let delay = retry_after.map_or_else(|| backoff(attempt), |d| d.min(MAX_BACKOFF));
@@ -396,16 +596,19 @@ impl Lean {
 
     fn request(
         &self,
-        method: &str,
         r: &Resolved,
-        src: &Url,
-        headers: &[(&'static str, String)],
+        req: &Request<'_>,
+        body: SdkBody,
         creds: Option<&Credentials>,
     ) -> anyhow::Result<HttpRequest> {
-        let mut uri = format!("{}/{}", r.base, encode(&src.path, true));
-        if !src.version_id.is_empty() {
-            uri.push_str("?versionId=");
-            uri.push_str(&encode(&src.version_id, false));
+        let mut uri = format!("{}/{}", r.base, encode(req.key, true));
+        for (i, (k, v)) in req.query.iter().enumerate() {
+            uri.push(if i == 0 { '?' } else { '&' });
+            uri.push_str(k);
+            if !v.is_empty() {
+                uri.push('=');
+                uri.push_str(&encode(v, false));
+            }
         }
         let uri: http::Uri = uri.parse()?;
         let host = uri
@@ -413,21 +616,268 @@ impl Lean {
             .map(|a| a.as_str().to_string())
             .ok_or_else(|| anyhow::anyhow!("endpoint without a host: {uri}"))?;
         let mut b = http::Request::builder()
-            .method(method)
+            .method(req.method)
             .uri(uri)
             .header("host", host)
             .header("user-agent", USER_AGENT);
-        for (k, v) in headers {
-            b = b.header(*k, v);
+        let mut content_encoding = None;
+        for (k, v) in &req.headers {
+            if req.trailer && k == "content-encoding" {
+                content_encoding = Some(v.as_str());
+                continue;
+            }
+            b = b.header(k.as_str(), v.as_str());
         }
         if let Some(p) = &self.c.request_payer {
             b = b.header("x-amz-request-payer", p);
         }
-        let mut req = b.body(SdkBody::empty())?;
+        let body = if req.trailer {
+            let len = body
+                .content_length()
+                .ok_or_else(|| anyhow::anyhow!("a streamed upload body without a length"))?;
+            // An object's own content encoding comes after aws-chunked.
+            let encoding = match content_encoding {
+                Some(e) => format!("aws-chunked,{e}"),
+                None => "aws-chunked".to_string(),
+            };
+            b = b
+                .header("content-encoding", encoding)
+                .header("x-amz-decoded-content-length", len)
+                .header("x-amz-trailer", CHECKSUM_HEADER)
+                .header("content-length", aws_chunked_len(len));
+            if creds.is_none() {
+                b = b.header("x-amz-content-sha256", STREAMING_TRAILER);
+            }
+            aws_chunked(body, len)
+        } else {
+            // A request with a payload says its length (the SDK's serializers); a GET or HEAD
+            // says nothing.
+            let len = body
+                .content_length()
+                .filter(|&n| n > 0 || req.method == "PUT" || req.method == "POST");
+            if let Some(n) = len {
+                b = b.header("content-length", n);
+            }
+            body
+        };
+        let mut http_req = b.body(body)?;
         if let Some(creds) = creds {
-            sign(&mut req, creds, r)?;
+            sign(&mut http_req, creds, r, req.trailer)?;
         }
-        Ok(HttpRequest::try_from(req)?)
+        Ok(HttpRequest::try_from(http_req)?)
+    }
+}
+
+/// An error response, or a success carrying an `<Error>` document: whether it is retried, and
+/// after how long if the service says (`x-amz-retry-after`, milliseconds, counted only with a
+/// code-based class).
+fn judge(resp: HttpResponse, body: bytes::Bytes) -> (Option<ErrorKind>, Option<Duration>, Failure) {
+    let code = parse_error(&body).ok().and_then(|p| p.code);
+    let kind = classify_status(resp.status().as_u16(), code.as_deref());
+    let retry_after = code
+        .as_deref()
+        .filter(|c| THROTTLING_CODES.contains(c) || TRANSIENT_CODES.contains(c))
+        .and_then(|_| resp.headers().get("x-amz-retry-after"))
+        .and_then(|v| v.parse::<u64>().ok())
+        .map(Duration::from_millis);
+    (kind, retry_after, Failure::Status(resp, body))
+}
+
+/// Whether a body is an S3 error document (`rest_xml_unwrapped_errors::body_is_error`).
+fn body_is_error(body: &[u8]) -> bool {
+    let Ok(mut doc) = aws_smithy_xml::decode::Document::try_from(body) else {
+        return false;
+    };
+    doc.root_element()
+        .is_ok_and(|root| root.start_el().matches("Error"))
+}
+
+/// The text of `root`'s first child element `name`.
+fn xml_text(body: &[u8], name: &str) -> Option<String> {
+    use aws_smithy_xml::decode::{try_data, Document as Xml};
+    let mut doc = Xml::try_from(body).ok()?;
+    let mut root = doc.root_element().ok()?;
+    while let Some(mut tag) = root.next_tag() {
+        if tag.start_el().local() == name {
+            return try_data(&mut tag).ok().map(|d| d.to_string());
+        }
+    }
+    None
+}
+
+/// CompleteMultipartUpload's body: the parts, each with its checksum, ETag and number.
+fn complete_body(parts: &[CompletedPart]) -> String {
+    let mut out =
+        String::from("<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
+    for p in parts {
+        out.push_str("<Part>");
+        if let Some(c) = p.checksum_crc32_c() {
+            xml_element(&mut out, "ChecksumCRC32C", c);
+        }
+        if let Some(e) = p.e_tag() {
+            xml_element(&mut out, "ETag", e);
+        }
+        if let Some(n) = p.part_number() {
+            xml_element(&mut out, "PartNumber", &n.to_string());
+        }
+        out.push_str("</Part>");
+    }
+    out.push_str("</CompleteMultipartUpload>");
+    out
+}
+
+fn xml_element(out: &mut String, name: &str, text: &str) {
+    out.push('<');
+    out.push_str(name);
+    out.push('>');
+    for c in text.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&apos;"),
+            c => out.push(c),
+        }
+    }
+    out.push_str("</");
+    out.push_str(name);
+    out.push('>');
+}
+
+// --- Checksums: CRC32C (D6), a header for in-memory bodies, an aws-chunked trailer for streamed
+// ones ---
+
+const CHECKSUM_HEADER: &str = "x-amz-checksum-crc32c";
+const STREAMING_TRAILER: &str = "STREAMING-UNSIGNED-PAYLOAD-TRAILER";
+
+/// The `x-amz-checksum-crc32c` value of `data`: its CRC32C, big-endian, in base64.
+fn crc32c(data: &[u8]) -> String {
+    crc32c_value(crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32)
+}
+
+fn crc32c_value(crc: u32) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(crc.to_be_bytes())
+}
+
+/// The SDK's aws-chunked chunk size (aws-runtime's `DEFAULT_CHUNK_SIZE_BYTE`). Servers cap it:
+/// MinIO refuses chunks over 16 MiB, so a body cannot go as one chunk.
+const AWS_CHUNK: u64 = 64 * 1024;
+
+/// The length of `len` bytes framed by `aws_chunked`, as the SDK counts it: each chunk's size line,
+/// data and CRLF, the last (empty) chunk, the trailer (its value always 8 base64 characters) and
+/// the closing CRLF.
+fn aws_chunked_len(len: u64) -> u64 {
+    let chunk = |n: u64| format!("{n:X}").len() as u64 + 2 + n + 2;
+    let (full, rest) = (len / AWS_CHUNK, len % AWS_CHUNK);
+    full * chunk(AWS_CHUNK)
+        + if rest > 0 { chunk(rest) } else { 0 }
+        + 3
+        + (CHECKSUM_HEADER.len() as u64 + 1 + 8 + 2)
+        + 2
+}
+
+/// `body` (`len` bytes) in aws-chunked framing with its CRC32C trailer, byte for byte as the SDK
+/// frames it: chunks of 64 KiB and a shorter last one. The body's own frames pass through
+/// uncopied (split where a chunk ends) between the size lines, the CRC is computed as they go.
+fn aws_chunked(body: SdkBody, len: u64) -> SdkBody {
+    SdkBody::from_body_1_x(AwsChunked {
+        inner: body,
+        digest: crc_fast::Digest::new(crc_fast::CrcAlgorithm::Crc32Iscsi),
+        left: len,
+        chunk_left: 0,
+        pending: None,
+        out: std::collections::VecDeque::with_capacity(3),
+        len: aws_chunked_len(len),
+        done: false,
+    })
+}
+
+struct AwsChunked {
+    inner: SdkBody,
+    digest: crc_fast::Digest,
+    /// Body bytes not yet passed on.
+    left: u64,
+    /// Bytes of the current chunk not yet passed on (0: between chunks).
+    chunk_left: u64,
+    /// The part of a body frame beyond the chunk that ended inside it.
+    pending: Option<bytes::Bytes>,
+    /// Frames ready to go: size lines, data, CRLFs, the trailer.
+    out: std::collections::VecDeque<bytes::Bytes>,
+    len: u64,
+    done: bool,
+}
+
+impl http_body::Body for AwsChunked {
+    type Data = bytes::Bytes;
+    type Error = aws_smithy_types::body::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        loop {
+            if let Some(f) = this.out.pop_front() {
+                return Poll::Ready(Some(Ok(http_body::Frame::data(f))));
+            }
+            if this.done {
+                return Poll::Ready(None);
+            }
+            let mut data = match this.pending.take() {
+                Some(d) => d,
+                None => {
+                    let next = http_body::Body::poll_frame(std::pin::Pin::new(&mut this.inner), cx);
+                    match std::task::ready!(next) {
+                        // A file body has no trailers of its own.
+                        Some(Ok(frame)) => match frame.into_data() {
+                            Ok(d) if !d.is_empty() => d,
+                            _ => continue,
+                        },
+                        Some(Err(e)) => return Poll::Ready(Some(Err(e))),
+                        None if this.left > 0 => {
+                            let e = format!("body ended {} bytes short of its length", this.left);
+                            return Poll::Ready(Some(Err(e.into())));
+                        }
+                        None => {
+                            this.done = true;
+                            let crc = crc32c_value(this.digest.finalize() as u32);
+                            let tail = format!("0\r\n{CHECKSUM_HEADER}:{crc}\r\n\r\n");
+                            this.out.push_back(tail.into());
+                            continue;
+                        }
+                    }
+                }
+            };
+            if this.chunk_left == 0 {
+                if this.left == 0 {
+                    return Poll::Ready(Some(Err("body longer than its length".into())));
+                }
+                this.chunk_left = this.left.min(AWS_CHUNK);
+                this.out.push_back(format!("{:X}\r\n", this.chunk_left).into());
+            }
+            let take = (data.len() as u64).min(this.chunk_left) as usize;
+            if data.len() > take {
+                this.pending = Some(data.split_off(take));
+            }
+            this.digest.update(&data);
+            this.chunk_left -= take as u64;
+            this.left -= take as u64;
+            this.out.push_back(data);
+            if this.chunk_left == 0 {
+                this.out.push_back(bytes::Bytes::from_static(b"\r\n"));
+            }
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        self.done && self.out.is_empty()
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(self.len)
     }
 }
 
@@ -465,10 +915,15 @@ fn encode(s: &str, keep_slash: bool) -> String {
     out
 }
 
-/// SigV4 for S3, as the SDK signs: single URI encoding, no path normalisation, the payload hash
-/// in `x-amz-content-sha256` (of the empty body: the requests here have none), the session
-/// token when there is one.
-fn sign(req: &mut http::Request<SdkBody>, creds: &Credentials, r: &Resolved) -> anyhow::Result<()> {
+/// SigV4 for S3, as the SDK signs: single URI encoding, no path normalisation, the payload in
+/// `x-amz-content-sha256` (the hash of an in-memory body, UNSIGNED-PAYLOAD for a streamed one,
+/// STREAMING-UNSIGNED-PAYLOAD-TRAILER with a trailer), the session token when there is one.
+fn sign(
+    req: &mut http::Request<SdkBody>,
+    creds: &Credentials,
+    r: &Resolved,
+    trailer: bool,
+) -> anyhow::Result<()> {
     use aws_sigv4::http_request::{
         sign, PayloadChecksumKind, PercentEncodingMode, SignableBody, SignableRequest,
         SigningSettings, UriPathNormalizationMode,
@@ -498,7 +953,11 @@ fn sign(req: &mut http::Request<SdkBody>, creds: &Credentials, r: &Resolved) -> 
         req.method().as_str(),
         req.uri().to_string(),
         headers.iter().map(|(k, v)| (k.as_str(), v.as_str())),
-        SignableBody::Bytes(&[]),
+        match req.body().bytes() {
+            _ if trailer => SignableBody::StreamingUnsignedPayloadTrailer,
+            Some(bytes) => SignableBody::Bytes(bytes),
+            None => SignableBody::UnsignedPayload,
+        },
     )?;
     let (instructions, _signature) = sign(signable, &params)?.into_parts();
     instructions.apply_to_request_http1x(req);
@@ -573,64 +1032,161 @@ fn error_metadata(resp: &HttpResponse, body: &[u8], parsed: &Parsed) -> ErrorMet
     b.build()
 }
 
-/// The parsed body, or what the SDK makes of one it cannot parse (an `unhandled` error with the
-/// XML error as its source). An empty body parses to nothing.
-fn parsed_or<E>(
+/// The operation's error for an error response, as its SDK deserializer builds it: a modeled
+/// error for its code (`modeled`, which hands back the metadata otherwise), else a generic one;
+/// unhandled when there is no code or the body is not an S3 error document.
+fn op_error<E>(
+    resp: &HttpResponse,
     body: &[u8],
-    unhandled: impl FnOnce(aws_smithy_xml::decode::XmlDecodeError) -> E,
-) -> Result<Parsed, E> {
-    if body.is_empty() {
-        return Ok(Parsed::default());
+    unhandled: impl FnOnce(BoxError) -> E,
+    generic: impl FnOnce(ErrorMetadata) -> E,
+    modeled: impl FnOnce(&str, Option<String>, &Parsed, ErrorMetadata) -> Result<E, ErrorMetadata>,
+) -> E {
+    let parsed = if body.is_empty() {
+        Parsed::default()
+    } else {
+        match parse_error(body) {
+            Ok(p) => p,
+            Err(e) => return unhandled(e.into()),
+        }
+    };
+    let meta = error_metadata(resp, body, &parsed);
+    let Some(code) = meta.code().map(str::to_owned) else {
+        return unhandled(meta.into());
+    };
+    let message = parsed.message.clone();
+    match modeled(&code, message, &parsed, meta) {
+        Ok(e) => e,
+        Err(meta) => generic(meta),
     }
-    parse_error(body).map_err(unhandled)
 }
 
 fn get_object_error(resp: &HttpResponse, body: &[u8]) -> GetObjectError {
     use aws_sdk_s3::types::error::{InvalidObjectState, NoSuchKey};
     use aws_sdk_s3::types::{IntelligentTieringAccessTier, StorageClass};
-    let parsed = match parsed_or(body, |e| GetObjectError::unhandled(e)) {
-        Ok(p) => p,
-        Err(e) => return e,
-    };
-    let meta = error_metadata(resp, body, &parsed);
-    let message = parsed.message.clone();
-    match meta.code().map(str::to_owned).as_deref() {
-        None => GetObjectError::unhandled(meta),
-        Some("NoSuchKey") => GetObjectError::NoSuchKey(
-            NoSuchKey::builder().set_message(message).meta(meta).build(),
-        ),
-        Some("InvalidObjectState") => GetObjectError::InvalidObjectState(
-            InvalidObjectState::builder()
-                .set_message(message)
-                .set_storage_class(parsed.storage_class.as_deref().map(StorageClass::from))
-                .set_access_tier(
-                    parsed
-                        .access_tier
-                        .as_deref()
-                        .map(IntelligentTieringAccessTier::from),
-                )
-                .meta(meta)
-                .build(),
-        ),
-        Some(_) => GetObjectError::generic(meta),
-    }
+    op_error(
+        resp,
+        body,
+        |e| GetObjectError::unhandled(e),
+        GetObjectError::generic,
+        |code, message, parsed, meta| match code {
+            "NoSuchKey" => Ok(GetObjectError::NoSuchKey(
+                NoSuchKey::builder().set_message(message).meta(meta).build(),
+            )),
+            "InvalidObjectState" => Ok(GetObjectError::InvalidObjectState(
+                InvalidObjectState::builder()
+                    .set_message(message)
+                    .set_storage_class(parsed.storage_class.as_deref().map(StorageClass::from))
+                    .set_access_tier(
+                        parsed
+                            .access_tier
+                            .as_deref()
+                            .map(IntelligentTieringAccessTier::from),
+                    )
+                    .meta(meta)
+                    .build(),
+            )),
+            _ => Err(meta),
+        },
+    )
 }
 
 fn head_object_error(resp: &HttpResponse, body: &[u8]) -> HeadObjectError {
     use aws_sdk_s3::types::error::NotFound;
-    let parsed = match parsed_or(body, |e| HeadObjectError::unhandled(e)) {
-        Ok(p) => p,
-        Err(e) => return e,
+    op_error(
+        resp,
+        body,
+        |e| HeadObjectError::unhandled(e),
+        HeadObjectError::generic,
+        |code, message, _, meta| match code {
+            "NotFound" => Ok(HeadObjectError::NotFound(
+                NotFound::builder().set_message(message).meta(meta).build(),
+            )),
+            _ => Err(meta),
+        },
+    )
+}
+
+fn put_object_error(resp: &HttpResponse, body: &[u8]) -> PutObjectError {
+    use aws_sdk_s3::types::error::{
+        EncryptionTypeMismatch, InvalidRequest, InvalidWriteOffset, TooManyParts,
     };
-    let meta = error_metadata(resp, body, &parsed);
-    let message = parsed.message.clone();
-    match meta.code().map(str::to_owned).as_deref() {
-        None => HeadObjectError::unhandled(meta),
-        Some("NotFound") => {
-            HeadObjectError::NotFound(NotFound::builder().set_message(message).meta(meta).build())
-        }
-        Some(_) => HeadObjectError::generic(meta),
-    }
+    op_error(
+        resp,
+        body,
+        |e| PutObjectError::unhandled(e),
+        PutObjectError::generic,
+        |code, message, _, meta| match code {
+            "EncryptionTypeMismatch" => Ok(PutObjectError::EncryptionTypeMismatch(
+                EncryptionTypeMismatch::builder()
+                    .set_message(message)
+                    .meta(meta)
+                    .build(),
+            )),
+            "InvalidRequest" => Ok(PutObjectError::InvalidRequest(
+                InvalidRequest::builder().set_message(message).meta(meta).build(),
+            )),
+            "InvalidWriteOffset" => Ok(PutObjectError::InvalidWriteOffset(
+                InvalidWriteOffset::builder()
+                    .set_message(message)
+                    .meta(meta)
+                    .build(),
+            )),
+            "TooManyParts" => Ok(PutObjectError::TooManyParts(
+                TooManyParts::builder().set_message(message).meta(meta).build(),
+            )),
+            _ => Err(meta),
+        },
+    )
+}
+
+fn create_multipart_upload_error(resp: &HttpResponse, body: &[u8]) -> CreateMultipartUploadError {
+    op_error(
+        resp,
+        body,
+        |e| CreateMultipartUploadError::unhandled(e),
+        CreateMultipartUploadError::generic,
+        |_, _, _, meta| Err(meta),
+    )
+}
+
+fn upload_part_error(resp: &HttpResponse, body: &[u8]) -> UploadPartError {
+    op_error(
+        resp,
+        body,
+        |e| UploadPartError::unhandled(e),
+        UploadPartError::generic,
+        |_, _, _, meta| Err(meta),
+    )
+}
+
+fn complete_multipart_upload_error(
+    resp: &HttpResponse,
+    body: &[u8],
+) -> CompleteMultipartUploadError {
+    op_error(
+        resp,
+        body,
+        |e| CompleteMultipartUploadError::unhandled(e),
+        CompleteMultipartUploadError::generic,
+        |_, _, _, meta| Err(meta),
+    )
+}
+
+fn abort_multipart_upload_error(resp: &HttpResponse, body: &[u8]) -> AbortMultipartUploadError {
+    use aws_sdk_s3::types::error::NoSuchUpload;
+    op_error(
+        resp,
+        body,
+        |e| AbortMultipartUploadError::unhandled(e),
+        AbortMultipartUploadError::generic,
+        |code, message, _, meta| match code {
+            "NoSuchUpload" => Ok(AbortMultipartUploadError::NoSuchUpload(
+                NoSuchUpload::builder().set_message(message).meta(meta).build(),
+            )),
+            _ => Err(meta),
+        },
+    )
 }
 
 /// The error the SDK returns for the same outcome.
@@ -725,6 +1281,104 @@ mod tests {
         assert_eq!(aws_sdk_s3::error::ProvideErrorMetadata::code(&e), None);
     }
 
+    #[test]
+    fn upload_errors_are_the_sdks_modeled_errors() {
+        let body: &[u8] = b"<Error><Code>InvalidRequest</Code><Message>bad</Message></Error>";
+        let e = put_object_error(&response(400, &[], body), body);
+        assert!(matches!(e, PutObjectError::InvalidRequest(_)), "{e:?}");
+        let body: &[u8] = b"<Error><Code>NoSuchUpload</Code><Message>gone</Message></Error>";
+        let e = abort_multipart_upload_error(&response(404, &[], body), body);
+        assert!(e.is_no_such_upload(), "{e:?}");
+        // CompleteMultipartUpload can answer 200 with an error document.
+        let body: &[u8] = b"<Error><Code>InternalError</Code><Message>again</Message></Error>";
+        assert!(body_is_error(body));
+        let e = complete_multipart_upload_error(&response(200, &[], body), body);
+        assert_eq!(aws_sdk_s3::error::ProvideErrorMetadata::code(&e), Some("InternalError"));
+    }
+
+    #[test]
+    fn upload_ids_and_error_documents_are_read_from_the_body() {
+        let body = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<InitiateMultipartUploadResult \
+            xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>b</Bucket><Key>k</Key>\
+            <UploadId>u-1</UploadId></InitiateMultipartUploadResult>";
+        assert_eq!(xml_text(body, "UploadId").as_deref(), Some("u-1"));
+        assert!(!body_is_error(body));
+        assert!(!body_is_error(b""));
+    }
+
+    #[test]
+    fn complete_lists_every_part_with_its_checksum() {
+        let parts = [
+            CompletedPart::builder()
+                .part_number(1)
+                .e_tag("\"a&b\"")
+                .checksum_crc32_c("4waSgw==")
+                .build(),
+            CompletedPart::builder().part_number(2).e_tag("\"c\"").build(),
+        ];
+        assert_eq!(
+            complete_body(&parts),
+            "<CompleteMultipartUpload xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">\
+             <Part><ChecksumCRC32C>4waSgw==</ChecksumCRC32C><ETag>&quot;a&amp;b&quot;</ETag>\
+             <PartNumber>1</PartNumber></Part><Part><ETag>&quot;c&quot;</ETag>\
+             <PartNumber>2</PartNumber></Part></CompleteMultipartUpload>"
+        );
+    }
+
+    #[test]
+    fn a_crc32c_header_is_the_big_endian_value_in_base64() {
+        // The CRC-32C check value: 0xE3069283 for "123456789".
+        assert_eq!(crc32c(b"123456789"), "4waSgw==");
+        assert_eq!(crc32c(b""), "AAAAAA==");
+    }
+
+    /// A body delivered in the given frames, as a file body delivers its reads.
+    struct Frames(std::collections::VecDeque<bytes::Bytes>);
+    impl http_body::Body for Frames {
+        type Data = bytes::Bytes;
+        type Error = aws_smithy_types::body::Error;
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<http_body::Frame<bytes::Bytes>, Self::Error>>> {
+            let next = self.get_mut().0.pop_front();
+            std::task::Poll::Ready(next.map(|b| Ok(http_body::Frame::data(b))))
+        }
+    }
+
+    async fn framed(data: &[u8], frame: usize, len: u64) -> Result<Vec<u8>, String> {
+        let frames = data.chunks(frame).map(bytes::Bytes::copy_from_slice).collect();
+        let body = SdkBody::from_body_1_x(Frames(frames));
+        let out = ByteStream::new(aws_chunked(body, len)).collect().await;
+        out.map(|b| b.into_bytes().to_vec()).map_err(|e| format!("{e:?}"))
+    }
+
+    #[tokio::test]
+    async fn a_streamed_body_goes_in_64_kib_aws_chunks_and_its_crc32c_trailer() {
+        // 3 full chunks and 30,000 bytes more, read in frames that do not line up with them.
+        let data: Vec<u8> = (0..3 * 65_536 + 30_000u32).map(|i| (i % 251) as u8).collect();
+        let len = data.len() as u64;
+        let mut expected = Vec::new();
+        for c in data.chunks(65_536) {
+            expected.extend_from_slice(format!("{:X}\r\n", c.len()).as_bytes());
+            expected.extend_from_slice(c);
+            expected.extend_from_slice(b"\r\n");
+        }
+        let tail = format!("0\r\nx-amz-checksum-crc32c:{}\r\n\r\n", crc32c(&data));
+        expected.extend_from_slice(tail.as_bytes());
+        for frame in [100_000, 65_536, 7, data.len()] {
+            let got = framed(&data, frame, len).await.unwrap();
+            assert!(got == expected, "framing differs with {frame}-byte frames");
+        }
+        assert_eq!(aws_chunked_len(len), expected.len() as u64);
+        // Exactly one chunk, and the trailer alone, as the SDK counts them.
+        assert_eq!(aws_chunked_len(65_536), 5 + 2 + 65_536 + 2 + 3 + 32 + 2);
+        assert_eq!(aws_chunked_len(0), 3 + 32 + 2);
+        // A body that does not match its length fails instead of sending a wrong one.
+        assert!(framed(&data, 4096, len + 1).await.is_err());
+        assert!(framed(&data, 4096, len - 1).await.is_err());
+    }
+
     fn resolver(endpoint: Option<&str>, path_style: Option<bool>) -> Lean {
         Lean::new(LeanConfig {
             connector: SharedHttpConnector::new(NoConnector),
@@ -737,6 +1391,7 @@ mod tests {
             max_attempts: 3,
             request_payer: None,
             stalled_stream: StalledStreamProtectionConfig::disabled(),
+            trailers: false,
         })
     }
 
