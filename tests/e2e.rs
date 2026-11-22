@@ -24,6 +24,106 @@ fn rs5cmd() -> Command {
     Command::cargo_bin("rs5cmd").unwrap()
 }
 
+/// Gives anonymous callers read access to a bucket (a public-read bucket policy), through the
+/// SDK with the test's own credentials.
+fn allow_anonymous_reads(bucket: &str) {
+    let endpoint = std::env::var("AWS_ENDPOINT_URL")
+        .or_else(|_| std::env::var("S3_ENDPOINT_URL"))
+        .unwrap();
+    let policy = format!(
+        concat!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"#,
+            r#""Effect":"Allow","Principal":{{"AWS":["*"]}},"#,
+            r#""Action":["s3:GetObject","s3:ListBucket","s3:GetBucketLocation"],"#,
+            r#""Resource":["arn:aws:s3:::{bucket}","arn:aws:s3:::{bucket}/*"]}}]}}"#,
+        ),
+        bucket = bucket,
+    );
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .endpoint_url(endpoint)
+            .load()
+            .await;
+        let conf = aws_sdk_s3::config::Builder::from(&conf).force_path_style(true).build();
+        aws_sdk_s3::Client::from_conf(conf)
+            .put_bucket_policy()
+            .bucket(bucket)
+            .policy(policy)
+            .send()
+            .await
+            .unwrap();
+    });
+}
+
+/// #6: --no-sign-request sends unsigned requests: a public bucket can be read with no
+/// credentials at all, and a private one refuses the anonymous caller even when credentials
+/// are set. `--fast` hands the transfer to the default path.
+#[test]
+fn no_sign_request_reads_a_public_bucket_anonymously() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let public = unique_bucket();
+    let private = format!("{public}-p");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("o.txt");
+    std::fs::write(&f, b"open").unwrap();
+    for b in [&public, &private] {
+        rs5cmd().args(["mb", &format!("s3://{b}")]).assert().success();
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &format!("s3://{b}/o.txt")])
+            .assert()
+            .success();
+    }
+    allow_anonymous_reads(&public);
+
+    let anonymous = || {
+        let mut c = rs5cmd();
+        c.arg("--no-sign-request");
+        for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"] {
+            c.env_remove(v);
+        }
+        c.env_remove("AWS_PROFILE")
+            .env("AWS_CONFIG_FILE", "/nonexistent")
+            .env("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent");
+        c
+    };
+    anonymous()
+        .args(["ls", &format!("s3://{public}/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("o.txt"));
+    anonymous()
+        .args(["cat", &format!("s3://{public}/o.txt")])
+        .assert()
+        .success()
+        .stdout("open");
+    if cfg!(feature = "fast") {
+        let dl = tmp.path().join("dl");
+        anonymous()
+            .args(["cp", "--fast", &format!("s3://{public}/o.txt"), &format!("{}/", dl.display())])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("--no-sign-request uses the default path").count(1));
+        assert_eq!(std::fs::read(dl.join("o.txt")).unwrap(), b"open");
+    }
+
+    // Unsigned even with credentials in the environment: the private bucket refuses.
+    rs5cmd()
+        .args(["--no-sign-request", "ls", &format!("s3://{private}/")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("credential").not());
+    rs5cmd().args(["ls", &format!("s3://{private}/")]).assert().success();
+
+    for b in [&public, &private] {
+        rs5cmd().args(["rm", &format!("s3://{b}/*")]).assert().success();
+        rs5cmd().args(["rb", &format!("s3://{b}")]).assert().success();
+    }
+}
+
 #[test]
 fn full_object_lifecycle() {
     if !endpoint_configured() {

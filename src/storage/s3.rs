@@ -1149,14 +1149,16 @@ impl S3 {
     /// `opts.endpoint` or the `AWS_ENDPOINT_URL`/`S3_ENDPOINT_URL` env vars,
     /// switching to path-style addressing in that case.
     pub async fn new(_u: &Url, opts: &Options) -> anyhow::Result<S3> {
-        // One config load (region, credentials provider and its cache) per (region, profile) for
-        // the whole process, however many S3 clients the command builds (F09). The loader reads
-        // nothing else from `opts`. The HTTP client is shared separately below. Cached with it:
-        // whether no region was configured at all (then the bucket's region is asked below).
+        // One config load (region, credentials provider and its cache) per (region, profile,
+        // --no-sign-request) for the whole process, however many S3 clients the command builds
+        // (F09). The loader reads nothing else from `opts`. The HTTP client is shared separately
+        // below. Cached with it: whether no region was configured at all (then the bucket's
+        // region is asked below).
+        type Key = (Option<String>, Option<String>, bool);
         type Loaded = (aws_config::SdkConfig, bool);
-        static SHARED: tokio::sync::Mutex<Vec<((Option<String>, Option<String>), Loaded)>> =
+        static SHARED: tokio::sync::Mutex<Vec<(Key, Loaded)>> =
             tokio::sync::Mutex::const_new(Vec::new());
-        let key = (opts.region.clone(), opts.profile.clone());
+        let key = (opts.region.clone(), opts.profile.clone(), opts.no_sign_request);
         let (shared, region_unset) = {
             let mut cache = SHARED.lock().await;
             match cache.iter().find(|(k, _)| *k == key) {
@@ -1169,6 +1171,11 @@ impl S3 {
                         .region(configured.unwrap_or_else(|| Region::new("us-east-1")));
                     if let Some(profile) = &opts.profile {
                         loader = loader.profile_name(profile);
+                    }
+                    // --no-sign-request: no credentials, so requests go unsigned (anonymous
+                    // access to public buckets), as in s5cmd (#6).
+                    if opts.no_sign_request {
+                        loader = loader.no_credentials();
                     }
                     let c = loader.load().await;
                     cache.push((key, (c.clone(), unset)));

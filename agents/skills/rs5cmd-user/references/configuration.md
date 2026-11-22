@@ -63,8 +63,8 @@ rs5cmd uses the AWS SDK default credential chain, in this order:
 Keys found in a `--s3cfg` file or in `~/.rs5cmd` are used only when the three environment
 variables in step 1 are not already set.
 
-There is no flag that takes a key directly, and anonymous access does not work in v0.1.0:
-`--no-sign-request` is accepted but requests are still signed.
+There is no flag that takes a key directly. For anonymous access to a public bucket, give
+`--no-sign-request`: no credentials are looked up and requests go unsigned.
 
 ## Endpoint and addressing
 

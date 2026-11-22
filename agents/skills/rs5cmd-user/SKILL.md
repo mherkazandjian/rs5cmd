@@ -249,7 +249,6 @@ Full list with details and workarounds: [known issues](references/known-issues.m
 - **`sync --delete` with a bare S3 prefix source** (`s3://b/p/`) deletes destination files in
   subdirectories, because the source lists only one level. Use `'s3://b/p/*'` and `--max-delete`.
 - **`--dry-run rm 's3://b/p/*'` prints nothing.** Preview with `ls` and the same pattern.
-- **`--no-sign-request` has no effect.** Requests are still signed, and fail without credentials.
 - **Piping into `head` or another early-exiting reader** makes rs5cmd panic with
   `failed printing to stdout: Broken pipe` and exit `101`. Read all output, or use a file.
 - **Symlinks are always followed.** There is no `--no-follow-symlinks`. A link to a directory
