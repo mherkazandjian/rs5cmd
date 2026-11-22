@@ -299,3 +299,8 @@ bench/review/build.sh: line 218: t_c-mem: command not found
     Finished `release` profile [optimized] target(s) in 1m 12s
   b-stage: 16,943,552 bytes
 ==> done: b-stage
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 11s
+  b-stage: 16,943,552 bytes
+==> done: b-stage
+2026-11-22T02:56:20Z w4 (perf/stage-b 9693674) fast suite (D1 window): 237 passed, 0 failed
