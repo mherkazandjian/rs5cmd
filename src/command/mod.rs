@@ -64,9 +64,11 @@ pub struct GlobalOpts {
 
     /// How object requests are sent on the default engine: `sdk`, through the AWS SDK (the
     /// default), or `lean`, by rs5cmd itself on the SDK's connections, credentials and endpoint
-    /// rules, which costs less CPU per request. `lean` covers downloads, uploads (`cp`, `sync`,
-    /// `pipe`), `cat` and object metadata so far; the rest goes through the SDK either way. Its
-    /// uploads carry a CRC32C checksum (see `--checksum-trailers`). `--fast` is separate.
+    /// rules, which costs less CPU per request. `lean` covers object requests: downloads,
+    /// uploads (`cp`, `sync`, `pipe`), `cat`, object metadata, listings (`ls`, `du`, the `sync`
+    /// listing; not `--use-list-objects-v1`) and deletes (`rm`); bucket operations, server-side
+    /// copies and the rest go through the SDK either way. Its uploads carry a CRC32C checksum
+    /// (see `--checksum-trailers`). `--fast` is separate.
     #[arg(
         long,
         global = true,

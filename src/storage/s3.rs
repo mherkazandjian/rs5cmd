@@ -2036,6 +2036,12 @@ impl S3 {
             return;
         }
 
+        if let Some(lean) = self.lean_for(&bucket).await {
+            let keys: Vec<&str> = urls.iter().map(|u| u.path.as_str()).collect();
+            let resp = lean.delete_objects(&bucket, &keys).await;
+            return report_deleted(&bucket, resp, tx).await;
+        }
+
         let mut objs = Vec::with_capacity(urls.len());
         for u in &urls {
             match ObjectIdentifier::builder().key(&u.path).build() {
@@ -2061,48 +2067,26 @@ impl S3 {
             .delete(delete)
             .set_request_payer(self.request_payer())
             .send()
-            .await;
-
-        match resp {
-            Ok(out) => {
-                for d in out.deleted() {
-                    let key = format!("s3://{}/{}", bucket, d.key().unwrap_or_default());
-                    if let Ok(u) = Url::parse(&key) {
-                        let _ = tx
-                            .send(Object {
-                                url: Some(u),
-                                ..Default::default()
-                            })
-                            .await;
-                    }
-                }
-                for e in out.errors() {
-                    let key = format!("s3://{}/{}", bucket, e.key().unwrap_or_default());
-                    let u = Url::parse(&key).ok();
-                    let _ = tx
-                        .send(Object {
-                            url: u,
-                            err: Some(anyhow::anyhow!(
-                                "{}",
-                                e.message().unwrap_or("delete failed")
-                            )),
-                            ..Default::default()
-                        })
-                        .await;
-                }
-            }
-            Err(e) => {
-                let _ = tx.send(Object::with_error(e.into())).await;
-            }
-        }
+            .await
+            .map_err(anyhow::Error::from);
+        report_deleted(&bucket, resp, tx).await
     }
+
 
     fn list_v2(&self, src: &Url) -> mpsc::Receiver<Object> {
         let (tx, rx) = mpsc::channel::<Object>(128);
         let this = self.clone();
         let mut src = src.clone();
         tokio::spawn(async move {
-            let mut paginator = this
+            let lean = this.lean_for(&src.bucket).await;
+            let mut paginator = match lean {
+                Some(lean) => V2Pages::Lean {
+                    lean,
+                    src: src.clone(),
+                    token: None,
+                    done: false,
+                },
+                None => V2Pages::Sdk(this
                 .client
                 .list_objects_v2()
                 .bucket(&src.bucket)
@@ -2125,14 +2109,15 @@ impl S3 {
                 })
                 .set_request_payer(this.request_payer())
                 .into_paginator()
-                .send();
+                .send()),
+            };
 
             let mut object_found = false;
             loop {
                 match paginator.next().await {
                     None => break,
                     Some(Err(e)) => {
-                        let _ = tx.send(Object::with_error(e.into())).await;
+                        let _ = tx.send(Object::with_error(e)).await;
                         return;
                     }
                     Some(Ok(page)) => {
@@ -2330,7 +2315,18 @@ impl S3 {
             let mut object_found = false;
             let mut key_marker: Option<String> = None;
             let mut version_marker: Option<String> = None;
+            let lean = this.lean_for(&src.bucket).await;
             loop {
+                let page = if let Some(lean) = &lean {
+                    lean.list_object_versions(
+                        &src.bucket,
+                        &src.prefix,
+                        nonempty(&src.delimiter),
+                        key_marker.as_deref(),
+                        version_marker.as_deref(),
+                    )
+                    .await
+                } else {
                 let mut req = this
                     .client
                     .list_object_versions()
@@ -2352,10 +2348,12 @@ impl S3 {
                 if let Some(v) = &version_marker {
                     req = req.version_id_marker(v);
                 }
-                let page = match req.send().await {
+                req.send().await.map_err(anyhow::Error::from)
+                };
+                let page = match page {
                     Ok(p) => p,
                     Err(e) => {
-                        let _ = tx.send(Object::with_error(e.into())).await;
+                        let _ = tx.send(Object::with_error(e)).await;
                         return;
                     }
                 };
@@ -2572,6 +2570,9 @@ impl Storage for S3 {
     async fn delete(&self, src: &Url) -> anyhow::Result<()> {
         if self.dry_run {
             return Ok(());
+        }
+        if let Some(lean) = self.lean_for(&src.bucket).await {
+            return lean.delete_object(src).await;
         }
         let mut req = self
             .client
@@ -2947,6 +2948,110 @@ fn set_file_mtime_from_value(path: &Path, value: &str) -> anyhow::Result<()> {
     let ft = filetime::FileTime::from_unix_time(secs, nanos);
     filetime::set_file_mtime(path, ft)?;
     Ok(())
+}
+
+type ListV2Output = aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Output;
+type ListV2Error = aws_sdk_s3::operation::list_objects_v2::ListObjectsV2Error;
+
+/// ListObjectsV2's pages for `list_v2`: the SDK's paginator, or the lean data path's requests
+/// under the paginator's rules (another page while the response names a continuation token, and
+/// not the same one twice).
+enum V2Pages {
+    Sdk(
+        aws_smithy_async::future::pagination_stream::PaginationStream<
+            Result<ListV2Output, aws_sdk_s3::error::SdkError<ListV2Error>>,
+        >,
+    ),
+    Lean {
+        lean: std::sync::Arc<super::lean::Lean>,
+        src: Url,
+        token: Option<String>,
+        done: bool,
+    },
+}
+
+impl V2Pages {
+    async fn next(&mut self) -> Option<anyhow::Result<ListV2Output>> {
+        match self {
+            V2Pages::Sdk(pages) => pages.next().await.map(|r| r.map_err(anyhow::Error::from)),
+            V2Pages::Lean {
+                lean,
+                src,
+                token,
+                done,
+            } => {
+                if *done {
+                    return None;
+                }
+                let page = lean
+                    .list_objects_v2(
+                        &src.bucket,
+                        &src.prefix,
+                        nonempty(&src.delimiter),
+                        nonempty(&src.start_after),
+                        token.as_deref(),
+                    )
+                    .await;
+                match &page {
+                    Ok(p) => {
+                        let next = p
+                            .next_continuation_token()
+                            .filter(|t| !t.is_empty())
+                            .map(str::to_owned);
+                        *done = next.is_none() || next == *token;
+                        *token = next;
+                    }
+                    Err(_) => *done = true,
+                }
+                Some(page)
+            }
+        }
+    }
+}
+
+fn nonempty(s: &str) -> Option<&str> {
+    Some(s).filter(|s| !s.is_empty())
+}
+
+/// Sends a DeleteObjects outcome to the printer: one entry per key deleted, one error per key
+/// refused, or the request's error.
+async fn report_deleted(
+    bucket: &str,
+    resp: anyhow::Result<aws_sdk_s3::operation::delete_objects::DeleteObjectsOutput>,
+    tx: &mpsc::Sender<Object>,
+) {
+        match resp {
+            Ok(out) => {
+                for d in out.deleted() {
+                    let key = format!("s3://{}/{}", bucket, d.key().unwrap_or_default());
+                    if let Ok(u) = Url::parse(&key) {
+                        let _ = tx
+                            .send(Object {
+                                url: Some(u),
+                                ..Default::default()
+                            })
+                            .await;
+                    }
+                }
+                for e in out.errors() {
+                    let key = format!("s3://{}/{}", bucket, e.key().unwrap_or_default());
+                    let u = Url::parse(&key).ok();
+                    let _ = tx
+                        .send(Object {
+                            url: u,
+                            err: Some(anyhow::anyhow!(
+                                "{}",
+                                e.message().unwrap_or("delete failed")
+                            )),
+                            ..Default::default()
+                        })
+                        .await;
+                }
+            }
+            Err(e) => {
+                let _ = tx.send(Object::with_error(e)).await;
+            }
+        }
 }
 
 /// What an upload's SDK request sets from `metadata`, as headers for the lean data path: the
