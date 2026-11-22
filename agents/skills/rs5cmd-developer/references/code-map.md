@@ -121,7 +121,6 @@ entry from both files when it is fixed, and add a regression test with the fix.
 | `cp data dst/` (bare relative directory) maps files onto themselves or to keys with `../` | `Url::set_relative` in `storage/url.rs`: for the base `data`, the parent directory is `.`, and the relative path of `data/a.txt` against it comes out as `../data/a.txt`. The existing unit tests cover a wildcard base and an absolute directory base only |
 | `--dry-run rm 's3://b/p/*'` prints nothing | Dry-run branch of `S3::delete_chunk` in `storage/s3.rs`: `tx.send(...)` is not awaited, so nothing reaches the receiver |
 | Exit 101 when stdout is closed early | `println!` panics on a broken pipe; nothing handles `EPIPE` |
-| `du -H` prints `18 B bytes` | `size_message` in `command/du.rs` appends `bytes` to an already humanized size |
 | `--follow-symlinks` cannot be switched off | Declared as a plain flag with `default_value_t = true` in `CpArgs` and `SyncArgs` |
 | Slow start without a region | `S3::new` uses the SDK region chain, which queries instance metadata before the `us-east-1` fallback |
 | `tests/e2e_region.rs` fails outside compose | No endpoint guard at the top of its tests |

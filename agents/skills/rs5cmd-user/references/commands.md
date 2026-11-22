@@ -98,8 +98,8 @@ JSON record: `{"key","size","type","etag","storage_class","last_modified"}`; buc
 
 `rs5cmd du [OPTIONS] [TARGET]` prints the total size and count.
 
-Flags: `-H/--humanize`, `-g/--group` (one line per storage class), `--exclude GLOB`,
-`--all-versions`, `--version-id ID`.
+Flags: `-H/--humanize` (as s5cmd: `1.2K bytes`, a bare number below 1 KiB), `-g/--group` (one
+line per storage class), `--exclude GLOB`, `--all-versions`, `--version-id ID`.
 
 ```bash
 rs5cmd du 's3://bucket/data/*'      # 16 bytes in 3 objects: s3://bucket/data/*
