@@ -98,6 +98,41 @@ fn fast_path_all_directions() {
     g().args(["rb", &s3("")]).assert().success();
 }
 
+/// #10: a flag the fast path does not honour sends the set to the default path, with a warning
+/// naming it, so the flag takes effect (here: the content type is stored).
+#[test]
+fn fast_hands_flags_it_does_not_honour_to_the_default_path() {
+    let Some(ep) = endpoint() else {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    };
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let g = || {
+        let mut c = rs5cmd();
+        c.args(["--endpoint-url", &ep]);
+        c
+    };
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("t.txt");
+    std::fs::write(&f, b"typed").unwrap();
+
+    g().args(["mb", &s3("")]).assert().success();
+    g().args(["cp", "--fast", "--content-type", "text/x-rs5cmd", f.to_str().unwrap(), &s3("/t")])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "warning: --fast does not support --content-type; using the default path",
+        ));
+    g().args(["--json", "head", &s3("/t")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("text/x-rs5cmd"));
+
+    g().args(["rm", &s3("/t")]).assert().success();
+    g().args(["rb", &s3("")]).assert().success();
+}
+
 /// An in-test server for one GET: it reads the request, then sends the status line, a
 /// Content-Length of `total` and `sent` bytes of the body, then either holds the connection
 /// open (`hold`) or closes it.

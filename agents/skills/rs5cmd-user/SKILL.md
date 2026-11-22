@@ -208,11 +208,14 @@ rs5cmd cat 's3://bucket/logs/2026-01-*.log' > january.log
   endpoint from `--endpoint-url`, `AWS_ENDPOINT_URL` or a config file. `S3_ENDPOINT_URL` alone is
   not enough: `error: --fast currently requires --endpoint-url`.
 - It handles upload, download and S3→S3 copy, with `mv`, `--json`, `--dry-run`, `--retry-count`,
-  `--no-verify-ssl`, `--numworkers`, and `--include` / `--exclude`.
-- It **silently ignores** `--storage-class`, `--acl`, `--content-type`, `--preserve-timestamps`,
-  `--if-none-match`, `--links`, `--version-id`, `--all-versions`, `--part-size`, `--concurrency`,
-  `--proxy`, the bandwidth limits and the per-side region and endpoint flags.
-- Each object is held whole in memory and sent in one request. Do not use it for large objects.
+  `--no-verify-ssl`, `--numworkers`, `--part-size`, and `--include` / `--exclude`.
+- With a flag it does not honour (`--storage-class`, `--acl`, `--content-type`,
+  `--preserve-timestamps`, `--if-none-match`, `--links`, `--version-id`, `--all-versions`,
+  `--concurrency`, `--no-sign-request`, `--proxy`, the bandwidth limits, the per-side region
+  and endpoint flags, ...) the command runs on the default engine and prints
+  `warning: --fast does not support <flags>; using the default path`.
+- Each file is held whole in memory and sent in one request; files larger than the part
+  (8 MiB unless `--part-size` is given) go to the default engine.
 
 Requirements, tuning and limits: [fast path and mount](references/fast-path-and-mount.md).
 

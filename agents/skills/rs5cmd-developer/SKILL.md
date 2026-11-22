@@ -155,7 +155,7 @@ nothing somewhere.
    compiling.
 
 Then decide: should `--s3cfg` / `~/.rs5cmd` set it (`apply_translated`), and should the fast
-path (`try_fast_path` in `cp.rs`) honour it?
+path (`try_fast_path` in `cp.rs`) honour it? If not, list it in `fast_unsupported`.
 
 ## Conventions and pitfalls
 

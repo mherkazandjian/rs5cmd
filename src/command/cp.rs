@@ -221,7 +221,17 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let mut fast_failed = false;
     if args.fast {
         #[cfg(feature = "fast")]
-        {
+        'fast: {
+            // A flag the fast path does not honour sends the whole set to the default path, with
+            // a warning, rather than being dropped (#10).
+            let unsupported = fast_unsupported(global, &args);
+            if !unsupported.is_empty() {
+                eprintln!(
+                    "warning: --fast does not support {}; using the default path",
+                    unsupported.join(", ")
+                );
+                break 'fast;
+            }
             // The fast path shards a complete list, so it still collects first.
             let mut all = Vec::new();
             while let Some(p) = pairs.next().await {
@@ -844,6 +854,46 @@ const FAST_PART_MAX: u64 = 1 << 30;
 #[cfg(feature = "fast")]
 const FAST_DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
 
+/// The flags given that `--fast` does not honour (#10); with any of them `cp`/`mv` runs the set on
+/// the default path and says so. The fast path does honour `--part-size`, what shapes the listing
+/// (`--include`/`--exclude` and their `-from` files, `--follow-symlinks`,
+/// `--use-list-objects-v1`), `--force-glacier-transfer` (`cp` skips no storage class anyway) and
+/// the globals `--endpoint-url`, `--region`, `--profile`, `--credentials-file`,
+/// `--no-verify-ssl`, `--tls-post-quantum`, `--retry-count`, `--numworkers`, `--dry-run`,
+/// `--json` and `--color`. Dual-stack and FIPS endpoints do not apply with `--endpoint-url`, on
+/// either path. `--no-sign-request` is here because the fast path signs every request (#6).
+#[cfg(feature = "fast")]
+fn fast_unsupported(global: &GlobalOpts, args: &CpArgs) -> Vec<&'static str> {
+    let given = [
+        // What the objects or files become.
+        (args.storage_class.is_some(), "--storage-class"),
+        (args.acl.is_some(), "--acl"),
+        (args.content_type.is_some(), "--content-type"),
+        (args.preserve_timestamps, "--preserve-timestamps"),
+        (args.if_none_match, "--if-none-match"),
+        (args.links, "--links"),
+        (args.version_id.is_some(), "--version-id"),
+        (args.all_versions, "--all-versions"),
+        (args.client_copy, "--client-copy"),
+        (args.remove_empty_dirs, "--remove-empty-dirs"),
+        // How requests travel.
+        (args.concurrency != crate::storage::DEFAULT_CONCURRENCY, "--concurrency"),
+        (global.no_sign_request, "--no-sign-request"),
+        (global.proxy.is_some(), "--proxy"),
+        (global.ca_certs_file.is_some(), "--ca-certs-file"),
+        (global.request_payer.is_some(), "--request-payer"),
+        (global.addressing_style.as_deref() == Some("virtual"), "--addressing-style virtual"),
+        (global.limit_upload.is_some(), "--limit-upload"),
+        (global.limit_download.is_some(), "--limit-download"),
+        (global.limitrate.is_some(), "--limitrate"),
+        (global.source_region.is_some(), "--source-region"),
+        (global.destination_region.is_some(), "--destination-region"),
+        (global.source_endpoint_url.is_some(), "--source-endpoint-url"),
+        (global.destination_endpoint_url.is_some(), "--destination-endpoint-url"),
+    ];
+    given.into_iter().filter(|(on, _)| *on).map(|(_, flag)| flag).collect()
+}
+
 /// Attempts to run the (src,dst) pairs on the io_uring fast path. Each pair is
 /// mapped independently to upload / download / server-side copy, so mixed sets
 /// are supported. Returns `Ok(Some(result))` if handled, or `Ok(None)` if the
@@ -868,15 +918,6 @@ async fn try_fast_path(
     // (remote->remote). A local->local pair cannot use it, so if ANY pair is
     // local->local we fall back entirely to the default path.
     if pairs.iter().any(|(s, d)| !s.is_remote() && !d.is_remote()) {
-        return Ok(None);
-    }
-
-    // The fast path signs every request; unsigned (anonymous) requests are the default path's
-    // (#6).
-    if global.no_sign_request {
-        eprintln!(
-            "note: --fast does not send unsigned requests: --no-sign-request uses the default path"
-        );
         return Ok(None);
     }
 
@@ -1011,6 +1052,36 @@ mod tests {
             Some(Command::Cp(args)) => args,
             other => panic!("not cp: {other:?}"),
         }
+    }
+
+    /// #10: the flags `--fast` cannot honour are named, in a fixed order; those it honours are not.
+    #[cfg(feature = "fast")]
+    #[test]
+    fn fast_names_the_flags_it_does_not_honour() {
+        let unsupported = |argv: &[&str]| {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            match cli.command {
+                Some(Command::Cp(args)) | Some(Command::Mv(args)) => {
+                    super::fast_unsupported(&cli.global, &args)
+                }
+                other => panic!("not cp or mv: {other:?}"),
+            }
+        };
+        let honoured = [
+            "rs5cmd", "--endpoint-url", "http://h:9000", "--numworkers", "4", "--retry-count", "3",
+            "--dry-run", "--json", "cp", "--fast", "--part-size", "16", "--exclude", "*.log",
+            "--force-glacier-transfer", "--concurrency", "5", "a/*", "s3://b/p/",
+        ];
+        assert_eq!(unsupported(&honoured), Vec::<&str>::new());
+        let mv = [
+            "rs5cmd", "--proxy", "http://p:3128", "--no-sign-request", "mv", "--fast",
+            "--storage-class", "STANDARD_IA", "--acl", "private", "--concurrency", "2", "a",
+            "s3://b/a",
+        ];
+        assert_eq!(
+            unsupported(&mv),
+            ["--storage-class", "--acl", "--concurrency", "--no-sign-request", "--proxy"]
+        );
     }
 
     #[test]

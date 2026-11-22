@@ -158,9 +158,8 @@ fn name_does_the_thing() {
    - `sync` has its own `SyncArgs` and its own copy step. A flag on `cp` is not on `sync` until
      you add it there.
    - The fast path (`try_fast_path` in `cp.rs`) does not see `CpArgs`. Either plumb the flag
-     into `fastpath::FastConfig` / `Transfer`, or make `cp` fall back to the default path (or
-     warn) when the flag is combined with `--fast`. Silent ignoring is the existing behaviour
-     for many flags and is a known wart, not a pattern to extend.
+     into `fastpath::FastConfig` / `Transfer`, or add it to `fast_unsupported` in `cp.rs`, which
+     sends the set to the default path with a warning (#10). Never let `--fast` drop a flag.
 4. Test it, and add it to the user skill's command reference.
 
 A boolean that defaults to true cannot be switched off as a plain flag (that is the
@@ -181,7 +180,7 @@ Trace an existing one first: `grep -rn request_payer src` shows every stop that
 | 5 | `build_argv` in `src/command/run.rs` | Forward it, or every line of a `run` file loses it |
 | 6 | `fn opts()` in the `run.rs` test module | Add the field to the explicit `GlobalOpts { .. }` literal, or the unit tests stop compiling. Extend `argv_reconstructs_flags` to cover the new flag |
 | 7 | `apply_translated` in `src/command/mod.rs`, `Translated` in `src/s3cfg.rs` | Only if `.s3cfg` or `~/.rs5cmd` should be able to set it. Fill the field only when the user left it unset |
-| 8 | `try_fast_path` in `src/command/cp.rs` | Decide whether `--fast` honours it. If not, say so in the user skill |
+| 8 | `fast_unsupported` / `try_fast_path` in `src/command/cp.rs` | Decide whether `--fast` honours it. If not, add it to `fast_unsupported` and to the user skill's list |
 | 9 | Per-side behaviour | If it is a connection setting, decide whether `Options::for_side` needs a source and a destination variant |
 
 Then compile the tests for every feature set:

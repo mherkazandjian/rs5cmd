@@ -124,11 +124,6 @@ unknown argument.
   suffix. A link to a directory is stored as a link when a wildcard matches it or it is the
   source itself; inside a directory source, links to directories are still walked.
 
-### 2.9 `--fast` ignores many flags without warning
-
-See `fast-path-and-mount.md`. If a flag such as `--storage-class`, `--acl`, `--content-type`,
-`--proxy` or a bandwidth limit matters, do not use `--fast`.
-
 ### 2.10 `run` does not inherit every global flag
 
 `--limit-upload`, `--limit-download`, the per-side region and endpoint flags, the dual-stack and
