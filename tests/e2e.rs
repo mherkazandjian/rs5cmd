@@ -162,6 +162,43 @@ fn sync_size_only_is_idempotent_and_deletes() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+/// #4: an empty or a missing local destination is an empty destination, as an empty S3 prefix
+/// is: everything is copied, and the missing directory is created.
+#[test]
+fn sync_into_an_empty_or_missing_local_directory() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("top.txt"), b"top").unwrap();
+    std::fs::write(src.join("sub").join("deep.txt"), b"deep").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", &format!("{}/*", src.display()), &s3("/p/")])
+        .assert()
+        .success();
+
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let missing = tmp.path().join("missing").join("dir");
+    for dst in [&empty, &missing] {
+        rs5cmd()
+            .args(["sync", &s3("/p/*"), &format!("{}/", dst.display())])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("cp ").count(2));
+        assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"top");
+        assert_eq!(std::fs::read(dst.join("sub").join("deep.txt")).unwrap(), b"deep");
+    }
+}
+
 #[test]
 fn sync_max_delete_aborts_without_touching_anything() {
     // --max-delete must abort the whole sync (no copies, no deletes) when the
