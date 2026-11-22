@@ -206,3 +206,96 @@ bench/review/build.sh: line 218: t_c-mem: command not found
     Finished `release` profile [optimized] target(s) in 1m 14s
   b-stage: 17,213,288 bytes
 ==> done: b-stage
+2026-11-21T20:46:51Z c-multipart rebased onto perf/stage-b: 4c5d5ac (1 commits)
+2026-11-21T20:47:10Z c-multipart tests ok (219 passed, 0 failed) 
+==> zigbuild c-multipart from /src/wt/c-multipart (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  c-multipart: 17,213,352 bytes
+==> done: c-multipart
+2026-11-21T20:48:24Z c-multipart built /opt/bins/c-multipart
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  b-stage: 17,213,352 bytes
+==> done: b-stage
+2026-11-21T21:34:19Z c-mimalloc rebased onto perf/stage-b: 55317c3 (1 commits)
+2026-11-21T21:34:44Z c-mimalloc tests ok (219 passed, 0 failed) 
+==> zigbuild c-mimalloc from /src/wt/c-mimalloc (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  c-mimalloc: 17,476,224 bytes
+==> done: c-mimalloc
+2026-11-21T21:35:58Z c-mimalloc built /opt/bins/c-mimalloc
+2026-11-21T21:37:03Z c-mimalloc rebased onto perf/stage-b: 6d85011 (2 commits)
+2026-11-21T21:37:23Z c-mimalloc tests ok (219 passed, 0 failed) 
+==> zigbuild c-mimalloc from /src/wt/c-mimalloc (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  c-mimalloc: 17,476,224 bytes
+==> done: c-mimalloc
+2026-11-21T21:38:37Z c-mimalloc built /opt/bins/c-mimalloc
+2026-11-21T22:37:44Z c-mimalloc rebased onto perf/stage-b: 2b43755 (2 commits)
+2026-11-21T22:38:04Z c-mimalloc tests ok (220 passed, 0 failed) 
+==> zigbuild c-mimalloc from /src/wt/c-mimalloc (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 15s
+  c-mimalloc: 17,477,312 bytes
+==> done: c-mimalloc
+2026-11-21T22:39:20Z c-mimalloc built /opt/bins/c-mimalloc
+2026-11-21T23:07:09Z c-mimalloc rebased onto perf/stage-b: 5b5a676 (3 commits)
+2026-11-21T23:07:29Z c-mimalloc tests ok (220 passed, 0 failed) 
+==> zigbuild c-mimalloc from /src/wt/c-mimalloc (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 16s
+  c-mimalloc: 17,477,632 bytes
+==> done: c-mimalloc
+2026-11-21T23:08:46Z c-mimalloc built /opt/bins/c-mimalloc
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 17s
+  b-stage: 17,213,352 bytes
+==> done: b-stage
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 16s
+  b-stage: 17,477,632 bytes
+==> done: b-stage
+2026-11-21T23:16:22Z c-sso-off rebased onto perf/stage-b: 257b685 (1 commits)
+2026-11-21T23:16:43Z c-sso-off tests ok (221 passed, 0 failed) 
+==> zigbuild c-sso-off from /src/wt/c-sso-off (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 12s
+  c-sso-off: 16,938,176 bytes
+==> done: c-sso-off
+2026-11-21T23:17:56Z c-sso-off built /opt/bins/c-sso-off
+2026-11-21T23:20:42Z c-sso-off rebased onto perf/stage-b: c9b5c30 (1 commits)
+2026-11-21T23:21:02Z c-sso-off tests ok (222 passed, 0 failed) 
+==> zigbuild c-sso-off from /src/wt/c-sso-off (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 12s
+  c-sso-off: 16,938,624 bytes
+==> done: c-sso-off
+2026-11-21T23:22:15Z c-sso-off built /opt/bins/c-sso-off
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 11s
+  b-stage: 16,938,624 bytes
+==> done: b-stage
+2026-11-21T23:41:30Z c-tls-pq rebased onto perf/stage-b: 22f5334 (1 commits)
+2026-11-21T23:41:36Z c-tls-pq TESTS FAILED (exit 101; 0 passed, 0 failed): see results/c-tls-pq-tests.log
+2026-11-21T23:41:53Z c-tls-pq rebased onto perf/stage-b: d9a5171 (1 commits)
+2026-11-21T23:42:13Z c-tls-pq tests ok (225 passed, 0 failed) 
+==> zigbuild c-tls-pq from /src/wt/c-tls-pq (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 11s
+  c-tls-pq: 16,943,552 bytes
+==> done: c-tls-pq
+2026-11-21T23:43:24Z c-tls-pq built /opt/bins/c-tls-pq
+2026-11-22T00:06:52Z c-tls-pq rebased onto perf/stage-b: c502407 (1 commits)
+2026-11-22T00:07:19Z c-tls-pq tests ok (225 passed, 0 failed) 
+==> zigbuild c-tls-pq from /src/wt/c-tls-pq (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 11s
+  c-tls-pq: 16,943,552 bytes
+==> done: c-tls-pq
+2026-11-22T00:08:31Z c-tls-pq built /opt/bins/c-tls-pq
+==> zigbuild b-stage from /src/wt/b-stage (features: fast)
+   --> src/fastpath/runtime.rs:332:9
+    Finished `release` profile [optimized] target(s) in 1m 12s
+  b-stage: 16,943,552 bytes
+==> done: b-stage
