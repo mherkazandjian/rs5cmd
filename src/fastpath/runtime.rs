@@ -329,7 +329,7 @@ async fn read_file(path: &std::path::Path) -> anyhow::Result<bytes::Bytes> {
     use monoio::buf::IoBufMut;
     let file = monoio::fs::File::open(path).await?;
     let len = file.metadata().await?.len() as usize;
-    let mut buf = crate::storage::upload_body::buffer(len);
+    let buf = crate::storage::upload_body::buffer(len);
     let lead = buf.len();
     // The slice covers the `len` bytes after the lead; read_exact_at fills all of it.
     let slice = buf.slice_mut(lead..lead + len);
