@@ -114,7 +114,7 @@ A prefix ending in `/` counts only that level; add `*` for the whole subtree. JS
 `rs5cmd tree [OPTIONS] <TARGET>` draws the hierarchy under an S3 prefix or a local directory.
 
 Flags: `--depth N` (levels to descend), `--limit N` (stop after N keys), `--size` (append each
-object's size). Output is always text, also with `--json`.
+object's size). Output is text only: with `--json`, `tree` fails (use `ls --json`).
 
 ## head
 
@@ -231,6 +231,8 @@ is concatenated in key order. A local source must be a single file. Flag: `--ver
 
 `rs5cmd pipe [OPTIONS] <s3://bucket/key>` uploads stdin, as a multipart upload when the input
 fills at least one part. Without `--content-type`, the type is guessed from the key's extension.
+It prints `pipe s3://bucket/key`, or with `--json`
+`{"destination":"s3://bucket/key","operation":"pipe","success":true}`.
 
 Flags: `-p/--part-size MiB` (default 50), `-c/--concurrency N` (default 5), `--storage-class`,
 `--acl`, `--content-type`, `--content-encoding`, `--content-disposition`, `--cache-control`,

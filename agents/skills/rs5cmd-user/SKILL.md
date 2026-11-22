@@ -231,7 +231,8 @@ stderr.
 
 These are a `cp`/`mv`/`rm`/`sync`/`mb`/`rb` result (success, then failure), an `ls` record, a
 `du` summary and a `presign` result. `rm`, `mb` and `rb` results have no `destination`.
-`--dry-run` adds `"dryRun":true`. `pipe`, `tree` and `cat` print plain text even with `--json`.
+`--dry-run` adds `"dryRun":true`. A `pipe` result has a `destination` and no `source`. `tree`
+refuses `--json` (use `ls --json`), and `cat` prints the object's bytes.
 In `--json` mode, failed operations are also printed on stdout, so check `success`.
 
 Exit codes: `0` success, `1` at least one operation failed, `2` bad command line, `130`

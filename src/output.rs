@@ -146,6 +146,29 @@ pub fn op_error(op: &str, src: &str, dst: Option<&str>, err: &str) {
     }
 }
 
+/// Emits the result of an operation that has a destination but no source URL (`pipe`, which
+/// reads stdin), as s5cmd does. Text: `op dst` on success, `ERROR op dst: err` on stderr;
+/// JSON: `{"operation":op,"success":true,"destination":dst}`, with `"success":false` and
+/// `"error"` for a failure.
+pub fn op_result_to(op: &str, dst: &str, err: Option<&str>) {
+    if is_json() {
+        let mut v = serde_json::json!({
+            "operation": op,
+            "success": err.is_none(),
+            "destination": dst,
+        });
+        if let Some(e) = err {
+            v["error"] = serde_json::Value::String(e.to_string());
+        }
+        line(format_args!("{v}"));
+    } else {
+        match err {
+            None => line(format_args!("{op} {dst}")),
+            Some(e) => err_line(format_args!("{} {op} {dst}: {e}", paint_error("ERROR"))),
+        }
+    }
+}
+
 /// Emits a pre-built JSON value as one line (used by `ls`/`du` in JSON mode).
 pub fn json_line(v: serde_json::Value) {
     line(format_args!("{v}"));

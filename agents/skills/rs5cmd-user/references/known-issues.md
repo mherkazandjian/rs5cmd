@@ -109,7 +109,7 @@ and warning lines to every invocation. Always set `AWS_REGION`.
 
 ### 2.6 `--json` gaps
 
-- `pipe`, `tree`, `cat`, `import-s3cfg` and `completion` print plain text with `--json`.
+- `cat`, `import-s3cfg` and `completion` print plain text with `--json`; `tree` refuses it.
 - In JSON mode a failed operation is reported on **stdout** as `{"success":false,...}` (in text
   mode it goes to stderr). Parse every line and test `success`; also test the exit code.
 - The `sync` summary line is not printed in JSON mode.
