@@ -39,6 +39,15 @@ aws-smithy-types = { version = "1", features = ["http-body-1-x"] }
 bytes = "1"
 http-body = "1"
 aws-credential-types = "1"
+# The lean data path (src/storage/lean.rs) parses S3 error XML with the SDK's XML reader, and
+# jitters retry delays as the SDK does; both are in the SDK's dependency tree already.
+aws-smithy-xml = "0.60"
+# The configuration's service-specific settings (the S3 endpoint), read as the SDK reads them.
+aws-types = "1"
+# The SDK's stalled-stream body for lean downloads; both already built with these features.
+aws-smithy-runtime = { version = "1", default-features = false, features = ["client"] }
+aws-smithy-async = { version = "1", features = ["rt-tokio"] }
+fastrand = "2"
 
 # rs5cmd's HTTP client for S3 (src/storage/s3.rs `build_http_client`): hyper + hyper-rustls,
 # HTTP/1.1 only (#14), adapted to the smithy `HttpClient` trait; it also carries
@@ -95,7 +104,7 @@ mimalloc = ["dep:mimalloc"]
 # ~/.aws/config, as `aws sso login` sets up. Off by default (release builds leave it out):
 # without it such a profile fails with an error that names the feature.
 sso = ["aws-config/sso"]
-fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:aws-sigv4", "dep:sha2", "dep:hex", "dep:core_affinity"]
+fast = ["dep:monoio", "dep:monoio-transports", "dep:monoio-http", "dep:monoio-rustls", "dep:sha2", "dep:hex", "dep:core_affinity"]
 # FUSE mount (`rs5cmd mount`): rclone-style local mount of a remote S3 path.
 # Linux mounts via libfuse3's `fusermount3` helper at runtime — the `fuse3`
 # crate speaks the FUSE protocol in pure Rust, so no libfuse dev headers are
@@ -133,9 +142,9 @@ optional = true
 version = "0.4"
 optional = true
 
+# SigV4 for the lean data path (src/storage/lean.rs) and `--fast`; the SDK links it already.
 [dependencies.aws-sigv4]
 version = "1"
-optional = true
 features = ["sign-http"]
 
 [dependencies.sha2]

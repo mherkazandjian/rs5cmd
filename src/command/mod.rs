@@ -62,6 +62,19 @@ pub struct GlobalOpts {
     #[arg(long, global = true)]
     pub tls_post_quantum: bool,
 
+    /// How object requests are sent on the default engine: `sdk`, through the AWS SDK (the
+    /// default), or `lean`, by rs5cmd itself on the SDK's connections, credentials and endpoint
+    /// rules, which costs less CPU per request. `lean` covers downloads, `cat` and object
+    /// metadata so far; the rest goes through the SDK either way. `--fast` is separate.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = DataPath::Sdk,
+        env = "RS5CMD_DATA_PATH"
+    )]
+    pub data_path: DataPath,
+
     /// Print what would be done without actually doing it.
     #[arg(long, global = true)]
     pub dry_run: bool,
@@ -178,6 +191,23 @@ pub struct GlobalOpts {
     pub install_completion: bool,
 }
 
+/// `--data-path`: who sends object requests on the default engine (see `storage::lean`).
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataPath {
+    Sdk,
+    Lean,
+}
+
+// clap's `default_value_t` requires `Display`.
+impl std::fmt::Display for DataPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            DataPath::Sdk => "sdk",
+            DataPath::Lean => "lean",
+        })
+    }
+}
+
 /// User-facing `--color` choice. Mirrors [`ColorChoice`] but lives on the CLI
 /// surface so `output` stays free of clap.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +268,7 @@ impl GlobalOpts {
             max_retries: self.retry_count,
             upload_limiter,
             download_limiter,
+            lean: self.data_path == DataPath::Lean,
             ..Default::default()
         }
     }

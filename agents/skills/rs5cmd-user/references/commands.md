@@ -51,6 +51,7 @@ Accepted before or after the command name.
 | `--limit-upload RATE`, `--limit-download RATE` | Bandwidth cap in bytes per second: `512KB`, `100MB`, `1GB`. One budget shared by all workers of a command |
 | `--limitrate RATE` | Caps both directions; the two flags above override it per direction |
 | `--use-list-objects-v1` | Use ListObjects v1 (for providers without v2) |
+| `--data-path sdk\|lean` | Who sends object requests on the default engine. `sdk` (default): the AWS SDK. `lean`: rs5cmd itself, on the same connections, credentials, endpoint rules and retries, with less CPU per request; it covers downloads, `cat` and object metadata so far. Opt-in while it is being tested. Env: `RS5CMD_DATA_PATH` |
 | `--dry-run` | Print what would be done; change nothing |
 | `--json` | One JSON object per line on stdout |
 | `--color auto\|always\|never` | Default `auto`: colour only on a terminal, off when `NO_COLOR` is set or with `--json` |
