@@ -45,7 +45,7 @@ Accepted before or after the command name.
 | `--ca-certs-file PEM` | Trust extra CA certificates; ignored with `--no-verify-ssl` |
 | `-x`, `--proxy URL` | `socks5://`, `socks5h://`, `http://` or `https://[user:pass@]host:port` |
 | `--request-payer requester` | For requester-pays buckets |
-| `--no-sign-request` | Accepted, but has no effect in v0.1.0 (requests are still signed) |
+| `--no-sign-request` | Send requests unsigned, without credentials: anonymous access to public buckets. `cp --fast` then uses the default path |
 | `--numworkers N` | Parallel operations. Default 256 |
 | `--retry-count N` | Retries for transient errors. Default 10 |
 | `--limit-upload RATE`, `--limit-download RATE` | Bandwidth cap in bytes per second: `512KB`, `100MB`, `1GB`. One budget shared by all workers of a command |

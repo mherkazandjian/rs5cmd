@@ -870,6 +870,15 @@ async fn try_fast_path(
         return Ok(None);
     }
 
+    // The fast path signs every request; unsigned (anonymous) requests are the default path's
+    // (#6).
+    if global.no_sign_request {
+        eprintln!(
+            "note: --fast does not send unsigned requests: --no-sign-request uses the default path"
+        );
+        return Ok(None);
+    }
+
     // Endpoint: the fast path needs an explicit path-style endpoint for now.
     let Some(ep_raw) = global.endpoint_url.clone() else {
         anyhow::bail!("--fast currently requires --endpoint-url (e.g. http://host:9000)");

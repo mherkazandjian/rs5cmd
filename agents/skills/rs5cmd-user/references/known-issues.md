@@ -84,12 +84,6 @@ holds for the object deletions of `--dry-run rb --force`. To preview, run `ls` w
 pattern and filters. `--dry-run rm` on a single object and `--dry-run sync --delete` do print
 their `(dry-run) rm ...` lines.
 
-### 2.3 `--no-sign-request` does nothing
-
-The flag is accepted, but requests are still signed. Without credentials the command fails with
-`no providers in chain provided credentials`. Anonymous access to public buckets is not
-available in v0.1.0.
-
 ### 2.4 Broken pipe makes rs5cmd panic
 
 ```
