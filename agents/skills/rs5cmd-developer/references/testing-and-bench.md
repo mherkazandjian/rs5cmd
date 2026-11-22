@@ -67,6 +67,7 @@ private key.
 | `RS5CMD_TLS_ENDPOINT` | Enables the HTTPS fast-path unit test |
 | `RS5CMD_TEST_ENDPOINT` | Endpoint for `tests/e2e_region.rs` (default `http://minio:9000`) |
 | `RS5CMD_TEST_TMP` | Scratch directory for `tests/e2e_region.rs` (default `/tmp`) |
+| `RS5CMD_DATA_PATH=lean` | Every `rs5cmd` the tests start uses the lean data path (`--data-path`'s variable): run the e2e suite once with it and once without. `tests/lean_path.rs` compares the two paths itself, on an in-test server, whatever it is set to |
 
 ## What the test suite is
 

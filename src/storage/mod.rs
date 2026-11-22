@@ -1,6 +1,7 @@
 //! Storage abstraction over local filesystem and S3.
 
 pub mod fs;
+pub(crate) mod lean;
 pub(crate) mod partial;
 
 /// Removes the temporary files of downloads still in progress, for a process that was
@@ -223,6 +224,9 @@ pub struct Options {
     /// Aggregate download bandwidth cap (`--limit-download`), shared across all
     /// workers. `None` means no download throttling.
     pub download_limiter: Option<Arc<RateLimiter>>,
+    /// `--data-path lean`: S3 clients send the object requests the lean path covers themselves
+    /// (`lean.rs`).
+    pub lean: bool,
 }
 
 /// Default multipart part size (bytes): 50 MiB, s5cmd's `--part-size` default (`cp`, `mv`,
@@ -259,6 +263,7 @@ impl Default for Options {
             remove_empty_dirs: false,
             upload_limiter: None,
             download_limiter: None,
+            lean: false,
         }
     }
 }

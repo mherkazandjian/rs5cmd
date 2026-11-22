@@ -267,9 +267,8 @@ fn cached_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
     ca_certs: Option<&str>,
-) -> anyhow::Result<aws_smithy_runtime_api::client::http::SharedHttpClient> {
-    use aws_smithy_runtime_api::client::http::SharedHttpClient;
-    static CACHE: std::sync::Mutex<Vec<(String, SharedHttpClient)>> =
+) -> anyhow::Result<HttpClients> {
+    static CACHE: std::sync::Mutex<Vec<(String, HttpClients)>> =
         std::sync::Mutex::new(Vec::new());
     let key = format!("{no_verify}\u{0}{proxy:?}\u{0}{ca_certs:?}");
     if let Some((_, c)) = CACHE.lock().unwrap().iter().find(|(k, _)| *k == key) {
@@ -282,6 +281,23 @@ fn cached_http_client(
     }
     cache.push((key, client.clone()));
     Ok(client)
+}
+
+/// One HTTP client, in the two forms its users take: the SDK's `HttpClient`, and the source of
+/// its pooled connectors for the lean data path (`connector`), which then shares the SDK's
+/// connections, connect timeout and error classes.
+#[derive(Clone)]
+struct HttpClients {
+    sdk: aws_smithy_runtime_api::client::http::SharedHttpClient,
+    connectors: std::sync::Arc<dyn Connectors>,
+}
+
+/// The pooled connector for a connect timeout: the one the SDK gets for that timeout.
+trait Connectors: Send + Sync {
+    fn connector(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector;
 }
 
 /// rs5cmd's HTTP client for S3 requests: hyper 1 over rustls (aws-lc-rs).
@@ -306,7 +322,7 @@ fn build_http_client(
     no_verify: bool,
     proxy: Option<ProxyConfig>,
     ca_certs: Option<&str>,
-) -> anyhow::Result<aws_smithy_runtime_api::client::http::SharedHttpClient> {
+) -> anyhow::Result<HttpClients> {
     use aws_smithy_runtime_api::client::http::SharedHttpClient;
     use hyper_rustls::HttpsConnectorBuilder;
     use hyper_util::client::legacy::connect::HttpConnector;
@@ -354,17 +370,37 @@ fn build_http_client(
         .with_tls_config(tls)
         .https_or_http()
         .enable_http1();
+    fn both<C>(client: SdkHyperClient<C>) -> HttpClients
+    where
+        SdkHyperClient<C>: Connectors + 'static,
+        Shared<C>: aws_smithy_runtime_api::client::http::HttpClient + 'static,
+    {
+        let client = std::sync::Arc::new(client);
+        HttpClients {
+            sdk: SharedHttpClient::new(Shared(std::sync::Arc::clone(&client))),
+            connectors: client,
+        }
+    }
     Ok(match proxy {
         None => {
             let mut tcp = HttpConnector::new();
             tcp.enforce_http(false);
             tcp.set_nodelay(true);
-            SharedHttpClient::new(SdkHyperClient::new(https.wrap_connector(tcp)))
+            both(SdkHyperClient::new(https.wrap_connector(tcp)))
         }
-        Some(p) => SharedHttpClient::new(SdkHyperClient::new(
+        Some(p) => both(SdkHyperClient::new(
             https.wrap_connector(ProxyConnector { proxy: p }),
         )),
     })
+}
+
+/// An `SdkHyperClient` shared by the SDK (this) and the lean data path (`Connectors`).
+struct Shared<C>(std::sync::Arc<SdkHyperClient<C>>);
+
+impl<C> std::fmt::Debug for Shared<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdkHyperClient")
+    }
 }
 
 /// A smithy `HttpClient` over a pooled hyper-util client on connector `C` (direct or through a
@@ -395,7 +431,7 @@ impl<C> std::fmt::Debug for SdkHyperClient<C> {
     }
 }
 
-impl<C> aws_smithy_runtime_api::client::http::HttpClient for SdkHyperClient<C>
+impl<C> aws_smithy_runtime_api::client::http::HttpClient for Shared<C>
 where
     C: tower_service::Service<http::Uri> + Clone + Send + Sync + 'static,
     C::Response: hyper::rt::Read
@@ -412,11 +448,30 @@ where
         settings: &aws_smithy_runtime_api::client::http::HttpConnectorSettings,
         _components: &aws_smithy_runtime_api::client::runtime_components::RuntimeComponents,
     ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector {
+        self.0.connector(settings.connect_timeout())
+    }
+}
+
+impl<C> Connectors for SdkHyperClient<C>
+where
+    C: tower_service::Service<http::Uri> + Clone + Send + Sync + 'static,
+    C::Response: hyper::rt::Read
+        + hyper::rt::Write
+        + hyper_util::client::legacy::connect::Connection
+        + Send
+        + Unpin
+        + 'static,
+    C::Future: Send + 'static,
+    C::Error: Into<BoxError>,
+{
+    fn connector(
+        &self,
+        timeout: Option<std::time::Duration>,
+    ) -> aws_smithy_runtime_api::client::http::SharedHttpConnector {
         use aws_smithy_runtime_api::client::http::SharedHttpConnector;
         use hyper_util::client::legacy::Client;
         use hyper_util::rt::{TokioExecutor, TokioTimer};
 
-        let timeout = settings.connect_timeout();
         let mut clients = self.clients.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, c)) = clients.iter().find(|(t, _)| *t == timeout) {
             return c.clone();
@@ -1142,6 +1197,42 @@ pub struct S3 {
     /// Aggregate download bandwidth cap (`--limit-download`), shared across all
     /// workers (Arc). `None` means no download throttling (#433).
     download_limiter: Option<std::sync::Arc<RateLimiter>>,
+    /// `--data-path lean`: object requests sent by rs5cmd itself (`super::lean`), with this
+    /// client's settings. `None`: everything goes through the SDK.
+    lean: Option<std::sync::Arc<super::lean::Lean>>,
+}
+
+/// A GetObject response, as the transfers use it, from either data path.
+struct Got {
+    content_range: Option<String>,
+    content_length: Option<i64>,
+    /// The `MTIME_METADATA_KEY` metadata (--preserve-timestamps).
+    mtime: Option<String>,
+    body: ByteStream,
+}
+
+impl Got {
+    fn from_lean(resp: aws_smithy_runtime_api::client::orchestrator::HttpResponse) -> Got {
+        let h = resp.headers();
+        let content_range = h.get("content-range").map(str::to_owned);
+        let content_length = h.get("content-length").and_then(|v| v.parse().ok());
+        let mtime = h
+            .get(format!("x-amz-meta-{}", crate::storage::MTIME_METADATA_KEY))
+            .map(str::to_owned);
+        Got {
+            content_range,
+            content_length,
+            mtime,
+            body: ByteStream::new(resp.into_body()),
+        }
+    }
+}
+
+/// A HeadObject response, as `stat` and the copies use it, from either data path.
+struct Head {
+    etag: String,
+    last_modified: Option<aws_smithy_types::DateTime>,
+    size: i64,
 }
 
 impl S3 {
@@ -1153,11 +1244,12 @@ impl S3 {
         // the whole process, however many S3 clients the command builds (F09). The loader reads
         // nothing else from `opts`. The HTTP client is shared separately below. Cached with it:
         // whether no region was configured at all (then the bucket's region is asked below).
-        type Loaded = (aws_config::SdkConfig, bool);
+        // With them, the lean data path's credentials cache for that configuration.
+        type Loaded = (aws_config::SdkConfig, bool, std::sync::Arc<super::lean::CredsCache>);
         static SHARED: tokio::sync::Mutex<Vec<((Option<String>, Option<String>), Loaded)>> =
             tokio::sync::Mutex::const_new(Vec::new());
         let key = (opts.region.clone(), opts.profile.clone());
-        let (shared, region_unset) = {
+        let (shared, region_unset, creds) = {
             let mut cache = SHARED.lock().await;
             match cache.iter().find(|(k, _)| *k == key) {
                 Some((_, c)) => c.clone(),
@@ -1171,8 +1263,10 @@ impl S3 {
                         loader = loader.profile_name(profile);
                     }
                     let c = loader.load().await;
-                    cache.push((key, (c.clone(), unset)));
-                    (c, unset)
+                    let creds =
+                        std::sync::Arc::new(super::lean::CredsCache::new(c.credentials_provider()));
+                    cache.push((key, (c.clone(), unset, std::sync::Arc::clone(&creds))));
+                    (c, unset, creds)
                 }
             }
         };
@@ -1199,6 +1293,22 @@ impl S3 {
             .or_else(|| std::env::var("S3_ENDPOINT_URL").ok());
 
         let endpoint_key = endpoint.clone().unwrap_or_default();
+        // The endpoint the SDK client ends up with (`Builder::from(&SdkConfig)`): this one, else
+        // the configuration's S3 endpoint (`AWS_ENDPOINT_URL_S3`, a profile's `services`
+        // section), else its global one (a profile's `endpoint_url`).
+        let lean_endpoint = endpoint.clone().or_else(|| {
+            let key = aws_types::service_config::ServiceConfigKey::builder()
+                .service_id("S3")
+                .env("AWS_ENDPOINT_URL")
+                .profile("endpoint_url")
+                .build()
+                .ok()?;
+            shared
+                .service_config()
+                .and_then(|c| aws_types::service_config::LoadServiceConfig::load_config(c, key))
+                .or_else(|| shared.endpoint_url().map(str::to_owned))
+        });
+        let mut force_path_style = None;
         if let Some(ep) = endpoint {
             builder = builder.endpoint_url(ep);
             // Default to path-style for custom endpoints (MinIO and most
@@ -1210,10 +1320,12 @@ impl S3 {
                 _ => true,
             };
             builder = builder.force_path_style(force_path);
+            force_path_style = Some(force_path);
         } else if let Some(style) = opts.addressing_style.as_deref() {
             // No custom endpoint (real AWS): honor an explicit override; the SDK
             // default is virtual-host style.
             builder = builder.force_path_style(style == "path");
+            force_path_style = Some(style == "path");
         }
         // `--use-dualstack-endpoint` (#719): resolve the dual-stack (IPv4+IPv6)
         // S3 endpoint so traffic can use IPv6. `--use-fips-endpoint`: resolve the
@@ -1229,11 +1341,12 @@ impl S3 {
 
         // rs5cmd's own HTTP client for every configuration (`build_http_client`): HTTP/1.1 only,
         // and the only way to express `--no-verify-ssl`, `--proxy` and `--ca-certs-file`.
-        builder = builder.http_client(cached_http_client(
+        let http = cached_http_client(
             opts.no_verify_ssl,
             effective_proxy(opts)?,
             opts.ca_certs_file.as_deref(),
-        )?);
+        )?;
+        builder = builder.http_client(http.sdk.clone());
         // `--retry-count` (default 10, like s5cmd) is the number of retries after the first
         // attempt. It never reached the SDK, which then gave up after 3 attempts (F02, #17).
         builder = builder.retry_config(
@@ -1251,6 +1364,36 @@ impl S3 {
                 }
             }
         }
+        // The lean data path gets what the SDK client was given, so both send the same requests to
+        // the same place, on the same connections (the connector for the SDK's connect timeout).
+        let lean = opts.lean.then(|| {
+            std::sync::Arc::new(super::lean::Lean::new(super::lean::LeanConfig {
+                connector: http
+                    .connectors
+                    .connector(shared.timeout_config().and_then(|t| t.connect_timeout())),
+                credentials: creds,
+                region: client
+                    .config()
+                    .region()
+                    .map(|r| r.to_string())
+                    .unwrap_or_else(|| "us-east-1".to_string()),
+                endpoint: lean_endpoint,
+                force_path_style,
+                // The flags, else the configuration's (`AWS_USE_FIPS_ENDPOINT`, ...), as the
+                // SDK builder takes them.
+                use_dual_stack: opts.use_dualstack_endpoint
+                    || shared.use_dual_stack().unwrap_or(false),
+                use_fips: opts.use_fips_endpoint || shared.use_fips().unwrap_or(false),
+                max_attempts: opts.max_retries.saturating_add(1),
+                request_payer: opts.request_payer.clone(),
+                // The configuration's, else the SDK's default (its default runtime plugin).
+                stalled_stream: shared.stalled_stream_protection().unwrap_or_else(|| {
+                    aws_sdk_s3::config::StalledStreamProtectionConfig::enabled()
+                        .grace_period(std::time::Duration::from_secs(5))
+                        .build()
+                }),
+            }))
+        });
         Ok(S3 {
             client,
             dry_run: opts.dry_run,
@@ -1265,6 +1408,77 @@ impl S3 {
             preserve_timestamps: opts.preserve_timestamps,
             upload_limiter: opts.upload_limiter.clone(),
             download_limiter: opts.download_limiter.clone(),
+            lean,
+        })
+    }
+
+    /// GetObject, whole or with a `Range` value: on the lean data path when it serves the
+    /// bucket, else through the SDK.
+    async fn get(&self, src: &Url, range: Option<String>) -> anyhow::Result<Got> {
+        if let Some(lean) = &self.lean {
+            if let Some(r) = lean.get_object(src, range.as_deref()).await {
+                return r.map(Got::from_lean);
+            }
+        }
+        let mut req = self
+            .client
+            .get_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .set_range(range)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let out = req.send().await?;
+        Ok(Got {
+            content_range: out.content_range().map(str::to_owned),
+            content_length: out.content_length(),
+            mtime: out
+                .metadata()
+                .and_then(|m| m.get(crate::storage::MTIME_METADATA_KEY))
+                .cloned(),
+            body: out.body,
+        })
+    }
+
+    /// HeadObject, on the lean data path when it serves the bucket, else through the SDK.
+    async fn head(&self, src: &Url) -> anyhow::Result<Head> {
+        if let Some(lean) = &self.lean {
+            if let Some(r) = lean.head_object(src).await {
+                return r.map(|resp| {
+                    let h = resp.headers();
+                    Head {
+                        etag: h.get("etag").unwrap_or_default().to_string(),
+                        last_modified: h.get("last-modified").and_then(|v| {
+                            aws_smithy_types::DateTime::from_str(
+                                v,
+                                aws_smithy_types::date_time::Format::HttpDate,
+                            )
+                            .ok()
+                        }),
+                        size: h
+                            .get("content-length")
+                            .and_then(|v| v.parse().ok())
+                            .unwrap_or(0),
+                    }
+                });
+            }
+        }
+        let mut req = self
+            .client
+            .head_object()
+            .bucket(&src.bucket)
+            .key(&src.path)
+            .set_request_payer(self.request_payer());
+        if !src.version_id.is_empty() {
+            req = req.version_id(&src.version_id);
+        }
+        let out = req.send().await?;
+        Ok(Head {
+            etag: out.e_tag().unwrap_or_default().to_string(),
+            last_modified: out.last_modified().cloned(),
+            size: out.content_length().unwrap_or(0),
         })
     }
 
@@ -1284,17 +1498,7 @@ impl S3 {
 
     /// Returns the object body as a streaming reader.
     pub async fn read(&self, src: &Url) -> anyhow::Result<ByteStream> {
-        let mut req = self
-            .client
-            .get_object()
-            .bucket(&src.bucket)
-            .key(&src.path)
-            .set_request_payer(self.request_payer());
-        if !src.version_id.is_empty() {
-            req = req.version_id(&src.version_id);
-        }
-        let resp = req.send().await?;
-        Ok(resp.body)
+        Ok(self.get(src, None).await?.body)
     }
 
     /// Reads the byte range `[offset, offset+len)` of an object in a single
@@ -1305,20 +1509,10 @@ impl S3 {
             return Ok(Vec::new());
         }
         let range = format!("bytes={}-{}", offset, offset + len - 1);
-        let mut req = self
-            .client
-            .get_object()
-            .bucket(&src.bucket)
-            .key(&src.path)
-            .range(range)
-            .set_request_payer(self.request_payer());
-        if !src.version_id.is_empty() {
-            req = req.version_id(&src.version_id);
-        }
-        let resp = match req.send().await {
+        let resp = match self.get(src, Some(range)).await {
             Ok(r) => r,
             Err(e) if is_range_not_satisfiable(&e) => return Ok(Vec::new()),
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         };
         let data = resp.body.collect().await?.into_bytes().to_vec();
         Ok(data)
@@ -1326,17 +1520,7 @@ impl S3 {
 
     /// Returns the object's size via HeadObject.
     async fn head_size(&self, src: &Url) -> anyhow::Result<u64> {
-        let mut req = self
-            .client
-            .head_object()
-            .bucket(&src.bucket)
-            .key(&src.path)
-            .set_request_payer(self.request_payer());
-        if !src.version_id.is_empty() {
-            req = req.version_id(&src.version_id);
-        }
-        let out = req.send().await?;
-        Ok(out.content_length().unwrap_or(0).max(0) as u64)
+        Ok(self.head(src).await?.size.max(0) as u64)
     }
 
     /// Downloads the remote object to a local path.
@@ -1359,17 +1543,7 @@ impl S3 {
         }
 
         let part_size = self.part_size;
-        let mut req = self
-            .client
-            .get_object()
-            .bucket(&src.bucket)
-            .key(&src.path)
-            .range(format!("bytes=0-{}", part_size - 1))
-            .set_request_payer(self.request_payer());
-        if !src.version_id.is_empty() {
-            req = req.version_id(&src.version_id);
-        }
-        let resp = match req.send().await {
+        let resp = match self.get(src, Some(format!("bytes=0-{}", part_size - 1))).await {
             Ok(r) => r,
             // A zero-byte object makes the ranged request unsatisfiable (HTTP
             // 416); fall back to a plain GET, which returns the whole (possibly
@@ -1377,22 +1551,20 @@ impl S3 {
             Err(e) if is_range_not_satisfiable(&e) => {
                 return self.download_single(src, dst).await;
             }
-            Err(e) => return Err(e.into()),
+            Err(e) => return Err(e),
         };
 
         // A 200 without Content-Range: the server ignored the Range header and sent the whole
         // object, so there is nothing more to fetch.
-        let ranged = resp.content_range().is_some();
-        let total = parse_content_range_total(resp.content_range())
-            .or_else(|| resp.content_length().map(|l| l.max(0) as u64))
+        let ranged = resp.content_range.is_some();
+        let total = parse_content_range_total(resp.content_range.as_deref())
+            .or_else(|| resp.content_length.map(|l| l.max(0) as u64))
             .unwrap_or(0);
 
-        // With --preserve-timestamps, capture the stored mtime metadata before
-        // the body is consumed, to restore it after the file is written.
+        // With --preserve-timestamps, the stored mtime metadata, to restore it after the file
+        // is written.
         let mtime_value = if self.preserve_timestamps {
-            resp.metadata()
-                .and_then(|m| m.get(crate::storage::MTIME_METADATA_KEY))
-                .cloned()
+            resp.mtime.clone()
         } else {
             None
         };
@@ -1450,31 +1622,19 @@ impl S3 {
         let tasks = (1..n_parts).map(|i| {
             let offset = i * part_size;
             let len = part_size.min(total - offset);
-            let client = self.client.clone();
-            let bucket = src.bucket.clone();
-            let key = src.path.clone();
-            let vid = src.version_id.clone();
-            let rp = self.request_payer();
             let file = std::sync::Arc::clone(&file);
             let limiter = self.download_limiter.clone();
             async move {
                 // Held for this part's request and body only, never while waiting for another.
                 let _permit = budget.acquire().await?;
                 let range = format!("bytes={}-{}", offset, offset + len - 1);
-                let mut req = client
-                    .get_object()
-                    .bucket(&bucket)
-                    .key(&key)
-                    .range(range)
-                    .set_request_payer(rp);
-                if !vid.is_empty() {
-                    req = req.version_id(vid);
-                }
-                let resp = req.send().await?;
+                let resp = self.get(src, Some(range)).await?;
                 let end = write_body(resp.body, &file, offset, limiter.as_deref()).await?;
                 anyhow::ensure!(
                     end == offset + len,
-                    "s3://{bucket}/{key}: part at {offset} got {} of {len} bytes",
+                    "s3://{}/{}: part at {offset} got {} of {len} bytes",
+                    src.bucket,
+                    src.path,
                     end - offset
                 );
                 anyhow::Ok(())
@@ -2250,17 +2410,8 @@ impl S3 {
     /// Fetches the full body of `src` into memory. Used by the `--links`
     /// symlink round-trip to read a placeholder object's stored target. (#785)
     pub async fn get_object_bytes(&self, src: &Url) -> anyhow::Result<Vec<u8>> {
-        let mut req = self
-            .client
-            .get_object()
-            .bucket(&src.bucket)
-            .key(&src.path)
-            .set_request_payer(self.request_payer());
-        if !src.version_id.is_empty() {
-            req = req.version_id(&src.version_id);
-        }
-        let resp = req
-            .send()
+        let resp = self
+            .get(src, None)
             .await
             .map_err(|e| anyhow::anyhow!("get object s3://{}/{}: {e}", src.bucket, src.path))?;
         let data = resp.body.collect().await.map_err(|e| {
@@ -2299,33 +2450,30 @@ impl S3 {
 #[async_trait]
 impl Storage for S3 {
     async fn stat(&self, src: &Url) -> anyhow::Result<Object> {
-        let mut req = self
-            .client
-            .head_object()
-            .bucket(&src.bucket)
-            .key(&src.path)
-            .set_request_payer(self.request_payer());
-        if !src.version_id.is_empty() {
-            req = req.version_id(&src.version_id);
-        }
-
-        match req.send().await {
-            Ok(out) => Ok(Object {
+        match self.head(src).await {
+            Ok(h) => Ok(Object {
                 url: Some(src.clone()),
-                etag: out.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                mod_time: out.last_modified().and_then(|t| {
+                etag: h.etag.trim_matches('"').to_string(),
+                mod_time: h.last_modified.and_then(|t| {
                     std::time::UNIX_EPOCH
                         .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
                 }),
-                size: out.content_length().unwrap_or(0),
+                size: h.size,
                 typ: ObjectType::File,
                 ..Default::default()
             }),
             Err(e) => {
-                if e.as_service_error().map(|se| se.is_not_found()).unwrap_or(false) {
+                // Both data paths fail with the SDK's error value.
+                let not_found = e
+                    .downcast_ref::<aws_sdk_s3::error::SdkError<
+                        aws_sdk_s3::operation::head_object::HeadObjectError,
+                    >>()
+                    .and_then(|e| e.as_service_error())
+                    .is_some_and(|se| se.is_not_found());
+                if not_found {
                     Err(ObjectNotFound(src.absolute()).into())
                 } else {
-                    Err(e.into())
+                    Err(e)
                 }
             }
         }

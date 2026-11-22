@@ -166,6 +166,10 @@ fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
         argv.push("--limitrate".to_string());
         argv.push(rate.clone());
     }
+    if global.data_path != super::DataPath::Sdk {
+        argv.push("--data-path".to_string());
+        argv.push(global.data_path.to_string());
+    }
 
     argv.extend(tokens.iter().cloned());
     argv
@@ -208,6 +212,7 @@ mod tests {
             limitrate: None,
             ca_certs_file: None,
             tls_post_quantum: false,
+            data_path: crate::command::DataPath::Sdk,
             request_payer: None,
             credentials_file: None,
             s3cfg: None,
@@ -234,5 +239,10 @@ mod tests {
         assert_eq!(argv[i + 1], "http://h:9000");
         assert!(argv.iter().any(|a| a == "--dry-run"));
         assert!(!argv.iter().any(|a| a == "--no-sign-request"));
+        assert!(!argv.iter().any(|a| a == "--data-path"));
+        g.data_path = crate::command::DataPath::Lean;
+        let argv = build_argv(&g, &["ls".to_string()]);
+        let i = argv.iter().position(|a| a == "--data-path").unwrap();
+        assert_eq!(argv[i + 1], "lean");
     }
 }
