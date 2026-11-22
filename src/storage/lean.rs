@@ -31,7 +31,9 @@
 //! upload whose server stops reading for longer than the grace period. A lean upload waits.
 //!
 //! Phase 1: GetObject (whole and ranged) and HeadObject. Phase 2: PutObject and multipart
-//! uploads (Create, UploadPart, Complete, Abort).
+//! uploads (Create, UploadPart, Complete, Abort). Phase 3: ListObjectsV2, ListObjectVersions,
+//! DeleteObjects and DeleteObject; their responses become the SDK's output types, so the
+//! listings read them unchanged. ListObjects (v1, `--use-list-objects-v1`) stays on the SDK.
 
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -44,8 +46,14 @@ use aws_sdk_s3::config::endpoint::{DefaultResolver, Params, ResolveEndpoint};
 use aws_sdk_s3::operation::abort_multipart_upload::AbortMultipartUploadError;
 use aws_sdk_s3::operation::complete_multipart_upload::CompleteMultipartUploadError;
 use aws_sdk_s3::operation::create_multipart_upload::CreateMultipartUploadError;
+use aws_sdk_s3::operation::delete_object::DeleteObjectError;
+use aws_sdk_s3::operation::delete_objects::{DeleteObjectsError, DeleteObjectsOutput};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::operation::head_object::HeadObjectError;
+use aws_sdk_s3::operation::list_object_versions::{
+    ListObjectVersionsError, ListObjectVersionsOutput,
+};
+use aws_sdk_s3::operation::list_objects_v2::{ListObjectsV2Error, ListObjectsV2Output};
 use aws_sdk_s3::operation::put_object::PutObjectError;
 use aws_sdk_s3::operation::upload_part::UploadPartError;
 use aws_sdk_s3::types::CompletedPart;
@@ -256,8 +264,9 @@ enum Failure {
 struct Request<'a> {
     method: &'static str,
     key: &'a str,
-    /// In order; an empty value is sent as the bare name (`?uploads`).
-    query: Vec<(&'static str, String)>,
+    /// In order; a name without a value is sent bare (`?uploads`), an empty value as `name=`,
+    /// as the SDK sends them.
+    query: Vec<(&'static str, Option<String>)>,
     headers: Vec<(String, String)>,
     /// Rebuilt for each attempt when it can be (`SdkBody::try_clone`). A body that cannot be is
     /// sent once, without retries, as the SDK does.
@@ -268,6 +277,9 @@ struct Request<'a> {
     /// Read the response whole: a success carrying an `<Error>` document is an error, as the SDK
     /// decides for the operations without a streamed response.
     buffered: bool,
+    /// Send `x-amz-request-payer` (`--request-payer`), as every SDK request rs5cmd builds does
+    /// but the versions listing's.
+    payer: bool,
 }
 
 impl<'a> Request<'a> {
@@ -280,12 +292,13 @@ impl<'a> Request<'a> {
             body: SdkBody::empty(),
             trailer: false,
             buffered: true,
+            payer: true,
         }
     }
 
     fn version(mut self, src: &Url) -> Self {
         if !src.version_id.is_empty() {
-            self.query.push(("versionId", src.version_id.clone()));
+            self.query.push(("versionId", Some(src.version_id.clone())));
         }
         self
     }
@@ -400,7 +413,7 @@ impl Lean {
         checksummed_parts: bool,
     ) -> anyhow::Result<Option<String>> {
         let mut req = Request::new("POST", &dst.path);
-        req.query.push(("uploads", String::new()));
+        req.query.push(("uploads", None));
         req.headers = headers;
         if checksummed_parts {
             req.headers
@@ -420,8 +433,8 @@ impl Lean {
         body: SdkBody,
     ) -> anyhow::Result<CompletedPart> {
         let mut req = Request::new("PUT", &dst.path);
-        req.query.push(("partNumber", part_number.to_string()));
-        req.query.push(("uploadId", upload_id.to_string()));
+        req.query.push(("partNumber", Some(part_number.to_string())));
+        req.query.push(("uploadId", Some(upload_id.to_string())));
         let (req, sent) = req.checksummed(body, self.c.trailers);
         let checksummed = sent.is_some() || req.trailer;
         let (resp, _) = self.call(&dst.bucket, req, upload_part_error).await?;
@@ -449,7 +462,7 @@ impl Lean {
         headers: Vec<(String, String)>,
     ) -> anyhow::Result<()> {
         let mut req = Request::new("POST", &dst.path);
-        req.query.push(("uploadId", upload_id.to_string()));
+        req.query.push(("uploadId", Some(upload_id.to_string())));
         req.headers = headers;
         req.headers
             .push(("content-type".to_string(), "application/xml".to_string()));
@@ -466,8 +479,101 @@ impl Lean {
         upload_id: &str,
     ) -> anyhow::Result<()> {
         let mut req = Request::new("DELETE", &dst.path);
-        req.query.push(("uploadId", upload_id.to_string()));
+        req.query.push(("uploadId", Some(upload_id.to_string())));
         self.call(&dst.bucket, req, abort_multipart_upload_error)
+            .await
+            .map(drop)
+    }
+
+    /// One ListObjectsV2 page; keys come URL-encoded (`encoding-type=url`), as `list_v2` asks.
+    pub(crate) async fn list_objects_v2(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        delimiter: Option<&str>,
+        start_after: Option<&str>,
+        token: Option<&str>,
+    ) -> anyhow::Result<ListObjectsV2Output> {
+        let mut req = Request::new("GET", "");
+        req.query.push(("list-type", Some("2".to_string())));
+        if let Some(t) = token {
+            req.query.push(("continuation-token", Some(t.to_string())));
+        }
+        if let Some(d) = delimiter {
+            req.query.push(("delimiter", Some(d.to_string())));
+        }
+        req.query.push(("encoding-type", Some("url".to_string())));
+        req.query.push(("prefix", Some(prefix.to_string())));
+        if let Some(s) = start_after {
+            req.query.push(("start-after", Some(s.to_string())));
+        }
+        let (resp, body) = self.call(bucket, req, list_objects_v2_error).await?;
+        parse_list_v2(&body).map_err(|e| {
+            SdkError::<_, HttpResponse>::service_error(ListObjectsV2Error::unhandled(e), resp)
+                .into()
+        })
+    }
+
+    /// One ListObjectVersions page, URL-encoded as `list_object_versions` asks; without
+    /// `x-amz-request-payer`, as its SDK request.
+    pub(crate) async fn list_object_versions(
+        &self,
+        bucket: &str,
+        prefix: &str,
+        delimiter: Option<&str>,
+        key_marker: Option<&str>,
+        version_marker: Option<&str>,
+    ) -> anyhow::Result<ListObjectVersionsOutput> {
+        let mut req = Request::new("GET", "");
+        req.payer = false;
+        req.query.push(("versions", None));
+        if let Some(d) = delimiter {
+            req.query.push(("delimiter", Some(d.to_string())));
+        }
+        req.query.push(("encoding-type", Some("url".to_string())));
+        if let Some(k) = key_marker {
+            req.query.push(("key-marker", Some(k.to_string())));
+        }
+        req.query.push(("prefix", Some(prefix.to_string())));
+        if let Some(v) = version_marker {
+            req.query.push(("version-id-marker", Some(v.to_string())));
+        }
+        let (resp, body) = self.call(bucket, req, list_object_versions_error).await?;
+        parse_versions(&body).map_err(|e| {
+            SdkError::<_, HttpResponse>::service_error(ListObjectVersionsError::unhandled(e), resp)
+                .into()
+        })
+    }
+
+    /// DeleteObjects of `keys`, with the CRC32 its SDK request carries (the operation requires a
+    /// checksum and the SDK's default algorithm is CRC32).
+    pub(crate) async fn delete_objects(
+        &self,
+        bucket: &str,
+        keys: &[&str],
+    ) -> anyhow::Result<DeleteObjectsOutput> {
+        let mut req = Request::new("POST", "");
+        req.query.push(("delete", None));
+        let body = delete_body(keys);
+        req.headers
+            .push(("content-type".to_string(), "application/xml".to_string()));
+        req.headers
+            .push(("x-amz-checksum-crc32".to_string(), crc32(body.as_bytes())));
+        // The request's ChecksumAlgorithm member, which the SDK sets to the checksum it sends.
+        req.headers
+            .push(("x-amz-sdk-checksum-algorithm".to_string(), "CRC32".to_string()));
+        req.body = SdkBody::from(body);
+        let (resp, body) = self.call(bucket, req, delete_objects_error).await?;
+        parse_deleted(&body).map_err(|e| {
+            SdkError::<_, HttpResponse>::service_error(DeleteObjectsError::unhandled(e), resp)
+                .into()
+        })
+    }
+
+    /// DeleteObject (of a version, when the URL names one).
+    pub(crate) async fn delete_object(&self, src: &Url) -> anyhow::Result<()> {
+        let req = Request::new("DELETE", &src.path).version(src);
+        self.call(&src.bucket, req, delete_object_error)
             .await
             .map(drop)
     }
@@ -605,7 +711,7 @@ impl Lean {
         for (i, (k, v)) in req.query.iter().enumerate() {
             uri.push(if i == 0 { '?' } else { '&' });
             uri.push_str(k);
-            if !v.is_empty() {
+            if let Some(v) = v {
                 uri.push('=');
                 uri.push_str(&encode(v, false));
             }
@@ -628,7 +734,7 @@ impl Lean {
             }
             b = b.header(k.as_str(), v.as_str());
         }
-        if let Some(p) = &self.c.request_payer {
+        if let Some(p) = self.c.request_payer.as_ref().filter(|_| req.payer) {
             b = b.header("x-amz-request-payer", p);
         }
         let body = if req.trailer {
@@ -745,6 +851,178 @@ fn xml_element(out: &mut String, name: &str, text: &str) {
     out.push('>');
 }
 
+// --- Listings and deletes: the SDK's output types, read from S3's XML ---
+
+use aws_smithy_xml::decode::{try_data, Document as Xml, ScopedDecoder, XmlDecodeError};
+
+fn xml_date(s: &str) -> Result<aws_smithy_types::DateTime, XmlDecodeError> {
+    use aws_smithy_types::date_time::Format;
+    aws_smithy_types::DateTime::from_str(s, Format::DateTimeWithOffset)
+        .map_err(|_| XmlDecodeError::custom("invalid timestamp"))
+}
+
+fn xml_i64(s: &str) -> Result<i64, XmlDecodeError> {
+    s.parse()
+        .map_err(|_| XmlDecodeError::custom("invalid number"))
+}
+
+fn common_prefix(
+    tag: &mut ScopedDecoder<'_, '_>,
+) -> Result<aws_sdk_s3::types::CommonPrefix, XmlDecodeError> {
+    let mut b = aws_sdk_s3::types::CommonPrefix::builder();
+    while let Some(mut t) = tag.next_tag() {
+        if t.start_el().local() == "Prefix" {
+            b = b.prefix(try_data(&mut t)?);
+        }
+    }
+    Ok(b.build())
+}
+
+/// A ListObjectsV2 result (`ListBucketResult`): what `list_v2` reads of it.
+fn parse_list_v2(body: &[u8]) -> Result<ListObjectsV2Output, XmlDecodeError> {
+    use aws_sdk_s3::types::{Object, ObjectStorageClass};
+    let mut doc = Xml::try_from(body)?;
+    let mut root = doc.root_element()?;
+    let mut out = ListObjectsV2Output::builder();
+    let (mut contents, mut prefixes) = (Vec::new(), Vec::new());
+    while let Some(mut tag) = root.next_tag() {
+        match tag.start_el().local() {
+            "Contents" => {
+                let mut o = Object::builder();
+                while let Some(mut t) = tag.next_tag() {
+                    match t.start_el().local() {
+                        "Key" => o = o.key(try_data(&mut t)?),
+                        "ETag" => o = o.e_tag(try_data(&mut t)?),
+                        "LastModified" => o = o.last_modified(xml_date(&try_data(&mut t)?)?),
+                        "Size" => o = o.size(xml_i64(&try_data(&mut t)?)?),
+                        "StorageClass" => {
+                            o = o.storage_class(ObjectStorageClass::from(&*try_data(&mut t)?))
+                        }
+                        _ => {}
+                    }
+                }
+                contents.push(o.build());
+            }
+            "CommonPrefixes" => prefixes.push(common_prefix(&mut tag)?),
+            "NextContinuationToken" => out = out.next_continuation_token(try_data(&mut tag)?),
+            "IsTruncated" => out = out.is_truncated(&*try_data(&mut tag)? == "true"),
+            _ => {}
+        }
+    }
+    Ok(out
+        .set_contents(Some(contents))
+        .set_common_prefixes(Some(prefixes))
+        .build())
+}
+
+/// A ListObjectVersions result (`ListVersionsResult`): what `list_object_versions` reads of it.
+fn parse_versions(body: &[u8]) -> Result<ListObjectVersionsOutput, XmlDecodeError> {
+    use aws_sdk_s3::types::{DeleteMarkerEntry, ObjectVersion, ObjectVersionStorageClass};
+    let mut doc = Xml::try_from(body)?;
+    let mut root = doc.root_element()?;
+    let mut out = ListObjectVersionsOutput::builder();
+    let (mut versions, mut markers, mut prefixes) = (Vec::new(), Vec::new(), Vec::new());
+    while let Some(mut tag) = root.next_tag() {
+        match tag.start_el().local() {
+            "Version" => {
+                let mut v = ObjectVersion::builder();
+                while let Some(mut t) = tag.next_tag() {
+                    match t.start_el().local() {
+                        "Key" => v = v.key(try_data(&mut t)?),
+                        "VersionId" => v = v.version_id(try_data(&mut t)?),
+                        "IsLatest" => v = v.is_latest(&*try_data(&mut t)? == "true"),
+                        "ETag" => v = v.e_tag(try_data(&mut t)?),
+                        "LastModified" => v = v.last_modified(xml_date(&try_data(&mut t)?)?),
+                        "Size" => v = v.size(xml_i64(&try_data(&mut t)?)?),
+                        "StorageClass" => {
+                            let class = ObjectVersionStorageClass::from(&*try_data(&mut t)?);
+                            v = v.storage_class(class)
+                        }
+                        _ => {}
+                    }
+                }
+                versions.push(v.build());
+            }
+            "DeleteMarker" => {
+                let mut d = DeleteMarkerEntry::builder();
+                while let Some(mut t) = tag.next_tag() {
+                    match t.start_el().local() {
+                        "Key" => d = d.key(try_data(&mut t)?),
+                        "VersionId" => d = d.version_id(try_data(&mut t)?),
+                        "IsLatest" => d = d.is_latest(&*try_data(&mut t)? == "true"),
+                        "LastModified" => d = d.last_modified(xml_date(&try_data(&mut t)?)?),
+                        _ => {}
+                    }
+                }
+                markers.push(d.build());
+            }
+            "CommonPrefixes" => prefixes.push(common_prefix(&mut tag)?),
+            "IsTruncated" => out = out.is_truncated(&*try_data(&mut tag)? == "true"),
+            "NextKeyMarker" => out = out.next_key_marker(try_data(&mut tag)?),
+            "NextVersionIdMarker" => out = out.next_version_id_marker(try_data(&mut tag)?),
+            _ => {}
+        }
+    }
+    Ok(out
+        .set_versions(Some(versions))
+        .set_delete_markers(Some(markers))
+        .set_common_prefixes(Some(prefixes))
+        .build())
+}
+
+/// A DeleteObjects result (`DeleteResult`): the keys deleted and the per-key errors.
+fn parse_deleted(body: &[u8]) -> Result<DeleteObjectsOutput, XmlDecodeError> {
+    use aws_sdk_s3::types::{DeletedObject, Error as KeyError};
+    let mut doc = Xml::try_from(body)?;
+    let mut root = doc.root_element()?;
+    let (mut deleted, mut errors) = (Vec::new(), Vec::new());
+    while let Some(mut tag) = root.next_tag() {
+        match tag.start_el().local() {
+            "Deleted" => {
+                let mut d = DeletedObject::builder();
+                while let Some(mut t) = tag.next_tag() {
+                    match t.start_el().local() {
+                        "Key" => d = d.key(try_data(&mut t)?),
+                        "VersionId" => d = d.version_id(try_data(&mut t)?),
+                        _ => {}
+                    }
+                }
+                deleted.push(d.build());
+            }
+            "Error" => {
+                let mut e = KeyError::builder();
+                while let Some(mut t) = tag.next_tag() {
+                    match t.start_el().local() {
+                        "Key" => e = e.key(try_data(&mut t)?),
+                        "VersionId" => e = e.version_id(try_data(&mut t)?),
+                        "Code" => e = e.code(try_data(&mut t)?),
+                        "Message" => e = e.message(try_data(&mut t)?),
+                        _ => {}
+                    }
+                }
+                errors.push(e.build());
+            }
+            _ => {}
+        }
+    }
+    Ok(DeleteObjectsOutput::builder()
+        .set_deleted(Some(deleted))
+        .set_errors(Some(errors))
+        .build())
+}
+
+/// DeleteObjects' body: the keys, as `delete_chunk` sends them (no version ids).
+fn delete_body(keys: &[&str]) -> String {
+    let mut out = String::from("<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
+    for k in keys {
+        out.push_str("<Object>");
+        xml_element(&mut out, "Key", k);
+        out.push_str("</Object>");
+    }
+    out.push_str("</Delete>");
+    out
+}
+
 // --- Checksums: CRC32C (D6), a header for in-memory bodies, an aws-chunked trailer for streamed
 // ones ---
 
@@ -756,6 +1034,12 @@ fn crc32c(data: &[u8]) -> String {
     crc32c_value(crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32Iscsi, data) as u32)
 }
 
+/// The `x-amz-checksum-crc32` value of `data` (DeleteObjects).
+fn crc32(data: &[u8]) -> String {
+    crc32c_value(crc_fast::checksum(crc_fast::CrcAlgorithm::Crc32IsoHdlc, data) as u32)
+}
+
+/// A CRC, big-endian, in base64.
 fn crc32c_value(crc: u32) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(crc.to_be_bytes())
@@ -1173,6 +1457,52 @@ fn complete_multipart_upload_error(
     )
 }
 
+fn list_objects_v2_error(resp: &HttpResponse, body: &[u8]) -> ListObjectsV2Error {
+    use aws_sdk_s3::types::error::NoSuchBucket;
+    op_error(
+        resp,
+        body,
+        |e| ListObjectsV2Error::unhandled(e),
+        ListObjectsV2Error::generic,
+        |code, message, _, meta| match code {
+            "NoSuchBucket" => Ok(ListObjectsV2Error::NoSuchBucket(
+                NoSuchBucket::builder().set_message(message).meta(meta).build(),
+            )),
+            _ => Err(meta),
+        },
+    )
+}
+
+fn list_object_versions_error(resp: &HttpResponse, body: &[u8]) -> ListObjectVersionsError {
+    op_error(
+        resp,
+        body,
+        |e| ListObjectVersionsError::unhandled(e),
+        ListObjectVersionsError::generic,
+        |_, _, _, meta| Err(meta),
+    )
+}
+
+fn delete_objects_error(resp: &HttpResponse, body: &[u8]) -> DeleteObjectsError {
+    op_error(
+        resp,
+        body,
+        |e| DeleteObjectsError::unhandled(e),
+        DeleteObjectsError::generic,
+        |_, _, _, meta| Err(meta),
+    )
+}
+
+fn delete_object_error(resp: &HttpResponse, body: &[u8]) -> DeleteObjectError {
+    op_error(
+        resp,
+        body,
+        |e| DeleteObjectError::unhandled(e),
+        DeleteObjectError::generic,
+        |_, _, _, meta| Err(meta),
+    )
+}
+
 fn abort_multipart_upload_error(resp: &HttpResponse, body: &[u8]) -> AbortMultipartUploadError {
     use aws_sdk_s3::types::error::NoSuchUpload;
     op_error(
@@ -1377,6 +1707,60 @@ mod tests {
         // A body that does not match its length fails instead of sending a wrong one.
         assert!(framed(&data, 4096, len + 1).await.is_err());
         assert!(framed(&data, 4096, len - 1).await.is_err());
+    }
+
+    #[test]
+    fn a_listing_page_becomes_the_sdks_output() {
+        let body = b"<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
+            <ListBucketResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Name>b</Name>\
+            <Prefix>d%2F</Prefix><KeyCount>2</KeyCount><MaxKeys>1000</MaxKeys>\
+            <EncodingType>url</EncodingType><IsTruncated>true</IsTruncated>\
+            <Contents><Key>d%2Fa%1B</Key><LastModified>2026-11-02T10:00:00.000Z</LastModified>\
+            <ETag>&quot;e1&quot;</ETag><Size>3</Size><StorageClass>STANDARD_IA</StorageClass>\
+            </Contents><CommonPrefixes><Prefix>d%2Fsub%2F</Prefix></CommonPrefixes>\
+            <NextContinuationToken>t+2=</NextContinuationToken></ListBucketResult>";
+        let page = parse_list_v2(body).unwrap();
+        let o = &page.contents()[0];
+        assert_eq!(o.key(), Some("d%2Fa%1B"));
+        assert_eq!(o.e_tag(), Some("\"e1\""));
+        assert_eq!(o.size(), Some(3));
+        assert_eq!(o.storage_class().map(|c| c.as_str()), Some("STANDARD_IA"));
+        assert_eq!(o.last_modified().map(|t| t.secs()), Some(1_793_613_600));
+        assert_eq!(page.common_prefixes()[0].prefix(), Some("d%2Fsub%2F"));
+        assert_eq!(page.next_continuation_token(), Some("t+2="));
+        assert_eq!(page.is_truncated(), Some(true));
+    }
+
+    #[test]
+    fn a_versions_page_and_a_delete_result_become_the_sdks_outputs() {
+        let body = b"<ListVersionsResult><IsTruncated>true</IsTruncated>\
+            <NextKeyMarker>k</NextKeyMarker><NextVersionIdMarker>v2</NextVersionIdMarker>\
+            <Version><Key>k</Key><VersionId>v1</VersionId><IsLatest>true</IsLatest>\
+            <Size>5</Size></Version><DeleteMarker><Key>k</Key><VersionId>v0</VersionId>\
+            <IsLatest>false</IsLatest></DeleteMarker></ListVersionsResult>";
+        let page = parse_versions(body).unwrap();
+        assert_eq!(page.versions()[0].version_id(), Some("v1"));
+        assert_eq!(page.versions()[0].size(), Some(5));
+        assert_eq!(page.delete_markers()[0].version_id(), Some("v0"));
+        assert_eq!(page.next_key_marker(), Some("k"));
+        assert_eq!(page.next_version_id_marker(), Some("v2"));
+        let body = b"<DeleteResult><Deleted><Key>a&amp;b</Key></Deleted><Error><Key>c</Key>\
+            <Code>AccessDenied</Code><Message>Access Denied</Message></Error></DeleteResult>";
+        let out = parse_deleted(body).unwrap();
+        assert_eq!(out.deleted()[0].key(), Some("a&b"));
+        assert_eq!(out.errors()[0].message(), Some("Access Denied"));
+        assert!(!body_is_error(body), "an <Error> inside DeleteResult is not an error document");
+    }
+
+    #[test]
+    fn delete_sends_the_keys_with_a_crc32() {
+        assert_eq!(
+            delete_body(&["a&b", "c"]),
+            "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Object><Key>a&amp;b</Key>\
+             </Object><Object><Key>c</Key></Object></Delete>"
+        );
+        // The CRC-32 check value: 0xCBF43926 for "123456789".
+        assert_eq!(crc32(b"123456789"), "y/Q5Jg==");
     }
 
     fn resolver(endpoint: Option<&str>, path_style: Option<bool>) -> Lean {
