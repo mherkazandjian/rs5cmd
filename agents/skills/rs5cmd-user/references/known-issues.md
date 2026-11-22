@@ -136,11 +136,6 @@ unknown argument.
   target, and recreates the link on download. The printed line shows the name without the
   suffix. With a directory source, links to directories are still walked, not stored.
 
-### 2.9 `--fast` ignores many flags without warning
-
-See `fast-path-and-mount.md`. If a flag such as `--storage-class`, `--acl`, `--content-type`,
-`--proxy` or a bandwidth limit matters, do not use `--fast`.
-
 ### 2.10 `run` does not inherit every global flag
 
 `--limit-upload`, `--limit-download`, the per-side region and endpoint flags, the dual-stack and

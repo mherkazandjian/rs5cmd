@@ -106,7 +106,7 @@ fn no_sign_request_reads_a_public_bucket_anonymously() {
             .args(["cp", "--fast", &format!("s3://{public}/o.txt"), &format!("{}/", dl.display())])
             .assert()
             .success()
-            .stderr(predicate::str::contains("--no-sign-request uses the default path").count(1));
+            .stderr(predicate::str::contains("--fast does not support --no-sign-request").count(1));
         assert_eq!(std::fs::read(dl.join("o.txt")).unwrap(), b"open");
     }
 

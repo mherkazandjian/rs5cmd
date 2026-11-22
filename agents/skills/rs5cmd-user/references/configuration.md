@@ -96,20 +96,21 @@ pass the region the bucket lives in.
 - `--no-verify-ssl` disables certificate and host name verification. With it,
   `--ca-certs-file` is ignored. Use it only for a test endpoint you trust on a network you trust.
 - With an `http://` endpoint nothing is encrypted in transit.
-- `cp --fast` trusts only the public CA set. It honours `--no-verify-ssl` but not
-  `--ca-certs-file`, so it cannot verify an endpoint that uses a private CA.
+- `cp --fast` trusts only the public CA set. It honours `--no-verify-ssl`; with
+  `--ca-certs-file` the command runs on the default engine.
 
 ## Proxy
 
 `--proxy URL` (short `-x`) accepts `socks5://`, `socks5h://`, `http://` and `https://`, with
 optional `user:pass@`. Without the flag, the first of `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`
-that is set is used (upper or lower case). `cp --fast` ignores the proxy.
+that is set is used (upper or lower case). `cp --fast` with `--proxy` runs on the default
+engine; the fast engine does not use the proxy environment variables.
 
 ## Bandwidth
 
 `--limit-upload RATE` and `--limit-download RATE` cap the total rate of one command in bytes per
-second (`512KB`, `10MB`, `1GB`). `--limitrate RATE` caps both directions. `cp --fast` ignores
-all three.
+second (`512KB`, `10MB`, `1GB`). `--limitrate RATE` caps both directions. With any of the
+three, `cp --fast` runs on the default engine.
 
 ## Using an s3cmd configuration
 
