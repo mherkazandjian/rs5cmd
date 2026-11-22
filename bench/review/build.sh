@@ -184,7 +184,8 @@ t_s5cmd() {
     done
 }
 
-# exp-<name> / b-<name>: an experiment (perf/exp-*) or Stage B (perf/b-*, perf/stage-b) worktree at
+# exp-<name> / b-<name> / c-<name> / l-<name> / f-<name>: an experiment (perf/exp-*), Stage B or C
+# (perf/b-*, perf/c-*, perf/stage-b), lean-path (perf/l-*) or bug-fix (fix/*) worktree at
 # /src/wt/<name>, built with the headline recipe so it differs from `rs5cmd` only by its change.
 # EXP_SRC=<tree> builds another tree under <name>; EXP_NO_DEFAULT=1 adds --no-default-features.
 t_exp() {
@@ -214,7 +215,7 @@ targets=("$@")
 [ ${#targets[@]} -eq 0 ] && targets=(tools stub rs5cmd sizes profiling published s5cmd)
 for t in "${targets[@]}"; do
     case "$t" in
-        exp-*|b-*|c-*|l-*) t_exp "$t" ;;
+        exp-*|b-*|c-*|l-*|f-*) t_exp "$t" ;;
         *) "t_$t" ;;
     esac
 done

@@ -857,9 +857,11 @@ for count, size, tag in ((1, 4 * GiB, "1x4g"), (4, GiB, "4x1g"), (32, 128 * MiB,
     reg(Download, f"W3.dn.{tag}", "W3", long=True, count=count, size=size, on=on)
     reg(Upload, f"W3.up.{tag}.eq", "W3", long=True, count=count, size=size, flags=S5_EQ, on=on)
     reg(Download, f"W3.dn.{tag}.eq", "W3", long=True, count=count, size=size, flags=S5_EQ, on=on)
-# #14 at the stub's scale: many parts in flight (the issue ran -c 200 -p 32 on 100 GB), the same
-# flags for every client.
-C64 = {c: ("--concurrency", "64", "--part-size", "32") for c in ("rs5cmd", "rs5cmd-fast")}
+# #14 at the stub's scale: many parts in flight (the issue ran -c 200 -p 32 on 100 GB). The --fast
+# engine has no --concurrency: it never received the flag, and since #10 a --fast run given one
+# goes to the default path. So rs5cmd-fast gets the part size only, as it always ran these rows:
+# at its own concurrency, with 32 MiB parts.
+C64 = {"rs5cmd": ("--concurrency", "64", "--part-size", "32"), "rs5cmd-fast": ("--part-size", "32")}
 C64["s5cmd"] = ("-c", "64", "-p", "32")
 for count, size, tag in ((1, 4 * GiB, "1x4g"), (4, GiB, "4x1g")):
     reg(Download, f"W3.dn.{tag}.c64", "W3", long=True, count=count, size=size, flags=C64,
