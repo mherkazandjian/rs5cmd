@@ -82,12 +82,10 @@ There is no flag that takes a key directly. For anonymous access to a public buc
 
 ## Region
 
-`--region` or `AWS_REGION`, else the region of the active profile, else `us-east-1`.
-
-Set it explicitly. When nothing provides a region, the SDK asks the instance metadata service
-first. Away from a cloud instance that costs a few seconds per run and prints warnings before
-the fallback to `us-east-1`. rs5cmd does not detect the region of a bucket by itself: for AWS,
-pass the region the bucket lives in.
+`--region` or `AWS_REGION`, else the region of the active profile. With none of these, rs5cmd
+asks the bucket: one `HeadBucket` request (once per bucket and endpoint in a run), whose
+`x-amz-bucket-region` answer it uses, else `us-east-1`, as s5cmd does. The instance metadata
+service is not asked for a region. Setting the region saves the extra request.
 
 ## TLS
 

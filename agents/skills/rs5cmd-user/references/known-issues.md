@@ -1,58 +1,18 @@
 # Known issues and limitations
 
 Everything in sections 1 and 2 was reproduced with the v0.1.0 release binary. Several entries
-are plain bugs. After an upgrade, test an entry again before relying on its workaround, and
-remove it from this file when it is fixed.
+are plain bugs. An entry is removed when its bug is fixed, so this file follows the current
+source: a v0.1.0 binary also has the bugs fixed since (the project's closed issues list them).
+After an upgrade, test an entry again before relying on its workaround.
 
 ## 1. Can lose or misplace data
 
-### 1.1 A bare relative directory as the source
-
-Applies to `cp`, `mv` and `sync` when the source is a directory in the current directory, named
-without a trailing slash: `data` or `./data`.
-
-```
-$ rs5cmd cp data out/
-cp data/a.txt data/a.txt          <- copied onto itself; the file is now 0 bytes
-$ rs5cmd cp data s3://bucket/prefix/
-cp data/a.txt s3://bucket/prefix/../data/a.txt      <- key contains a literal "../"
-```
-
-- Local destination: every source file is truncated to 0 bytes. `mv` then deletes it.
-- S3 destination: the keys contain `../`. The data is uploaded, but not where you meant, and
-  such keys are awkward to list and delete.
-
-Safe forms:
-
-| Write | Result under the destination |
-|---|---|
-| `data/` or `'data/*'` | the contents of `data` |
-| `/abs/path/data` or `parent/data` | a `data/` directory with the contents |
-
-`--dry-run` shows the wrong mapping, so a preview catches it. To copy a directory in the current
-directory including its own name, give its absolute path (`"$PWD/data"`) or name the directory in
-the destination (`cp 'data/*' s3://bucket/prefix/data/`).
-
-### 1.2 `sync --delete` with a source that lists only one level
-
-An S3 source ending in `/` (`s3://bucket/p/`) lists only the objects directly under the prefix.
-The destination is always compared recursively. With `--delete`, every destination file in a
-subdirectory therefore counts as extra and is removed.
-
-```
-$ rs5cmd --dry-run sync --delete s3://bucket/p/ mirror/
-(dry-run) rm mirror/sub/b.log
-```
-
-Use a wildcard source (`'s3://bucket/p/*'`), preview with `--dry-run`, and always pass
-`--max-delete N` with `--delete`. When the limit is exceeded, nothing is copied or deleted.
-
-### 1.3 Destination without a trailing slash
+### 1.1 Destination without a trailing slash
 
 `rs5cmd cp file.txt s3://bucket/prefix` creates one object named `prefix`. To put the file under
 the prefix, write `s3://bucket/prefix/`.
 
-### 1.4 `mv` and interruption
+### 1.2 `mv` and interruption
 
 `mv` deletes a source after that object's copy succeeded. Ctrl-C (or SIGTERM) ends the process
 at once with exit code 130 and does not wait for or roll back operations in flight. After an
@@ -60,45 +20,21 @@ interruption, some objects are moved and some are not, and a multipart upload th
 may leave unfinished parts on the service. Run the command again to finish. Configure a bucket
 lifecycle rule to expire incomplete multipart uploads if you interrupt large uploads often.
 
-### 1.5 `import-s3cfg` rewrites the default AWS profile
+### 1.3 `import-s3cfg` rewrites the default AWS profile
 
 It replaces the `[default]` section of `~/.aws/credentials`. Use `--profile NAME` or
 `--no-credentials` when that profile belongs to something else.
 
 ## 2. Fails or misleads
 
-### 2.2 `--dry-run rm` prints nothing for a remote wildcard or prefix
-
-`rs5cmd --dry-run rm 's3://bucket/tmp/*'` exits 0 without output, and deletes nothing. The same
-holds for the object deletions of `--dry-run rb --force`. To preview, run `ls` with the same
-pattern and filters. `--dry-run rm` on a single object and `--dry-run sync --delete` do print
-their `(dry-run) rm ...` lines.
-
-### 2.4 Broken pipe makes rs5cmd panic
-
-```
-$ rs5cmd ls 's3://bucket/*' | head -1
-... failed printing to stdout: Broken pipe (os error 32) ...      exit code 101
-```
-
-When the reader of stdout exits early, rs5cmd panics instead of stopping quietly. In scripts
-with `set -o pipefail` this fails the pipeline. Write the output to a file first, or use a
-reader that consumes everything (`sed -n 1p`, `awk 'NR==1'`).
-
-### 2.5 Slow start and warnings when no region is set
-
-Without `--region`, `AWS_REGION` or a profile region, the SDK queries the instance metadata
-service before it falls back to `us-east-1`. Outside a cloud instance this adds a few seconds
-and warning lines to every invocation. Always set `AWS_REGION`.
-
-### 2.6 `--json` gaps
+### 2.1 `--json` gaps
 
 - `cat`, `import-s3cfg` and `completion` print plain text with `--json`; `tree` refuses it.
 - In JSON mode a failed operation is reported on **stdout** as `{"success":false,...}` (in text
   mode it goes to stderr). Parse every line and test `success`; also test the exit code.
 - The `sync` summary line is not printed in JSON mode.
 
-### 2.7 Uploads get a generic content type
+### 2.2 Uploads get a generic content type
 
 `cp` and `sync` upload local files as `application/octet-stream` unless `--content-type` is
 given, and one `--content-type` applies to every file of the command. They do not guess from the
@@ -111,7 +47,7 @@ rs5cmd cp --content-type text/css  --include '*.css'  'site/*' s3://bucket/site/
 
 Copies from S3 to S3 keep the source object's content type.
 
-### 2.8 Symbolic links are always followed
+### 2.3 Symbolic links are always followed
 
 `--follow-symlinks` is on and cannot be switched off; `--no-follow-symlinks` is rejected as an
 unknown argument.
@@ -124,12 +60,14 @@ unknown argument.
   suffix. A link to a directory is stored as a link when a wildcard matches it or it is the
   source itself; inside a directory source, links to directories are still walked.
 
-### 2.11 `sync` may copy a just-uploaded file once more
+### 2.4 `sync` may copy a just-uploaded file once more
 
 The default comparison copies a file when the source is newer than the destination or the sizes
-differ. S3 stores modification times in whole seconds, so a file changed in the same second it
-was uploaded can be copied again by the next `sync`. This matches s5cmd. Use `--size-only` when
-you need repeat runs to be exact no-ops.
+differ. rs5cmd keeps an object's modification time to the whole second, while local times are
+finer, so a file changed in the same second it was uploaded can be copied again by the next
+`sync`. AWS S3 stores whole seconds, so s5cmd does the same there; on servers that return
+milliseconds (MinIO, for one) s5cmd keeps them and rs5cmd does not. Use `--size-only` when you
+need repeat runs to be exact no-ops.
 
 ## 3. Resource use
 
@@ -137,8 +75,8 @@ you need repeat runs to be exact no-ops.
   downloads are written as they arrive, so 256 transfers of 1 MiB objects take tens of MB.
   `--fast` holds each object, up to its 8 MiB part, in memory per transfer in flight: 50,000
   objects of 1 MiB with the default 256 workers peaked at 0.9 to 1.2 GB (v0.1.0). `pipe` holds
-  up to `--concurrency` parts of `--part-size`, 5 x 50 MiB by default, as s5cmd does. Lower
-  `--numworkers` (with `--fast`) or `pipe`'s settings on small machines.
+  the `--concurrency` parts in flight and the one it is reading, each of `--part-size`: about
+  300 MiB by default. Lower `--numworkers` (with `--fast`) or `pipe`'s settings on small machines.
 - **Open files.** rs5cmd raises its own open-file limit at start when it can. If it warns that
   `RLIMIT_NOFILE` is too low, or fails with `Too many open files`, run `ulimit -n <N>` first or
   lower `--numworkers`.
@@ -155,8 +93,8 @@ not exercised against a real service. Try them on a small sample first:
 - `--force-glacier-transfer` and archived storage classes.
 - The download side of the bandwidth limits.
 - SSO and assume-role profiles.
-
-There is no automatic detection of a bucket's region. Pass `--region` (or the per-side flags).
+- Finding a bucket's region when none is configured (one `HeadBucket` request; see the user
+  skill's configuration reference).
 
 ## 5. Not implemented
 

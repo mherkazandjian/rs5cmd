@@ -168,7 +168,8 @@ rs5cmd --source-endpoint-url https://old.example.com \
 rs5cmd mv 'outbox/*' s3://bucket/sent/
 ```
 
-Never give a bare relative directory (`data`, `./data`) as the source. See `known-issues.md`.
+A directory source without a trailing slash (`data`, `./data`, `/abs/data`) keeps its name: its
+files land under `<dst>/data/`. `data/` or `'data/*'` copies only what is inside.
 
 ## sync
 
@@ -199,8 +200,8 @@ rs5cmd sync --exclude '*.tmp' 's3://a/data/*' s3://b/data/
 ```
 
 The summary (`# synced N objects, deleted M`) goes to stderr and is omitted with `--json`.
-Use a wildcard source. The local destination must already hold at least one file. Both points
-are explained in `known-issues.md`.
+Use a wildcard source (`'s3://bucket/p/*'`) for a whole tree: a prefix ending in `/` lists one
+level only.
 
 ## rm
 
@@ -218,8 +219,8 @@ rs5cmd rm --exclude '*.keep' 's3://bucket/tmp/*'
 rs5cmd rm --raw 's3://bucket/weird*name'
 ```
 
-`--dry-run rm` prints nothing for a remote wildcard in v0.1.0. Preview with `ls` and the same
-pattern and filters.
+`--dry-run rm` prints a `(dry-run) rm` line for each object it would delete, wildcards and
+prefixes included, and deletes nothing.
 
 ## cat
 
