@@ -217,6 +217,9 @@ pub struct Options {
     /// prune now-empty source directories walking up toward (but never past)
     /// the move source root. Non-empty/unremovable directories are skipped.
     pub remove_empty_dirs: bool,
+    /// `cp`/`mv --links`: a local source that is, or a wildcard that matches, a symbolic link to a
+    /// directory is listed as the link itself (stored as a link placeholder), not walked.
+    pub keep_links: bool,
     /// Aggregate upload bandwidth cap (`--limit-upload`), shared across all
     /// workers. `None` means no upload throttling.
     pub upload_limiter: Option<Arc<RateLimiter>>,
@@ -257,6 +260,7 @@ impl Default for Options {
             preserve_timestamps: false,
             client_copy: false,
             remove_empty_dirs: false,
+            keep_links: false,
             upload_limiter: None,
             download_limiter: None,
         }
@@ -349,7 +353,7 @@ pub async fn new_client(u: &Url, opts: &Options) -> anyhow::Result<Box<dyn Stora
     if u.is_remote() {
         Ok(Box::new(s3::S3::new(u, opts).await?))
     } else {
-        Ok(Box::new(fs::Filesystem::new(opts.dry_run)))
+        Ok(Box::new(fs::Filesystem::new(opts.dry_run).keeping_links(opts.keep_links)))
     }
 }
 

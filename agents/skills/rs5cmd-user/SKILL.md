@@ -252,8 +252,8 @@ Full list with details and workarounds: [known issues](references/known-issues.m
 - **`--no-sign-request` has no effect.** Requests are still signed, and fail without credentials.
 - **Piping into `head` or another early-exiting reader** makes rs5cmd panic with
   `failed printing to stdout: Broken pipe` and exit `101`. Read all output, or use a file.
-- **Symlinks are always followed.** There is no `--no-follow-symlinks`. A link to a directory
-  inside a wildcard source fails. `cp --links` stores links as placeholder objects instead.
+- **Symlinks are always followed.** There is no `--no-follow-symlinks`: a link to a directory
+  is walked and its files copied. `cp --links` stores links as placeholder objects instead.
 - **Uploads are `application/octet-stream`** unless `--content-type` is given. `cp` and `sync`
   do not guess the type from the file extension.
 - **`--fast` memory grows with `--numworkers`.** It holds each object (up to its 8 MiB part)
