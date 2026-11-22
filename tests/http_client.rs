@@ -5,6 +5,8 @@
 //! - Without flags it trusts the platform's roots, `SSL_CERT_FILE` included, as the SDK's client
 //!   did, and refuses a server they do not vouch for; with `--ca-certs-file`, the given bundle.
 //! - A connection dropped before the response is retried, with or without `--no-verify-ssl`.
+//! - Key exchange is classic (X25519) even with a server that prefers post-quantum, unless
+//!   `--tls-post-quantum` is given; that flag prints one notice on stderr, none with `--json`.
 //!
 //! tests/data/tls holds a test CA (`ca.pem`) and a server certificate for 127.0.0.1 and
 //! localhost signed by it (`server.pem`, key `server.key`), valid until 2126. The CA key was
@@ -76,15 +78,18 @@ fn answer<S: Read + Write>(stream: S) {
     let _ = stream.flush();
 }
 
-/// An HTTPS server offering HTTP/2 and HTTP/1.1, as an HTTP/2-capable front end does. Returns
-/// its port and the protocol each connection negotiated (`None`: no ALPN).
-fn start_tls_server() -> (u16, Arc<Mutex<Vec<Option<Vec<u8>>>>>) {
+/// What each connection negotiated: the protocol (`None`: no ALPN) and the key exchange group.
+type Negotiated = Arc<Mutex<Vec<(Option<Vec<u8>>, rustls::NamedGroup)>>>;
+
+/// An HTTPS server offering HTTP/2 and HTTP/1.1, as an HTTP/2-capable front end does, and
+/// preferring post-quantum key exchange. Returns its port and what each connection negotiated.
+fn start_tls_server() -> (u16, Negotiated) {
     let open = |name: &str| BufReader::new(std::fs::File::open(tls_dir().join(name)).unwrap());
     let certs = rustls_pemfile::certs(&mut open("server.pem"))
         .collect::<Result<Vec<_>, _>>()
         .unwrap();
     let key = rustls_pemfile::private_key(&mut open("server.key")).unwrap().unwrap();
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    let provider = Arc::new(rs5cmd::tls::provider_for(true));
     let mut config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .unwrap()
@@ -96,7 +101,7 @@ fn start_tls_server() -> (u16, Arc<Mutex<Vec<Option<Vec<u8>>>>>) {
 
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
-    let negotiated = Arc::new(Mutex::new(Vec::new()));
+    let negotiated: Negotiated = Arc::new(Mutex::new(Vec::new()));
     let seen = negotiated.clone();
     std::thread::spawn(move || {
         for mut tcp in listener.incoming().flatten() {
@@ -108,7 +113,8 @@ fn start_tls_server() -> (u16, Arc<Mutex<Vec<Option<Vec<u8>>>>>) {
                         return;
                     }
                 }
-                seen.lock().unwrap().push(conn.alpn_protocol().map(<[u8]>::to_vec));
+                let group = conn.negotiated_key_exchange_group().unwrap().name();
+                seen.lock().unwrap().push((conn.alpn_protocol().map(<[u8]>::to_vec), group));
                 answer(rustls::StreamOwned::new(conn, tcp));
             });
         }
@@ -150,38 +156,67 @@ fn rs5cmd(endpoint: &str) -> Command {
     cmd
 }
 
-fn download_over_tls(trust: impl FnOnce(&mut Command)) {
+/// Downloads the object over TLS and checks it; returns the key exchange group of every
+/// connection and the command's stderr.
+fn download_over_tls(trust: impl FnOnce(&mut Command)) -> (Vec<rustls::NamedGroup>, String) {
     let (port, negotiated) = start_tls_server();
     let dir = tempfile::tempdir().unwrap();
     let dst = dir.path().join("object");
     let mut cmd = rs5cmd(&format!("https://127.0.0.1:{port}"));
     trust(&mut cmd);
-    cmd.args(["cp", "--part-size", "5", "s3://bucket/object", dst.to_str().unwrap()])
-        .assert()
-        .success();
+    let out = cmd
+        .args(["cp", "--part-size", "5", "s3://bucket/object", dst.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+    assert!(out.status.success(), "{stderr}");
     let got = std::fs::read(&dst).unwrap();
     assert_eq!(got.len(), TOTAL);
     assert!(got.iter().enumerate().all(|(i, b)| *b == byte(i)), "wrong bytes");
     let negotiated = negotiated.lock().unwrap();
     assert!(!negotiated.is_empty());
     assert!(
-        negotiated.iter().all(|p| p.as_deref() != Some(b"h2")),
+        negotiated.iter().all(|(p, _)| p.as_deref() != Some(b"h2")),
         "negotiated HTTP/2: {negotiated:?}"
     );
+    (negotiated.iter().map(|(_, g)| *g).collect(), stderr)
+}
+
+fn assert_all(groups: &[rustls::NamedGroup], want: rustls::NamedGroup) {
+    assert!(groups.iter().all(|g| *g == want), "want {want:?}, negotiated {groups:?}");
 }
 
 #[test]
 fn platform_roots_and_no_http2() {
-    download_over_tls(|cmd| {
+    let (groups, stderr) = download_over_tls(|cmd| {
         cmd.env("SSL_CERT_FILE", tls_dir().join("ca.pem"));
     });
+    assert_all(&groups, rustls::NamedGroup::X25519);
+    assert!(!stderr.contains("post-quantum"), "{stderr}");
 }
 
 #[test]
 fn ca_certs_file_and_no_http2() {
-    download_over_tls(|cmd| {
+    let (groups, _) = download_over_tls(|cmd| {
         cmd.arg("--ca-certs-file").arg(tls_dir().join("ca.pem"));
     });
+    assert_all(&groups, rustls::NamedGroup::X25519);
+}
+
+#[test]
+fn tls_post_quantum_negotiates_x25519mlkem768_and_says_so_once() {
+    let (groups, stderr) = download_over_tls(|cmd| {
+        cmd.env("SSL_CERT_FILE", tls_dir().join("ca.pem")).arg("--tls-post-quantum");
+    });
+    assert_all(&groups, rustls::NamedGroup::X25519MLKEM768);
+    assert_eq!(stderr.matches(rs5cmd::tls::POST_QUANTUM_NOTICE).count(), 1, "{stderr}");
+
+    let (groups, stderr) = download_over_tls(|cmd| {
+        cmd.env("SSL_CERT_FILE", tls_dir().join("ca.pem"))
+            .args(["--json", "--tls-post-quantum"]);
+    });
+    assert_all(&groups, rustls::NamedGroup::X25519MLKEM768);
+    assert!(!stderr.contains("post-quantum"), "{stderr}");
 }
 
 /// The trust store is read when the first TLS connection needs it, but still checked: a server

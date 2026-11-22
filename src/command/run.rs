@@ -207,6 +207,7 @@ mod tests {
             limit_download: None,
             limitrate: None,
             ca_certs_file: None,
+            tls_post_quantum: false,
             request_payer: None,
             credentials_file: None,
             s3cfg: None,

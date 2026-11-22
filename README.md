@@ -48,6 +48,13 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   `HTTP_PROXY` env vars): SOCKS5 (`socks5://`, `socks5h://`) and HTTP `CONNECT`
   (`http://`, `https://`), with optional `user:pass@`. Applies to the default
   transport (not the `--fast` io_uring path).
+- **TLS key exchange** is classic by default (X25519, then P-256 and P-384), as s5cmd's is:
+  v2.3.0, and builds with newer Go too, since s5cmd's `go.mod` keeps Go's post-quantum default
+  off. `--tls-post-quantum` offers the post-quantum hybrid X25519MLKEM768 first, on both
+  transfer paths, and says once on stderr that it makes setting up each TLS connection somewhat
+  slower (not with `--json`). Measured against a local server: about 55 µs more CPU per new
+  connection (290 against 237 µs) and 11-14 µs more wall time; with connections kept alive,
+  10,000 small objects take 1-4 % longer and large transfers are unchanged.
 - **Listing** (`ls`) with `-H/--humanize`, `--storage-class`, `--etag`,
   `--summarize` (totals footer), `--show-fullpath`, `--start-after`, JSON output,
   client-side `--newer-than`/`--older-than` time filters, `--include`/`--exclude`

@@ -96,6 +96,7 @@ ACL, content type and the other copy flags are ignored there.
 | `s3cfg.rs` | `parse_ini`, `translate_s3cfg` → `Translated` (values plus warnings), `parse_byte_rate` |
 | `error.rs` | `JobError`, `is_cancellation`, `is_emfile`, `format_error` |
 | `strutil.rs` | `wildcard_to_regexp` and friends, ported from s5cmd |
+| `tls.rs` | `provider()`: the rustls provider (aws-lc-rs) both paths' TLS clients take; `install(post_quantum)` from `command::run` sets its key exchange groups (`--tls-post-quantum`) |
 | `bin/s3stub.rs` | Stateless S3 stub for benchmarks (feature `bench-stub`) |
 
 ## Tests
