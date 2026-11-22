@@ -304,3 +304,39 @@ bench/review/build.sh: line 218: t_c-mem: command not found
   b-stage: 16,943,552 bytes
 ==> done: b-stage
 2026-11-22T02:56:20Z w4 (perf/stage-b 9693674) fast suite (D1 window): 237 passed, 0 failed
+2026-11-22T03:03:49Z f-4 rebased onto fix/older-bugs: e05f2dc (1 commits)
+2026-11-22T03:04:09Z f-4 tests ok (227 passed, 0 failed) 
+2026-11-22T03:04:09Z f-4 not built (NO_BUILD)
+2026-11-22T03:04:09Z f-6 rebased onto fix/older-bugs: b29f238 (1 commits)
+2026-11-22T03:04:29Z f-6 tests ok (226 passed, 0 failed) 
+2026-11-22T03:04:29Z f-6 not built (NO_BUILD)
+2026-11-22T03:04:29Z f-8 rebased onto fix/older-bugs: 41ccdd2 (1 commits)
+2026-11-22T03:04:49Z f-8 tests ok (227 passed, 0 failed) 
+2026-11-22T03:04:49Z f-8 not built (NO_BUILD)
+2026-11-22T03:04:49Z f-9 rebased onto fix/older-bugs: 06f5adf (1 commits)
+2026-11-22T03:05:11Z f-9 tests ok (227 passed, 0 failed) 
+==> zigbuild f-9 from /src/wt/f-9 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  f-9: 16,944,320 bytes
+==> done: f-9
+2026-11-22T03:06:26Z f-9 built /opt/bins/f-9
+2026-11-22T03:06:26Z f-11 rebased onto fix/older-bugs: e6d6be8 (1 commits)
+2026-11-22T03:06:51Z f-11 tests ok (226 passed, 0 failed) 
+2026-11-22T03:06:51Z f-11 not built (NO_BUILD)
+2026-11-22T03:06:51Z f-12 rebased onto fix/older-bugs: a8df745 (1 commits)
+2026-11-22T03:07:10Z f-12 tests ok (226 passed, 0 failed) 
+2026-11-22T03:07:10Z f-12 not built (NO_BUILD)
+2026-11-22T03:07:11Z f-13 rebased onto fix/older-bugs: 22ae0f0 (1 commits)
+2026-11-22T03:07:35Z f-13 tests ok (225 passed, 0 failed) 
+2026-11-22T03:07:35Z f-13 not built (NO_BUILD)
+2026-11-22T03:07:35Z f-10 rebased onto fix/6-no-sign-request: a024e7d (1 commits)
+2026-11-22T03:07:56Z f-10 tests ok (226 passed, 0 failed) 
+2026-11-22T03:07:56Z f-10 not built (NO_BUILD)
+2026-11-22T03:10:10Z f-6 rebased onto fix/older-bugs: 56865a3 (1 commits)
+2026-11-22T03:10:30Z f-6 tests ok (226 passed, 0 failed) 
+2026-11-22T03:10:30Z f-6 not built (NO_BUILD)
+2026-11-22T03:10:30Z f-10 REBASE FAILED
+2026-11-22T03:10:39Z f-10 rebased onto fix/6-no-sign-request: 1a67e51 (1 commits)
+2026-11-22T03:11:02Z f-10 tests ok (226 passed, 0 failed) 
+2026-11-22T03:11:02Z f-10 not built (NO_BUILD)
+2026-11-22T03:16:57Z f-older e86968f fast suite (D1 window): 248 passed, 0 failed
