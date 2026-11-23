@@ -145,6 +145,57 @@ fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
     cr?.rsplit('/').next()?.trim().parse::<u64>().ok()
 }
 
+/// Sets what `metadata` asks of a new object on a PutObject, CreateMultipartUpload or CopyObject
+/// request, whose builders share these setters: storage class, ACL, cache control, `Expires`,
+/// content encoding and disposition, server-side encryption (the KMS key only with a method) and
+/// user metadata. Empty values are not sent. The content type and a copy's metadata directive are
+/// the callers'. `expires` was checked when the command was parsed (`expires_time`).
+macro_rules! object_properties {
+    ($req:expr, $metadata:expr) => {{
+        let m: &Metadata = $metadata;
+        let set = |v: &Option<String>| v.as_deref().filter(|v| !v.is_empty()).map(str::to_string);
+        let mut req = $req;
+        if let Some(v) = set(&m.storage_class) {
+            req = req.storage_class(aws_sdk_s3::types::StorageClass::from(v.as_str()));
+        }
+        if let Some(v) = set(&m.acl) {
+            req = req.acl(aws_sdk_s3::types::ObjectCannedAcl::from(v.as_str()));
+        }
+        if let Some(v) = set(&m.cache_control) {
+            req = req.cache_control(v);
+        }
+        if let Some(v) = set(&m.expires).and_then(|v| expires_time(&v).ok()) {
+            req = req.expires(v);
+        }
+        if let Some(v) = set(&m.content_encoding) {
+            req = req.content_encoding(v);
+        }
+        if let Some(v) = set(&m.content_disposition) {
+            req = req.content_disposition(v);
+        }
+        if let Some(v) = set(&m.encryption_method) {
+            req = req.server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::from(
+                v.as_str(),
+            ));
+            if let Some(key) = set(&m.encryption_key_id) {
+                req = req.ssekms_key_id(key);
+            }
+        }
+        for (k, v) in &m.user_defined {
+            req = req.metadata(k, v);
+        }
+        req
+    }};
+}
+
+/// `--expires`: an RFC 3339 time, as s5cmd takes it (`2024-10-01T20:30:00Z`).
+pub fn expires_time(v: &str) -> anyhow::Result<aws_smithy_types::DateTime> {
+    aws_smithy_types::DateTime::from_str(v, aws_smithy_types::date_time::Format::DateTime)
+        .map_err(|_| {
+            anyhow::anyhow!("--expires: {v:?} is not an RFC 3339 time (e.g. 2024-10-01T20:30:00Z)")
+        })
+}
+
 /// Percent-decodes a string echoed back by S3 when the list request was made
 /// with `EncodingType=Url`. We must request URL encoding so that keys containing
 /// XML-illegal control characters (e.g. ESC `0x1b`) can be represented in the
@@ -1571,7 +1622,7 @@ impl S3 {
             .content_type(content_type)
             .set_request_payer(self.request_payer());
 
-        req = apply_put_metadata(req, metadata)?;
+        req = object_properties!(req, metadata);
         if metadata.if_none_match {
             // Conditional write: fail with HTTP 412 if the object already exists.
             req = req.if_none_match("*");
@@ -1601,19 +1652,7 @@ impl S3 {
             .key(&dst.path)
             .content_type(content_type)
             .set_request_payer(self.request_payer());
-        if let Some(sc) = &metadata.storage_class {
-            if !sc.is_empty() {
-                create = create.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-            }
-        }
-        if let Some(acl) = &metadata.acl {
-            if !acl.is_empty() {
-                create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-            }
-        }
-        for (k, v) in &metadata.user_defined {
-            create = create.metadata(k, v);
-        }
+        create = object_properties!(create, metadata);
         let created = create.send().await?;
         let upload_id = created
             .upload_id()
@@ -2433,34 +2472,12 @@ impl S3 {
             .copy_source(Self::copy_source_header(src))
             .set_request_payer(self.request_payer());
 
-        if let Some(sc) = &metadata.storage_class {
-            if !sc.is_empty() {
-                req = req.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-            }
+        req = object_properties!(req, metadata);
+        if let Some(ct) = metadata.content_type.as_deref().filter(|v| !v.is_empty()) {
+            req = req.content_type(ct);
         }
-        if let Some(acl) = &metadata.acl {
-            if !acl.is_empty() {
-                req = req.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-            }
-        }
-        if let Some(cc) = &metadata.cache_control {
-            if !cc.is_empty() {
-                req = req.cache_control(cc);
-            }
-        }
-        if let Some(ct) = &metadata.content_type {
-            if !ct.is_empty() {
-                req = req.content_type(ct);
-            }
-        }
-        if let Some(dir) = &metadata.directive {
-            if !dir.is_empty() {
-                req = req
-                    .metadata_directive(aws_sdk_s3::types::MetadataDirective::from(dir.as_str()));
-            }
-        }
-        for (k, v) in &metadata.user_defined {
-            req = req.metadata(k, v);
+        if let Some(dir) = metadata.directive.as_deref().filter(|v| !v.is_empty()) {
+            req = req.metadata_directive(aws_sdk_s3::types::MetadataDirective::from(dir));
         }
 
         req.send().await?;
@@ -2496,21 +2513,7 @@ impl S3 {
         if let Some(ct) = content_type {
             create = create.content_type(ct);
         }
-        if let Some(sc) = &metadata.storage_class {
-            if !sc.is_empty() {
-                create = create.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-            }
-        }
-        if let Some(acl) = &metadata.acl {
-            if !acl.is_empty() {
-                create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-            }
-        }
-        if let Some(cc) = &metadata.cache_control {
-            if !cc.is_empty() {
-                create = create.cache_control(cc);
-            }
-        }
+        create = object_properties!(create, metadata);
         let created = create.send().await?;
         let upload_id = created
             .upload_id()
@@ -2729,40 +2732,6 @@ fn set_file_mtime_from_value(path: &Path, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn apply_put_metadata(
-    mut req: aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder,
-    metadata: &Metadata,
-) -> anyhow::Result<aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder> {
-    if let Some(sc) = &metadata.storage_class {
-        if !sc.is_empty() {
-            req = req.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-        }
-    }
-    if let Some(acl) = &metadata.acl {
-        if !acl.is_empty() {
-            req = req.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-        }
-    }
-    if let Some(cc) = &metadata.cache_control {
-        if !cc.is_empty() {
-            req = req.cache_control(cc);
-        }
-    }
-    if let Some(ce) = &metadata.content_encoding {
-        if !ce.is_empty() {
-            req = req.content_encoding(ce);
-        }
-    }
-    if let Some(cd) = &metadata.content_disposition {
-        if !cd.is_empty() {
-            req = req.content_disposition(cd);
-        }
-    }
-    for (k, v) in &metadata.user_defined {
-        req = req.metadata(k, v);
-    }
-    Ok(req)
-}
 
 #[cfg(test)]
 mod tests {

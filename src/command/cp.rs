@@ -35,6 +35,41 @@ pub struct CpArgs {
     #[arg(long)]
     pub content_type: Option<String>,
 
+    /// Cache-Control for the destination object, e.g. 'public, max-age=345600'.
+    #[arg(long)]
+    pub cache_control: Option<String>,
+
+    /// Expires for the destination object, an RFC 3339 time such as 2024-10-01T20:30:00Z.
+    #[arg(long)]
+    pub expires: Option<String>,
+
+    /// Content-Encoding for the destination object, e.g. gzip.
+    #[arg(long)]
+    pub content_encoding: Option<String>,
+
+    /// Content-Disposition for the destination object, e.g. 'attachment; filename="f.jpg"'.
+    #[arg(long)]
+    pub content_disposition: Option<String>,
+
+    /// User metadata for the destination object, as key=value (repeatable):
+    /// --metadata foo=bar --metadata fizz=buzz.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub metadata: Vec<String>,
+
+    /// For S3 to S3 copies: COPY the source's metadata or REPLACE it with what the flags give.
+    /// Default: COPY, or REPLACE when a flag sets the content type, cache control, expires,
+    /// content encoding or disposition, or user metadata. Not for uploads or downloads.
+    #[arg(long, value_parser = ["COPY", "REPLACE"], ignore_case = true)]
+    pub metadata_directive: Option<String>,
+
+    /// Server-side encryption of the destination object, e.g. AES256 or aws:kms.
+    #[arg(long)]
+    pub sse: Option<String>,
+
+    /// KMS key id for --sse aws:kms; leave it out for the key S3 manages.
+    #[arg(long)]
+    pub sse_kms_key_id: Option<String>,
+
     /// Use the io_uring fast path (Linux, requires the `fast` build feature and
     /// an explicit --endpoint-url). Optimized for many small objects.
     #[arg(long)]
@@ -128,15 +163,56 @@ pub struct CpArgs {
 pub const LINK_SUFFIX: &str = ".s5cmdlink";
 
 impl CpArgs {
-    fn metadata(&self) -> Metadata {
-        Metadata {
+    /// What the destination objects get, checked before anything is copied: `--expires` must be
+    /// an RFC 3339 time, `--metadata` key=value pairs with distinct keys (s5cmd's rules).
+    fn metadata(&self) -> anyhow::Result<Metadata> {
+        if let Some(v) = &self.expires {
+            crate::storage::s3::expires_time(v)?;
+        }
+        Ok(Metadata {
             storage_class: self.storage_class.clone(),
             acl: self.acl.clone(),
             content_type: self.content_type.clone(),
+            cache_control: self.cache_control.clone(),
+            expires: self.expires.clone(),
+            content_encoding: self.content_encoding.clone(),
+            content_disposition: self.content_disposition.clone(),
+            encryption_method: self.sse.clone(),
+            encryption_key_id: self.sse_kms_key_id.clone(),
+            user_defined: parse_metadata(&self.metadata)?,
+            directive: self.metadata_directive.as_deref().map(str::to_ascii_uppercase),
             if_none_match: self.if_none_match,
-            ..Default::default()
-        }
+        })
     }
+}
+
+/// `--metadata key=value` pairs: the key is what comes before the first `=`; an empty pair, one
+/// without `=` or a key given twice is an error, as in s5cmd.
+fn parse_metadata(pairs: &[String]) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for pair in pairs {
+        anyhow::ensure!(!pair.is_empty(), "--metadata can't be empty: use key=value");
+        let Some((key, value)) = pair.split_once('=') else {
+            anyhow::bail!("--metadata {pair:?}: use key=value");
+        };
+        anyhow::ensure!(
+            out.insert(key.to_string(), value.to_string()).is_none(),
+            "--metadata: key {key:?} is already defined"
+        );
+    }
+    Ok(out)
+}
+
+/// Whether a flag sets what an S3 to S3 copy's object metadata is, which S3 ignores under the
+/// default COPY directive: then the copy REPLACEs it (as s5cmd, which always replaces).
+fn sets_object_metadata(m: &Metadata) -> bool {
+    let given = |v: &Option<String>| v.as_deref().is_some_and(|v| !v.is_empty());
+    given(&m.content_type)
+        || given(&m.cache_control)
+        || given(&m.expires)
+        || given(&m.content_encoding)
+        || given(&m.content_disposition)
+        || !m.user_defined.is_empty()
 }
 
 pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Result<()> {
@@ -161,7 +237,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let src_raws = &args.paths[..args.paths.len() - 1];
 
     let dst = Url::parse(dst_raw).map_err(|e| anyhow::anyhow!(e))?;
-    let metadata = args.metadata();
+    let metadata = args.metadata()?;
 
     // With more than one source, the destination must be a directory (local) or
     // a prefix/bucket (s3) — a single named target cannot receive many objects.
@@ -630,6 +706,13 @@ async fn copy_one(
         // destination client) (#858/#816/#514/#702/#700/#671).
         (true, true) => {
             let s3 = s3.expect("remote copy requires an S3 client");
+            let replaced;
+            let metadata = if metadata.directive.is_none() && sets_object_metadata(metadata) {
+                replaced = Metadata { directive: Some("REPLACE".to_string()), ..metadata.clone() };
+                &replaced
+            } else {
+                metadata
+            };
             if let Some(dst_s3) = s3_dst {
                 // Per-side clients: cross-client streaming copy.
                 s3.client_copy_to(dst_s3, src, dst, metadata).await?;
@@ -644,6 +727,10 @@ async fn copy_one(
         }
         // remote -> local: download.
         (true, false) => {
+            anyhow::ensure!(
+                metadata.directive.is_none(),
+                "metadata directive is not supported for download"
+            );
             let s3 = s3.expect("download requires an S3 client");
             s3.download(src, &PathBuf::from(dst.absolute())).await?;
             if is_move {
@@ -653,6 +740,10 @@ async fn copy_one(
         // local -> remote: upload. When per-side clients exist, the destination
         // client is the one anchored on the destination's region/endpoint.
         (false, true) => {
+            anyhow::ensure!(
+                metadata.directive.is_none(),
+                "metadata directive is not supported for upload"
+            );
             let s3 = s3_dst
                 .or(s3)
                 .expect("upload requires an S3 client");
@@ -869,6 +960,14 @@ fn fast_unsupported(global: &GlobalOpts, args: &CpArgs) -> Vec<&'static str> {
         (args.storage_class.is_some(), "--storage-class"),
         (args.acl.is_some(), "--acl"),
         (args.content_type.is_some(), "--content-type"),
+        (args.cache_control.is_some(), "--cache-control"),
+        (args.expires.is_some(), "--expires"),
+        (args.content_encoding.is_some(), "--content-encoding"),
+        (args.content_disposition.is_some(), "--content-disposition"),
+        (!args.metadata.is_empty(), "--metadata"),
+        (args.metadata_directive.is_some(), "--metadata-directive"),
+        (args.sse.is_some(), "--sse"),
+        (args.sse_kms_key_id.is_some(), "--sse-kms-key-id"),
         (args.preserve_timestamps, "--preserve-timestamps"),
         (args.if_none_match, "--if-none-match"),
         (args.links, "--links"),
@@ -1082,6 +1181,58 @@ mod tests {
             unsupported(&mv),
             ["--storage-class", "--acl", "--concurrency", "--no-sign-request", "--proxy"]
         );
+        // #34: what the new object gets.
+        let properties = [
+            "rs5cmd", "cp", "--fast", "--cache-control", "no-cache", "--expires",
+            "2030-01-02T03:04:05Z", "--content-encoding", "gzip", "--content-disposition", "inline",
+            "--metadata", "a=b", "--metadata-directive", "REPLACE", "--sse", "aws:kms",
+            "--sse-kms-key-id", "k", "a", "s3://b/a",
+        ];
+        assert_eq!(
+            unsupported(&properties),
+            [
+                "--cache-control", "--expires", "--content-encoding", "--content-disposition",
+                "--metadata", "--metadata-directive", "--sse", "--sse-kms-key-id",
+            ]
+        );
+    }
+
+    #[test]
+    fn metadata_pairs_split_at_the_first_equals_sign() {
+        let m = super::parse_metadata(&["a=b".into(), "c=d=e".into(), "f=".into()]).unwrap();
+        assert_eq!(m.get("a").map(String::as_str), Some("b"));
+        assert_eq!(m.get("c").map(String::as_str), Some("d=e"));
+        assert_eq!(m.get("f").map(String::as_str), Some(""));
+        for bad in [vec!["".to_string()], vec!["a".into()], vec!["a=1".into(), "a=2".into()]] {
+            assert!(super::parse_metadata(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_flags_become_the_new_objects_metadata() {
+        let args = cp_args(&[
+            "rs5cmd", "cp", "--cache-control", "no-cache", "--expires", "2030-01-02T03:04:05Z",
+            "--content-encoding", "gzip", "--content-disposition", "inline", "--metadata", "a=b",
+            "--metadata-directive", "replace", "--sse", "aws:kms", "--sse-kms-key-id", "k", "a",
+            "s3://b/a",
+        ]);
+        let m = args.metadata().unwrap();
+        assert_eq!(m.cache_control.as_deref(), Some("no-cache"));
+        assert_eq!(m.expires.as_deref(), Some("2030-01-02T03:04:05Z"));
+        assert_eq!(m.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(m.content_disposition.as_deref(), Some("inline"));
+        assert_eq!(m.encryption_method.as_deref(), Some("aws:kms"));
+        assert_eq!(m.encryption_key_id.as_deref(), Some("k"));
+        assert_eq!(m.directive.as_deref(), Some("REPLACE"));
+        assert!(super::sets_object_metadata(&m));
+        let plain = ["rs5cmd", "cp", "--storage-class", "GLACIER", "--sse", "AES256", "a", "b"];
+        let plain = cp_args(&plain);
+        assert!(!super::sets_object_metadata(&plain.metadata().unwrap()));
+        let bad = cp_args(&["rs5cmd", "cp", "--expires", "2030-01-02", "a", "b"]);
+        assert!(bad.metadata().is_err());
+        let keep = ["rs5cmd", "cp", "--metadata-directive", "KEEP", "a", "b"];
+        let directive = Cli::try_parse_from(keep);
+        assert!(directive.is_err());
     }
 
     #[test]

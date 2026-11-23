@@ -2363,6 +2363,54 @@ fn rm_refuses_a_bucket_or_a_bare_prefix() {
 }
 
 #[test]
+fn cp_sets_metadata_and_a_copy_keeps_or_replaces_it() {
+    // #34: `--metadata` and `--metadata-directive`. A copy keeps the source's metadata unless a
+    // flag sets it (then REPLACE) or the directive says otherwise.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f.txt");
+    std::fs::write(&f, b"meta").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let src = s3("/src.txt");
+    rs5cmd()
+        .args(["cp", "--metadata", "owner=a", "--content-type", "text/plain"])
+        .args([f.to_str().unwrap(), &src])
+        .assert()
+        .success();
+    let head = |key: &str| {
+        let out = rs5cmd().args(["--json", "head", &s3(key)]).output().unwrap();
+        assert!(out.status.success(), "head {key}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let owner = v["metadata"]["owner"].as_str().map(str::to_string);
+        (owner, v["content_type"].as_str().map(str::to_string))
+    };
+    assert_eq!(head("/src.txt"), (Some("a".into()), Some("text/plain".into())));
+    // No flag: S3's COPY, the metadata travels with the object.
+    rs5cmd().args(["cp", &src, &s3("/kept.txt")]).assert().success();
+    assert_eq!(head("/kept.txt"), (Some("a".into()), Some("text/plain".into())));
+    // --metadata: REPLACE.
+    rs5cmd()
+        .args(["cp", "--metadata", "owner=b", &src, &s3("/replaced.txt")])
+        .assert()
+        .success();
+    assert_eq!(head("/replaced.txt").0.as_deref(), Some("b"));
+    // --metadata-directive COPY wins over the flag.
+    rs5cmd()
+        .args(["cp", "--metadata-directive", "COPY", "--metadata", "owner=c"])
+        .args([&src, &s3("/copied.txt")])
+        .assert()
+        .success();
+    assert_eq!(head("/copied.txt").0.as_deref(), Some("a"));
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn sync_delete_bare_prefix_keeps_subdirectories() {
     // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
     // file in a subdirectory although its counterpart existed in the source.
