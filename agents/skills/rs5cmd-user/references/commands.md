@@ -175,7 +175,9 @@ files land under `<dst>/data/`. `data/` or `'data/*'` copies only what is inside
 
 `rs5cmd sync [OPTIONS] <SOURCE> <DESTINATION>` copies objects that are missing at the
 destination or differ from it. By default an object is copied when the source is newer or the
-sizes differ.
+sizes differ. Object times are used as the server returns them: MinIO and others return
+milliseconds, AWS S3 whole seconds, so on AWS a file changed in the same second as its upload is
+copied again by the next `sync`, as with s5cmd. `--size-only` makes repeat runs exact no-ops.
 
 | Flag | Meaning |
 |---|---|
