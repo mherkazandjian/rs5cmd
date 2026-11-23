@@ -1,7 +1,7 @@
 //! `rm` — remove objects (local or S3), with wildcard expansion.
 //!
 //! Supports `--exclude` / `--include` glob filtering. The filters are applied
-//! ONLY when a target expands via wildcard/prefix listing; they are matched
+//! ONLY when a target expands via a wildcard listing; they are matched
 //! against each listed object's relative path. A single concrete-object delete
 //! (no expansion) is never filtered.
 
@@ -16,7 +16,9 @@ use crate::storage::new_client;
 
 #[derive(Args, Debug)]
 pub struct RmArgs {
-    /// One or more targets (local paths or s3:// URLs), may contain wildcards.
+    /// One or more targets (local paths or s3:// URLs), may contain wildcards. A bucket or a
+    /// prefix ending in `/` is refused, as in s5cmd: delete everything under it with
+    /// `'s3://bucket/prefix/*'`.
     #[arg(required = true)]
     pub targets: Vec<String>,
 
@@ -31,12 +33,12 @@ pub struct RmArgs {
     pub raw: bool,
 
     /// Exclude objects whose relative path matches the given glob (repeatable).
-    /// Only applied when a target expands via wildcard/prefix listing.
+    /// Only applied when a target expands via a wildcard listing.
     #[arg(long)]
     pub exclude: Vec<String>,
 
     /// Only include objects whose relative path matches the given glob (repeatable).
-    /// Only applied when a target expands via wildcard/prefix listing.
+    /// Only applied when a target expands via a wildcard listing.
     #[arg(long)]
     pub include: Vec<String>,
 
@@ -51,6 +53,17 @@ pub struct RmArgs {
     pub include_from: Vec<String>,
 }
 
+/// s5cmd's refusal of a bucket or a bare prefix, word for word.
+const BARE_PREFIX: &str =
+    "s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)";
+
+/// Whether `url` names a whole bucket or, without `--raw`, every object under a prefix: s5cmd
+/// refuses both, since a trailing `/` is easy to type where one object was meant (#30). With
+/// `--raw` a key ending in `/` is that one key (a directory marker).
+fn refused(url: &Url) -> bool {
+    url.is_bucket() || (url.is_prefix() && !url.is_raw())
+}
+
 pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
     let opts = global.storage_options();
     let mut had_error = false;
@@ -61,23 +74,33 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
     let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
     let filters = Filters::new(&includes, &excludes)?;
 
-    for target in &args.targets {
-        let url = Url::new(
-            target,
-            crate::storage::url::UrlOptions {
+    let urls = args
+        .targets
+        .iter()
+        .map(|target| {
+            let options = crate::storage::url::UrlOptions {
                 raw: args.raw,
                 version_id: args.version_id.clone(),
                 ..Default::default()
-            },
-        )
-        .map_err(|e| anyhow::anyhow!(e))?;
+            };
+            Url::new(target, options).map_err(|e| anyhow::anyhow!(e))
+        })
+        .collect::<anyhow::Result<Vec<Url>>>()?;
+    // Every target is checked before anything is deleted, dry runs included.
+    let bare: Vec<String> = urls.iter().filter(|u| refused(u)).map(Url::to_string).collect();
+    if !bare.is_empty() {
+        for target in &bare {
+            crate::output::op_error("rm", target, None, BARE_PREFIX);
+        }
+        anyhow::bail!("nothing deleted");
+    }
 
-        // Collect the concrete object URLs to delete (expanding wildcards/prefixes).
-        // `--raw` forces literal single-key handling: no wildcard, no prefix
-        // expansion. `is_wildcard()` is already false when raw, but `is_prefix()`
-        // only checks the trailing slash, so guard it explicitly so a dir-marker
-        // key (e.g. `s3://b/dirobj/`) routes to the single delete path.
-        let expand = !url.is_raw() && (url.is_wildcard() || (url.is_remote() && url.is_prefix()));
+    for url in urls {
+
+        // Collect the concrete object URLs to delete, expanding wildcards. A bare prefix was
+        // refused above; with `--raw` there is no expansion (`is_wildcard` is false), so a key
+        // ending in `/` (a directory marker) takes the single delete.
+        let expand = url.is_wildcard();
 
         if !expand {
             // Single concrete object: deleted as-is, never filtered.
@@ -160,24 +183,30 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn raw_routes_dir_marker_to_single_delete() {
-        use crate::storage::url::{Url, UrlOptions};
-        // Non-raw: a trailing-slash key is a prefix and takes the (child-listing)
-        // expansion path, so the marker object itself is never deleted.
-        let plain = Url::new("s3://b/dirobj/", UrlOptions::default()).unwrap();
-        assert!(plain.is_prefix());
-        let plain_expand = plain.is_wildcard() || (plain.is_remote() && plain.is_prefix());
-        assert!(plain_expand, "non-raw dir-marker takes the prefix/list path");
+    use super::refused;
+    use crate::storage::url::{Url, UrlOptions};
 
-        // Raw: the fixed predicate from rm.rs:69 must route to the single delete.
-        let raw = Url::new(
-            "s3://b/dirobj/",
-            UrlOptions { raw: true, ..Default::default() },
-        ).unwrap();
-        assert!(raw.is_raw());
-        let raw_expand = !raw.is_raw()
-            && (raw.is_wildcard() || (raw.is_remote() && raw.is_prefix()));
-        assert!(!raw_expand, "raw dir-marker must use client.delete single path");
+    fn url(s: &str, raw: bool) -> Url {
+        Url::new(s, UrlOptions { raw, ..Default::default() }).unwrap()
+    }
+
+    #[test]
+    fn a_bucket_or_a_bare_prefix_is_refused_as_s5cmd_refuses_it() {
+        for s in ["s3://b", "s3://b/", "s3://b/p/", "s3://b/p/q/"] {
+            assert!(refused(&url(s, false)), "{s}");
+        }
+        for s in ["s3://b/p/*", "s3://b/p/k", "s3://b/p*", "local/dir/", "f.txt"] {
+            assert!(!refused(&url(s, false)), "{s}");
+        }
+        // `--raw`: a key ending in `/` is one object (a directory marker); a bucket stays refused.
+        assert!(!refused(&url("s3://b/dirobj/", true)));
+        assert!(refused(&url("s3://b", true)));
+    }
+
+    #[test]
+    fn raw_takes_the_single_delete() {
+        assert!(!url("s3://b/dirobj/", true).is_wildcard());
+        assert!(!url("s3://b/what?.txt", true).is_wildcard());
+        assert!(url("s3://b/what?.txt", false).is_wildcard());
     }
 }

@@ -2314,6 +2314,55 @@ fn rm_dry_run_lists_objects() {
 }
 
 #[test]
+fn rm_refuses_a_bucket_or_a_bare_prefix() {
+    // #30: `rm s3://b/p/` deleted everything under the prefix and exited 0; s5cmd refuses it.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    const MSG: &str =
+        "s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)";
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["x1", "x2", "x3"] {
+        std::fs::write(tmp.path().join(f), b"x").unwrap();
+    }
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", tmp.path().to_str().unwrap());
+    rs5cmd().args(["cp", &pattern, &s3("/d01/")]).assert().success();
+    let refused: [&[&str]; 5] = [
+        &["rm", &s3("/d01/")],
+        &["--dry-run", "rm", &s3("/d01/")],
+        &["rm", &s3("/d01/x1"), &s3("/d01/")],
+        &["rm", &s3("")],
+        &["rm", &s3("/")],
+    ];
+    for args in refused {
+        let out = rs5cmd().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(MSG), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: deleted something");
+    }
+    rs5cmd()
+        .args(["--json", "rm", &s3("/d01/")])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"success\":false"))
+        .stdout(predicate::str::contains(MSG));
+    // Nothing was deleted, not even the object named next to the prefix.
+    let ls = rs5cmd().args(["ls", &s3("/d01/*")]).output().unwrap();
+    let listed = String::from_utf8_lossy(&ls.stdout);
+    for f in ["x1", "x2", "x3"] {
+        assert!(listed.contains(f), "{f} missing: {listed}");
+    }
+    // The wildcard is the way to delete everything under a prefix.
+    rs5cmd().args(["rm", &s3("/d01/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn sync_delete_bare_prefix_keeps_subdirectories() {
     // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
     // file in a subdirectory although its counterpart existed in the source.

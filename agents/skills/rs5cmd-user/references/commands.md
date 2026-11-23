@@ -205,11 +205,14 @@ level only.
 
 ## rm
 
-`rs5cmd rm [OPTIONS] <TARGET>...` deletes objects or local files. Remote wildcards and prefixes
-are deleted in batches of 1000 keys.
+`rs5cmd rm [OPTIONS] <TARGET>...` deletes objects or local files. Remote wildcards are deleted
+in batches of 1000 keys. A bucket or a prefix ending in `/` is refused, as in s5cmd: `ERROR rm
+s3://bucket/p/: s3 bucket/prefix cannot be used for delete operations (forgot wildcard
+character?)`, exit 1, and nothing is deleted, also when other targets were fine. Write
+`'s3://bucket/p/*'` to delete everything under a prefix.
 
 Flags: `--version-id ID` (one version), `--raw` (treat each target as a literal key: no wildcard
-or trailing-slash expansion, so a key ending in `/` or containing `*` can be removed), filter
+expansion, so a key ending in `/`, a directory marker, or containing `*` can be removed), filter
 flags.
 
 ```bash
@@ -219,8 +222,8 @@ rs5cmd rm --exclude '*.keep' 's3://bucket/tmp/*'
 rs5cmd rm --raw 's3://bucket/weird*name'
 ```
 
-`--dry-run rm` prints a `(dry-run) rm` line for each object it would delete, wildcards and
-prefixes included, and deletes nothing.
+`--dry-run rm` prints a `(dry-run) rm` line for each object a wildcard would delete, and deletes
+nothing. It refuses a bucket or a bare prefix the same way.
 
 ## cat
 
