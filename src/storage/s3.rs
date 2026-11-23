@@ -2918,6 +2918,14 @@ mod tests {
     }
 
     #[test]
+    fn copy_source_encodes_the_key_and_keeps_the_version_id() {
+        use crate::storage::url::{Url, UrlOptions};
+        let opts = UrlOptions { version_id: Some("3/L4k+q".to_string()), ..Default::default() };
+        let u = Url::new("s3://b/s/a b+c.txt", opts).unwrap();
+        assert_eq!(super::S3::copy_source_header(&u), "b/s/a%20b%2Bc.txt?versionId=3/L4k+q");
+    }
+
+    #[test]
     fn percent_decode_passthrough_plain() {
         assert_eq!(percent_decode("hello/world.txt"), "hello/world.txt");
     }
