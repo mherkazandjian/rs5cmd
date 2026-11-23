@@ -2420,6 +2420,37 @@ fn keys_with_spaces_and_plus_are_listed_as_they_are() {
 }
 
 #[test]
+fn sync_twice_copies_nothing_when_the_server_keeps_milliseconds() {
+    // #33: listed object times were cut to whole seconds, so on a server that returns
+    // milliseconds (MinIO) a file written in the same second as its upload looked newer than its
+    // copy, and the second sync uploaded it again.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let src = format!("{}/", tmp.path().to_str().unwrap());
+    for round in 0..3 {
+        for i in 0..20 {
+            std::fs::write(tmp.path().join(format!("f{i}")), format!("{round} {i}")).unwrap();
+        }
+        let first = rs5cmd().args(["sync", &src, &s3("/p/")]).output().unwrap();
+        assert!(first.status.success());
+        let copied = String::from_utf8_lossy(&first.stdout).lines().count();
+        assert_eq!(copied, 20, "round {round}: every changed file is uploaded");
+        let again = rs5cmd().args(["sync", &src, &s3("/p/")]).output().unwrap();
+        assert!(again.status.success());
+        let stdout = String::from_utf8_lossy(&again.stdout);
+        assert!(stdout.is_empty(), "round {round}: the second sync copied: {stdout}");
+    }
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn sync_delete_bare_prefix_keeps_subdirectories() {
     // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
     // file in a subdirectory although its counterpart existed in the source.

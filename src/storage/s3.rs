@@ -1793,10 +1793,7 @@ impl S3 {
             let name = b.name().unwrap_or_default().to_string();
             if prefix.is_empty() || name.starts_with(prefix) {
                 out.push(Bucket {
-                    creation_date: b.creation_date().and_then(|t| {
-                        std::time::UNIX_EPOCH
-                            .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                    }),
+                    creation_date: b.creation_date().and_then(system_time),
                     name,
                 });
             }
@@ -2010,11 +2007,7 @@ impl S3 {
                             let obj = Object {
                                 url: Some(newurl),
                                 etag: c.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                                mod_time: c.last_modified().and_then(|t| {
-                                    std::time::UNIX_EPOCH.checked_add(
-                                        std::time::Duration::from_secs(t.secs().max(0) as u64),
-                                    )
-                                }),
+                                mod_time: c.last_modified().and_then(system_time),
                                 typ,
                                 size: c.size().unwrap_or(0),
                                 storage_class: StorageClass(
@@ -2117,10 +2110,7 @@ impl S3 {
                     let obj = Object {
                         url: Some(newurl),
                         etag: c.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                        mod_time: c.last_modified().and_then(|t| {
-                            std::time::UNIX_EPOCH
-                                .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                        }),
+                        mod_time: c.last_modified().and_then(system_time),
                         typ,
                         size: c.size().unwrap_or(0),
                         storage_class: StorageClass(
@@ -2235,10 +2225,7 @@ impl S3 {
                     let obj = Object {
                         url: Some(nu),
                         etag: v.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                        mod_time: v.last_modified().and_then(|t| {
-                            std::time::UNIX_EPOCH
-                                .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                        }),
+                        mod_time: v.last_modified().and_then(system_time),
                         typ,
                         size: v.size().unwrap_or(0),
                         storage_class: StorageClass(
@@ -2269,10 +2256,7 @@ impl S3 {
                     object_found = true;
                     let obj = Object {
                         url: Some(nu),
-                        mod_time: d.last_modified().and_then(|t| {
-                            std::time::UNIX_EPOCH
-                                .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                        }),
+                        mod_time: d.last_modified().and_then(system_time),
                         typ: ObjectType::File,
                         is_delete_marker: true,
                         ..Default::default()
@@ -2382,10 +2366,7 @@ impl Storage for S3 {
             Ok(out) => Ok(Object {
                 url: Some(src.clone()),
                 etag: out.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                mod_time: out.last_modified().and_then(|t| {
-                    std::time::UNIX_EPOCH
-                        .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                }),
+                mod_time: out.last_modified().and_then(system_time),
                 size: out.content_length().unwrap_or(0),
                 typ: ObjectType::File,
                 ..Default::default()
@@ -2772,6 +2753,19 @@ impl S3 {
     }
 }
 
+/// An S3 time (`LastModified`, a bucket's `CreationDate`) as a `SystemTime`, its sub-second part
+/// included (#33). MinIO and other servers return milliseconds; dropping them made a file written
+/// in the same second as its upload look newer than its copy to `sync`, which compares with local
+/// times kept to the nanosecond. AWS S3 returns whole seconds. A time before 1970 becomes the
+/// epoch, as before.
+pub(crate) fn system_time(t: &aws_smithy_types::DateTime) -> Option<std::time::SystemTime> {
+    let since = match u64::try_from(t.secs()) {
+        Ok(secs) => std::time::Duration::new(secs, t.subsec_nanos()),
+        Err(_) => std::time::Duration::ZERO,
+    };
+    std::time::UNIX_EPOCH.checked_add(since)
+}
+
 /// Formats a local file's modification time as `seconds.nanoseconds` since the
 /// Unix epoch, for storage as object metadata under `MTIME_METADATA_KEY`.
 fn file_mtime_value(src: &Path) -> Option<String> {
@@ -2981,6 +2975,20 @@ mod tests {
         let opts = UrlOptions { version_id: Some("3/L4k+q".to_string()), ..Default::default() };
         let u = Url::new("s3://b/s/a b+c.txt", opts).unwrap();
         assert_eq!(super::S3::copy_source_header(&u), "b/s/a%20b%2Bc.txt?versionId=3/L4k+q");
+    }
+
+    #[test]
+    fn system_time_keeps_the_sub_second_part() {
+        use aws_smithy_types::date_time::Format;
+        use aws_smithy_types::DateTime;
+        let t = DateTime::from_str("2026-11-23T10:00:05.123Z", Format::DateTime).unwrap();
+        let since = super::system_time(&t).unwrap().duration_since(std::time::UNIX_EPOCH);
+        assert_eq!(since.unwrap(), std::time::Duration::new(t.secs() as u64, 123_000_000));
+        let whole = DateTime::from_secs(1_795_000_000);
+        let since = super::system_time(&whole).unwrap().duration_since(std::time::UNIX_EPOCH);
+        assert_eq!(since.unwrap(), std::time::Duration::from_secs(1_795_000_000));
+        let before_1970 = DateTime::from_secs(-5);
+        assert_eq!(super::system_time(&before_1970), Some(std::time::UNIX_EPOCH));
     }
 
     #[test]

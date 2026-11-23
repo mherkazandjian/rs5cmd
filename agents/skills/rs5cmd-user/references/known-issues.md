@@ -60,15 +60,6 @@ unknown argument.
   suffix. A link to a directory is stored as a link when a wildcard matches it or it is the
   source itself; inside a directory source, links to directories are still walked.
 
-### 2.4 `sync` may copy a just-uploaded file once more
-
-The default comparison copies a file when the source is newer than the destination or the sizes
-differ. rs5cmd keeps an object's modification time to the whole second, while local times are
-finer, so a file changed in the same second it was uploaded can be copied again by the next
-`sync`. AWS S3 stores whole seconds, so s5cmd does the same there; on servers that return
-milliseconds (MinIO, for one) s5cmd keeps them and rs5cmd does not. Use `--size-only` when you
-need repeat runs to be exact no-ops.
-
 ## 3. Resource use
 
 - **Memory.** The default path streams: uploads over 256 KiB are read in 128 KiB chunks and
