@@ -23,6 +23,11 @@ pub struct CpArgs {
     #[arg(long, default_value_t = true)]
     pub follow_symlinks: bool,
 
+    /// Do not follow symbolic links: links inside a local directory source are skipped, and so
+    /// is a source that is a link itself (s5cmd's rules; a wildcard match is still copied).
+    #[arg(long)]
+    pub no_follow_symlinks: bool,
+
     /// Do not overwrite a destination that exists.
     #[arg(long, short = 'n')]
     pub no_clobber: bool,
@@ -117,6 +122,16 @@ pub struct CpArgs {
     /// versions do not collide (#762).
     #[arg(long)]
     pub all_versions: bool,
+
+    /// Accepted for compatibility with s5cmd, where it silences the errors for skipped Glacier
+    /// objects; `cp` skips no storage class (see --force-glacier-transfer), so it has no effect.
+    #[arg(long)]
+    pub ignore_glacier_warnings: bool,
+
+    /// Show the progress bar and print no line per copied object (errors are still printed), as
+    /// s5cmd's --show-progress. The bar shows on a terminal, without --json.
+    #[arg(long, visible_alias = "sp")]
+    pub show_progress: bool,
 
     /// Force transfer of glacier objects whether they are restored or not.
     /// `cp` transfers every listed object regardless of storage class, so this
@@ -302,11 +317,12 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         })
         .collect::<anyhow::Result<_>>()?;
 
+    let follow_symlinks = args.follow_symlinks && !args.no_follow_symlinks;
+    let listing = Listing { follow_symlinks, flatten: args.flatten };
     // Pairs stream from a listing task through a bounded channel while transfers run (F13);
     // collecting them all first held every (source, destination) pair in memory at once.
     // (`--fast` may replace them with the pairs it collected and declined.)
     #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
-    let listing = Listing { follow_symlinks: args.follow_symlinks, flatten: args.flatten };
     let mut pairs = Pairs::new(srcs.clone(), dst.clone(), opts.clone(), listing, filters);
 
     // Any remote side present means we need an S3 client. Use the first source
@@ -402,6 +418,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // both running tasks *and* buffered completed results — important when the
     // object count is huge.
     let mut had_error = fast_failed;
+    let quiet = args.show_progress;
     // Count-of-transfers progress bar (no-op in JSON mode / non-TTY stderr).
     // The total grows as the listing yields pairs.
     let pb = crate::progress::Progress::new(0, op);
@@ -410,7 +427,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         pb.inc_length(1);
         while set.len() >= workers {
             let (s, d, r) = set.join_next().await.unwrap().expect("transfer task panicked");
-            report(op, &s, &d, r, &mut had_error);
+            report(op, &s, &d, r, &mut had_error, quiet);
             pb.inc(1);
         }
         let opts = Arc::clone(&opts);
@@ -433,7 +450,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     }
     while let Some(joined) = set.join_next().await {
         let (s, d, r) = joined.expect("transfer task panicked");
-        report(op, &s, &d, r, &mut had_error);
+        report(op, &s, &d, r, &mut had_error, quiet);
         pb.inc(1);
     }
     pb.finish();
@@ -469,6 +486,7 @@ impl Pairs {
         if !srcs.iter().any(expands) {
             let known: Vec<(Url, Url)> = srcs
                 .iter()
+                .filter(|s| !listing.skips(s))
                 .map(|s| (s.clone(), resolve_single_dest(s, &dst)))
                 .collect();
             return Pairs::Known(known.into_iter());
@@ -579,6 +597,16 @@ async fn stat_or_none(
     }
 }
 
+impl Listing {
+    /// Whether a source given on the command line is skipped: with --no-follow-symlinks, a local
+    /// source that is a symbolic link itself (s5cmd's `expandSource`).
+    fn skips(self, src: &Url) -> bool {
+        !self.follow_symlinks
+            && !src.is_remote()
+            && std::fs::symlink_metadata(src.absolute()).is_ok_and(|m| m.file_type().is_symlink())
+    }
+}
+
 /// Whether a source expands into several (source, destination) pairs: a wildcard, a bucket or
 /// prefix, a local directory, or every version of a key.
 fn expands(src: &Url) -> bool {
@@ -594,9 +622,11 @@ fn expands(src: &Url) -> bool {
     }
 }
 
-/// Prints the per-transfer result line, tracking whether any failed.
-fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut bool) {
+/// Prints the per-transfer result line, tracking whether any failed. `quiet` (--show-progress):
+/// no line for a success.
+fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut bool, quiet: bool) {
     match r {
+        Ok(()) if quiet => {}
         Ok(()) => crate::output::op_success(op, &s.to_string(), Some(&d.to_string())),
         // A failed `--if-none-match` conditional write means the destination
         // already exists: this is a skip, not a failure, so it must NOT set
@@ -627,6 +657,9 @@ async fn expand_sources(
 ) -> anyhow::Result<bool> {
     let follow_symlinks = listing.follow_symlinks;
     if !expands(src) {
+        if listing.skips(src) {
+            return Ok(true);
+        }
         let dst_url = resolve_single_dest(src, dst);
         return Ok(out.send((src.clone(), dst_url)).await.is_ok());
     }
@@ -1048,9 +1081,10 @@ const FAST_DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
 
 /// The flags given that `--fast` does not honour (#10); with any of them `cp`/`mv` runs the set on
 /// the default path and says so. The fast path does honour `--part-size`, what shapes the listing
-/// (`--include`/`--exclude` and their `-from` files, `--follow-symlinks`,
-/// `--use-list-objects-v1`), `--force-glacier-transfer` (`cp` skips no storage class anyway) and
-/// the globals `--endpoint-url`, `--region`, `--profile`, `--credentials-file`,
+/// and the pairs (`--include`/`--exclude` and their `-from` files, `--follow-symlinks`,
+/// `--no-follow-symlinks`, `--flatten`, `--raw`, `--use-list-objects-v1`),
+/// `--force-glacier-transfer` and `--ignore-glacier-warnings` (`cp` skips no storage class
+/// anyway) and the globals `--endpoint-url`, `--region`, `--profile`, `--credentials-file`,
 /// `--no-verify-ssl`, `--tls-post-quantum`, `--retry-count`, `--numworkers`, `--dry-run`,
 /// `--json` and `--color`. Dual-stack and FIPS endpoints do not apply with `--endpoint-url`, on
 /// either path. `--no-sign-request` is here because the fast path signs every request (#6).
@@ -1072,6 +1106,7 @@ fn fast_unsupported(global: &GlobalOpts, args: &CpArgs) -> Vec<&'static str> {
         (args.no_clobber, "--no-clobber"),
         (args.if_size_differ, "--if-size-differ"),
         (args.if_source_newer, "--if-source-newer"),
+        (args.show_progress, "--show-progress"),
         (args.preserve_timestamps, "--preserve-timestamps"),
         (args.if_none_match, "--if-none-match"),
         (args.links, "--links"),
@@ -1273,9 +1308,15 @@ mod tests {
         let honoured = [
             "rs5cmd", "--endpoint-url", "http://h:9000", "--numworkers", "4", "--retry-count", "3",
             "--dry-run", "--json", "cp", "--fast", "--part-size", "16", "--exclude", "*.log",
-            "--force-glacier-transfer", "--concurrency", "5", "a/*", "s3://b/p/",
+            "--force-glacier-transfer", "--concurrency", "5", "--flatten", "--raw",
+            "--no-follow-symlinks", "--ignore-glacier-warnings", "a/*", "s3://b/p/",
         ];
         assert_eq!(unsupported(&honoured), Vec::<&str>::new());
+        let per_object = ["rs5cmd", "cp", "--fast", "-n", "-s", "-u", "--sp", "a", "s3://b/a"];
+        assert_eq!(
+            unsupported(&per_object),
+            ["--no-clobber", "--if-size-differ", "--if-source-newer", "--show-progress"]
+        );
         let mv = [
             "rs5cmd", "--proxy", "http://p:3128", "--no-sign-request", "mv", "--fast",
             "--storage-class", "STANDARD_IA", "--acl", "private", "--concurrency", "2", "a",
