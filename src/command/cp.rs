@@ -23,6 +23,29 @@ pub struct CpArgs {
     #[arg(long, default_value_t = true)]
     pub follow_symlinks: bool,
 
+    /// Do not overwrite a destination that exists.
+    #[arg(long, short = 'n')]
+    pub no_clobber: bool,
+
+    /// Overwrite a destination that exists only if its size differs. Overrides --no-clobber.
+    #[arg(long, short = 's')]
+    pub if_size_differ: bool,
+
+    /// Overwrite a destination that exists only if the source's modification time is newer.
+    /// Overrides --no-clobber and --if-size-differ.
+    #[arg(long, short = 'u')]
+    pub if_source_newer: bool,
+
+    /// Flatten the source's directory structure: each object lands directly under the
+    /// destination, under its base name.
+    #[arg(long, short = 'f')]
+    pub flatten: bool,
+
+    /// Disable wildcards: a source or destination with `*`, `?` or `[` is one literal key or
+    /// file name.
+    #[arg(long)]
+    pub raw: bool,
+
     /// Storage class for the destination object.
     #[arg(long)]
     pub storage_class: Option<String>,
@@ -236,7 +259,8 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let dst_raw = args.paths.last().expect("paths is non-empty");
     let src_raws = &args.paths[..args.paths.len() - 1];
 
-    let dst = Url::parse(dst_raw).map_err(|e| anyhow::anyhow!(e))?;
+    let dst_options = crate::storage::url::UrlOptions { raw: args.raw, ..Default::default() };
+    let dst = Url::new(dst_raw, dst_options).map_err(|e| anyhow::anyhow!(e))?;
     let metadata = args.metadata()?;
 
     // With more than one source, the destination must be a directory (local) or
@@ -268,6 +292,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
             Url::new(
                 raw,
                 crate::storage::url::UrlOptions {
+                    raw: args.raw,
                     version_id: args.version_id.clone(),
                     all_versions: args.all_versions,
                     ..Default::default()
@@ -281,8 +306,8 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // collecting them all first held every (source, destination) pair in memory at once.
     // (`--fast` may replace them with the pairs it collected and declined.)
     #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
-    let mut pairs =
-        Pairs::new(srcs.clone(), dst.clone(), opts.clone(), args.follow_symlinks, filters);
+    let listing = Listing { follow_symlinks: args.follow_symlinks, flatten: args.flatten };
+    let mut pairs = Pairs::new(srcs.clone(), dst.clone(), opts.clone(), listing, filters);
 
     // Any remote side present means we need an S3 client. Use the first source
     // (or the destination) that is remote as the config anchor.
@@ -363,6 +388,11 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let opts = Arc::new(opts);
     let metadata = Arc::new(metadata);
     let workers = global.numworkers.max(1);
+    let overwrite = Overwrite {
+        no_clobber: args.no_clobber,
+        if_size_differ: args.if_size_differ,
+        if_source_newer: args.if_source_newer,
+    };
 
     // Spawn each transfer as a tokio task so the multi-threaded runtime spreads
     // the per-request CPU (request build, SigV4 signing, response parse) across
@@ -389,17 +419,15 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         let s3_dst = s3_dst.clone();
         let links = args.links;
         set.spawn(async move {
-            let r = copy_one(
-                &s,
-                &d,
-                s3.as_deref(),
-                s3_dst.as_deref(),
-                &opts,
-                &metadata,
-                is_move,
-                links,
-            )
-            .await;
+            let (src_s3, dst_s3) = (s3.as_deref(), s3_dst.as_deref().or(s3.as_deref()));
+            let r = match overwrite.allows(&s, &d, src_s3, dst_s3, &opts).await {
+                Ok(true) => {
+                    copy_one(&s, &d, src_s3, s3_dst.as_deref(), &opts, &metadata, is_move, links)
+                        .await
+                }
+                Ok(false) => Err(Skipped.into()),
+                Err(e) => Err(e),
+            };
             (s, d, r)
         });
     }
@@ -437,13 +465,7 @@ enum Pairs {
 }
 
 impl Pairs {
-    fn new(
-        srcs: Vec<Url>,
-        dst: Url,
-        opts: Options,
-        follow_symlinks: bool,
-        filters: Filters,
-    ) -> Pairs {
+    fn new(srcs: Vec<Url>, dst: Url, opts: Options, listing: Listing, filters: Filters) -> Pairs {
         if !srcs.iter().any(expands) {
             let known: Vec<(Url, Url)> = srcs
                 .iter()
@@ -454,7 +476,7 @@ impl Pairs {
         let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
         let task = tokio::spawn(async move {
             for src in &srcs {
-                if !expand_sources(src, &dst, &opts, follow_symlinks, &filters, &tx).await? {
+                if !expand_sources(src, &dst, &opts, listing, &filters, &tx).await? {
                     break;
                 }
             }
@@ -479,6 +501,81 @@ impl Pairs {
                 task.await.expect("listing task panicked")
             }
         }
+    }
+}
+
+/// How sources are listed: whether local links are followed, and whether destinations keep the
+/// source's relative path or, with `--flatten`, only the base name.
+#[derive(Clone, Copy, Debug)]
+struct Listing {
+    follow_symlinks: bool,
+    flatten: bool,
+}
+
+/// `--no-clobber`, `--if-size-differ` and `--if-source-newer`: when an existing destination is
+/// overwritten. As s5cmd's `shouldOverride`, each later flag overrides the earlier ones' verdict.
+#[derive(Clone, Copy, Debug, Default)]
+struct Overwrite {
+    no_clobber: bool,
+    if_size_differ: bool,
+    if_source_newer: bool,
+}
+
+/// A destination the overwrite flags keep: no output and not an error, as in s5cmd.
+#[derive(Debug, thiserror::Error)]
+#[error("destination kept")]
+struct Skipped;
+
+impl Overwrite {
+    /// Whether `src` may be copied to `dst`: always when no flag is given or the destination does
+    /// not exist; otherwise by the flags, compared on sizes and modification times. Dry runs too.
+    async fn allows(
+        self,
+        src: &Url,
+        dst: &Url,
+        src_s3: Option<&S3>,
+        dst_s3: Option<&S3>,
+        opts: &Options,
+    ) -> anyhow::Result<bool> {
+        if !(self.no_clobber || self.if_size_differ || self.if_source_newer) {
+            return Ok(true);
+        }
+        let Some(to) = stat_or_none(dst, dst_s3, opts).await? else {
+            return Ok(true);
+        };
+        let from = stat_or_none(src, src_s3, opts).await?.ok_or_else(|| {
+            anyhow::anyhow!(crate::storage::ObjectNotFound(src.absolute()))
+        })?;
+        Ok(self.verdict(&from, &to))
+    }
+
+    fn verdict(self, from: &crate::storage::Object, to: &crate::storage::Object) -> bool {
+        let mut allowed = !self.no_clobber;
+        if self.if_size_differ {
+            allowed = from.size != to.size;
+        }
+        if self.if_source_newer {
+            allowed = matches!((from.mod_time, to.mod_time), (Some(f), Some(t)) if f > t);
+        }
+        allowed
+    }
+}
+
+/// The object or file at `u`, or `None` when there is none.
+async fn stat_or_none(
+    u: &Url,
+    s3: Option<&S3>,
+    opts: &Options,
+) -> anyhow::Result<Option<crate::storage::Object>> {
+    use crate::storage::Storage;
+    let r = match (u.is_remote(), s3) {
+        (true, Some(s3)) => s3.stat(u).await,
+        _ => new_client(u, opts).await?.stat(u).await,
+    };
+    match r {
+        Ok(o) => Ok(Some(o)),
+        Err(e) if e.downcast_ref::<crate::storage::ObjectNotFound>().is_some() => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
@@ -507,6 +604,8 @@ fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut boo
         Err(ref e) if e.downcast_ref::<crate::storage::PreconditionFailedError>().is_some() => {
             eprintln!("{op} {s} {d}: object already exists, skipped");
         }
+        // Kept by --no-clobber / --if-size-differ / --if-source-newer: silent, as in s5cmd.
+        Err(ref e) if e.downcast_ref::<Skipped>().is_some() => {}
         Err(e) => {
             *had_error = true;
             // Annotate raw EMFILE with the RLIMIT_NOFILE hint (#390).
@@ -522,10 +621,11 @@ async fn expand_sources(
     src: &Url,
     dst: &Url,
     opts: &Options,
-    follow_symlinks: bool,
+    listing: Listing,
     filters: &Filters,
     out: &tokio::sync::mpsc::Sender<(Url, Url)>,
 ) -> anyhow::Result<bool> {
+    let follow_symlinks = listing.follow_symlinks;
     if !expands(src) {
         let dst_url = resolve_single_dest(src, dst);
         return Ok(out.send((src.clone(), dst_url)).await.is_ok());
@@ -564,8 +664,9 @@ async fn expand_sources(
         if filters.should_skip(&filter_key(&obj_url)) {
             continue;
         }
-        // Destination keeps the source's relative layout under dst as a prefix.
-        let rel = obj_url.relative();
+        // Destination keeps the source's relative layout under dst as a prefix, or with
+        // --flatten only the base name.
+        let rel = if listing.flatten { obj_url.base() } else { obj_url.relative() };
         let dst_url = dst.join(&rel);
         if out.send((obj_url, dst_url)).await.is_err() {
             return Ok(false);
@@ -968,6 +1069,9 @@ fn fast_unsupported(global: &GlobalOpts, args: &CpArgs) -> Vec<&'static str> {
         (args.metadata_directive.is_some(), "--metadata-directive"),
         (args.sse.is_some(), "--sse"),
         (args.sse_kms_key_id.is_some(), "--sse-kms-key-id"),
+        (args.no_clobber, "--no-clobber"),
+        (args.if_size_differ, "--if-size-differ"),
+        (args.if_source_newer, "--if-source-newer"),
         (args.preserve_timestamps, "--preserve-timestamps"),
         (args.if_none_match, "--if-none-match"),
         (args.links, "--links"),
@@ -1195,6 +1299,42 @@ mod tests {
                 "--metadata", "--metadata-directive", "--sse", "--sse-kms-key-id",
             ]
         );
+    }
+
+    #[test]
+    fn overwrite_flags_decide_as_s5cmds_should_override() {
+        use crate::storage::Object;
+        use std::time::{Duration, UNIX_EPOCH};
+        let obj = |size: i64, secs: u64| Object {
+            size,
+            mod_time: Some(UNIX_EPOCH + Duration::from_secs(secs)),
+            ..Default::default()
+        };
+        let o = |n, s, u| super::Overwrite { no_clobber: n, if_size_differ: s, if_source_newer: u };
+        let (small_old, big_new) = (obj(1, 10), obj(2, 20));
+        // (flags, source, destination, overwritten)
+        let cases = [
+            (o(false, false, false), &small_old, &big_new, true),
+            (o(true, false, false), &big_new, &small_old, false),
+            (o(false, true, false), &small_old, &obj(1, 30), false),
+            (o(true, true, false), &small_old, &big_new, true),
+            (o(false, false, true), &big_new, &small_old, true),
+            (o(false, false, true), &small_old, &big_new, false),
+            (o(false, false, true), &obj(1, 20), &obj(1, 20), false),
+            // --if-source-newer overrides --if-size-differ: sizes differ, but the source is older.
+            (o(false, true, true), &small_old, &big_new, false),
+            (o(true, true, true), &big_new, &small_old, true),
+        ];
+        for (i, (flags, from, to, want)) in cases.into_iter().enumerate() {
+            assert_eq!(flags.verdict(from, to), want, "case {i}: {flags:?}");
+        }
+    }
+
+    #[test]
+    fn s5cmds_short_flags_are_accepted() {
+        let args = cp_args(&["rs5cmd", "cp", "-n", "-s", "-u", "-f", "--raw", "a", "b"]);
+        assert!(args.no_clobber && args.if_size_differ && args.if_source_newer);
+        assert!(args.flatten && args.raw);
     }
 
     #[test]
