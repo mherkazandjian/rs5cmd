@@ -109,13 +109,18 @@ const THROTTLING_CODES: &[&str] = &[
 const TRANSIENT_CODES: &[&str] = &["RequestTimeout", "RequestTimeoutException"];
 /// aws-smithy-runtime's `TRANSIENT_ERROR_STATUS_CODES`.
 const TRANSIENT_STATUSES: &[u16] = &[500, 502, 503, 504];
+/// `429 Too Many Requests` is a throttling error whatever its code (#32): MinIO and others send
+/// `TooManyRequests`, which the SDK's list lacks, so rs5cmd adds a classifier for the status on
+/// the SDK path (`too_many_requests` in s3.rs) and the lean path matches it.
+const TOO_MANY_REQUESTS: u16 = 429;
 
 /// Whether an error response is retried, and as what: the AWS error code first (throttling, then
-/// transient codes), then the status.
+/// transient codes), then the status (429 throttling, the 5xx above transient).
 fn classify_status(status: u16, code: Option<&str>) -> Option<ErrorKind> {
     match code {
         Some(c) if THROTTLING_CODES.contains(&c) => Some(ErrorKind::ThrottlingError),
         Some(c) if TRANSIENT_CODES.contains(&c) => Some(ErrorKind::TransientError),
+        _ if status == TOO_MANY_REQUESTS => Some(ErrorKind::ThrottlingError),
         _ if TRANSIENT_STATUSES.contains(&status) => Some(ErrorKind::TransientError),
         _ => None,
     }
@@ -1559,7 +1564,28 @@ mod tests {
         assert_eq!(classify_status(503, Some("ServiceUnavailable")), transient);
         assert_eq!(classify_status(404, Some("NoSuchKey")), None);
         assert_eq!(classify_status(403, Some("AccessDenied")), None);
-        assert_eq!(classify_status(429, None), None);
+        // #32: 429 is throttling whatever its code; a transient code still wins, as on the SDK
+        // path, where the error-code classifier runs after the status classifiers.
+        let throttling = Some(ErrorKind::ThrottlingError);
+        assert_eq!(classify_status(429, Some("TooManyRequests")), throttling);
+        assert_eq!(classify_status(429, None), throttling);
+        assert_eq!(classify_status(429, Some("RequestTimeout")), transient);
+    }
+
+    #[test]
+    fn a_429_is_throttling_and_only_a_listed_code_brings_a_retry_after() {
+        // The SDK reads x-amz-retry-after in its error-code classifier, so only for the codes
+        // it lists; a 429 alone backs off as usual.
+        let body: &'static [u8] = b"<Error><Code>TooManyRequests</Code><Message>slow</Message>\
+            </Error>";
+        let resp = response(429, &[("x-amz-retry-after", "1500")], body);
+        let (kind, after, _) = judge(resp, bytes::Bytes::from_static(body));
+        assert_eq!((kind, after), (Some(ErrorKind::ThrottlingError), None));
+        let body: &'static [u8] = b"<Error><Code>SlowDown</Code><Message>slow</Message></Error>";
+        let resp = response(503, &[("x-amz-retry-after", "1500")], body);
+        let (kind, after, _) = judge(resp, bytes::Bytes::from_static(body));
+        let wait = Some(Duration::from_millis(1500));
+        assert_eq!((kind, after), (Some(ErrorKind::ThrottlingError), wait));
     }
 
     #[test]
