@@ -1849,9 +1849,14 @@ impl S3 {
             return;
         }
 
+        // `rm --all-versions` deletes versions: their ids go with the keys and come back with the
+        // results.
+        let versioned = urls.iter().any(|u| !u.version_id.is_empty());
+        let version = |v: Option<&str>| v.filter(|_| versioned).unwrap_or_default().to_string();
         let mut objs = Vec::with_capacity(urls.len());
         for u in &urls {
-            match ObjectIdentifier::builder().key(&u.path).build() {
+            let id = Some(u.version_id.clone()).filter(|v| !v.is_empty());
+            match ObjectIdentifier::builder().key(&u.path).set_version_id(id).build() {
                 Ok(o) => objs.push(o),
                 Err(e) => {
                     let _ = tx.send(Object::with_error(e.into())).await;
@@ -1880,7 +1885,8 @@ impl S3 {
             Ok(out) => {
                 for d in out.deleted() {
                     let key = format!("s3://{}/{}", bucket, d.key().unwrap_or_default());
-                    if let Ok(u) = Url::parse(&key) {
+                    if let Ok(mut u) = Url::parse(&key) {
+                        u.version_id = version(d.version_id());
                         let _ = tx
                             .send(Object {
                                 url: Some(u),
@@ -1891,7 +1897,10 @@ impl S3 {
                 }
                 for e in out.errors() {
                     let key = format!("s3://{}/{}", bucket, e.key().unwrap_or_default());
-                    let u = Url::parse(&key).ok();
+                    let u = Url::parse(&key).ok().map(|mut u| {
+                        u.version_id = version(e.version_id());
+                        u
+                    });
                     let _ = tx
                         .send(Object {
                             url: u,
