@@ -107,7 +107,7 @@ Details, proxy settings and the full `.s3cfg` key mapping:
 | `ls [target]` | List buckets (no argument), or objects under a prefix or wildcard |
 | `cp <src>... <dst>` | Copy local↔S3, S3↔S3 (server-side), local↔local; wildcards, several sources |
 | `mv <src>... <dst>` | Same flags as `cp`; deletes each source after it was copied |
-| `rm <target>...` | Delete objects or local files; wildcards and prefixes |
+| `rm <target>...` | Delete objects or local files; wildcards (a bare prefix is refused) |
 | `cat <src>` | Print one object, or all objects matching an S3 wildcard, to stdout |
 | `mb` / `rb <s3://bucket>` | Create / remove a bucket (`rb --force` empties it first) |
 | `sync <src> <dst>` | Copy what is new or changed; `--delete` removes extras |
@@ -154,7 +154,8 @@ behaves the same way.
 | `s3://b/key` | one object | `<dst>/key`, or exactly `<dst>` if it has no trailing `/` |
 
 - `cp file s3://b/p` (no trailing slash) writes an object named `p`.
-- `ls`, `du`, `cp`, `sync` and `rm` on an S3 prefix ending in `/` do not descend. Add `*`.
+- `ls`, `du`, `cp` and `sync` on an S3 prefix ending in `/` do not descend. Add `*`. `rm` refuses
+  a bucket or such a prefix, as s5cmd does: write `'s3://b/p/*'`.
 - `--include` / `--exclude` take globs matched against the path relative to the source root.
   Exclude wins. They apply only when a source expands, never to a single named object.
 
