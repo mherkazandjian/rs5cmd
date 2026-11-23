@@ -10,6 +10,7 @@ import datetime
 import hashlib
 import hmac
 import http.client
+import os
 import ssl
 import time
 import urllib.parse
@@ -45,7 +46,7 @@ def parse_error(status, body):
     return S3Error(status, code, message, body)
 
 
-# --- checksums (pure Python; only ever used on small bodies) ---------------------------------
+# --- checksums (pure Python: about 16 MiB/s for CRC32C, fine up to some tens of MiB) --------
 
 def _table(poly, bits):
     mask = (1 << bits) - 1
@@ -67,6 +68,32 @@ def crc32c(data):
     for b in data:
         c = _CRC32C[(c ^ b) & 0xFF] ^ (c >> 8)
     return c ^ 0xFFFFFFFF
+
+
+def crc32c_file(path, offset=0, length=None):
+    """CRC32C of a file or of one part of it."""
+    c, t = 0xFFFFFFFF, _CRC32C
+    with open(path, "rb") as f:
+        f.seek(offset)
+        left = os.path.getsize(path) - offset if length is None else length
+        while left > 0:
+            data = f.read(min(left, 1 << 20))
+            if not data:
+                break
+            for b in data:
+                c = t[(c ^ b) & 0xFF] ^ (c >> 8)
+            left -= len(data)
+    return c ^ 0xFFFFFFFF
+
+
+def crc32c_composite(path, part_size):
+    """What S3 reports for a multipart upload whose parts carried CRC32C: the CRC32C of the
+    parts' raw checksums, with the number of parts."""
+    size, raw, n = os.path.getsize(path), b"", 0
+    for off in range(0, max(size, 1), part_size):
+        raw += crc32c_file(path, off, min(part_size, size - off)).to_bytes(4, "big")
+        n += 1
+    return f"{b64(crc32c(raw), 4)}-{n}"
 
 
 def crc64nvme(data):

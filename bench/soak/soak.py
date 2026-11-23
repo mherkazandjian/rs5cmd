@@ -9,7 +9,10 @@
 
 Clients are configuration (name -> binary, global flags, environment), as in
 bench/review/matrix.py: a name that starts with `s5cmd` speaks s5cmd's dialect, any other name
-rs5cmd's. The defaults are rs5cmd = the review's `b-stage` build and s5cmd = the v2.3.0 release.
+rs5cmd's. The rs5cmd binary is SOAK_RS5CMD_BIN (a name in the review's bins volume, default
+`b-stage`). If it has the data-path switch, it runs as three clients that differ only by flags:
+rs5cmd-sdk, rs5cmd-lean and rs5cmd-lean-tr (lean with --checksum-trailers, uploads of S1, S11 and
+S14 only); otherwise as one client, rs5cmd. s5cmd is the v2.3.0 release.
 
 Every measured command runs under `launch` on the soak's two CPUs. Before and during each command
 the runner reads the host guard's heartbeat (conntrack count, rate limit in place), holds while
@@ -48,6 +51,7 @@ PRIV = "/run/soak"
 BINS = "/opt/bins"
 REVIEW_BINS = "/opt/review-bins"
 LAUNCH = f"{BINS}/launch"
+RS5CMD_BIN = os.environ.get("SOAK_RS5CMD_BIN") or "b-stage"
 CPUS = os.environ.get("SOAK_CPUS", "3,11")
 CAP_BYTES = 40_000_000          # the hard rate limit, bytes/s each way
 LOAD_MAX = float(os.environ.get("LOAD_MAX", "11"))
@@ -165,7 +169,30 @@ class Client:
     def __init__(self, name, path):
         self.name, self.bin, self.flags, self.env = name, path, [], {}
         self.kind = "s5cmd" if name.startswith("s5cmd") else "rs5cmd"
+        self.only = None            # the scenarios this client takes part in (None: all of them)
+        self.uploads_only = False   # there, only the upload steps (the trailers client)
         self._help = {}
+
+    @property
+    def path(self):
+        """rs5cmd's data path: `lean` or `sdk` (also the default); None for other clients."""
+        if self.kind != "rs5cmd":
+            return None
+        val = self.env.get("RS5CMD_DATA_PATH", "sdk")
+        for i, f in enumerate(self.flags):
+            if f.startswith("--data-path="):
+                val = f.split("=", 1)[1]
+            elif f == "--data-path" and i + 1 < len(self.flags):
+                val = self.flags[i + 1]
+        return val
+
+    @property
+    def trailers(self):
+        return self.path == "lean" and "--checksum-trailers" in self.flags
+
+    def twin(self, other):
+        """The same rs5cmd binary under other flags: the two must behave alike."""
+        return self is not other and self.kind == other.kind == "rs5cmd" and self.bin == other.bin
 
     def help(self, sub=None):
         if sub not in self._help:
@@ -188,7 +215,17 @@ class Client:
 
 
 def default_clients():
-    return {"rs5cmd": Client("rs5cmd", f"{BINS}/b-stage"), "s5cmd": Client("s5cmd", f"{BINS}/s5cmd")}
+    """One rs5cmd binary and s5cmd. With the data-path switch the binary runs as its SDK path, its
+    lean path and its lean path with trailers; rs5cmd-sdk comes first, so it is what the others
+    are compared with."""
+    path, s5 = f"{BINS}/{RS5CMD_BIN}", Client("s5cmd", f"{BINS}/s5cmd")
+    one = Client("rs5cmd", path)
+    if not os.path.exists(path) or not one.has(None, "--data-path"):
+        return {"rs5cmd": one, "s5cmd": s5}
+    sdk, lean, tr = Client("rs5cmd-sdk", path), Client("rs5cmd-lean", path), Client("rs5cmd-lean-tr", path)
+    sdk.flags, lean.flags, tr.flags = ["--data-path=sdk"], ["--data-path=lean"], ["--data-path=lean", "--checksum-trailers"]
+    tr.only, tr.uploads_only = {"S1", "S11", "S14"}, True
+    return {c.name: c for c in (sdk, lean, tr, s5)}
 
 
 # --- files -----------------------------------------------------------------------------------
@@ -288,6 +325,9 @@ class Res:
 class Run:
     def __init__(self, target, clients, scale, run_id, scale_name):
         self.t, self.clients, self.scale, self.id, self.scale_name = target, clients, scale, run_id, scale_name
+        self.all_clients = clients
+        self.excluded = {}          # client name -> why it sits out the rest of the run
+        self.endpoint = {}          # what the probe learned about the endpoint
         self.dir = os.path.join(RESULTS, run_id)
         self.scratch = os.path.join(SCRATCH, run_id)
         self.live = os.path.join(self.scratch, "live")
@@ -326,8 +366,9 @@ class Run:
         self.write("events", {"event": kind, **kw})
 
     def finding(self, kind, title, detail=None, client=None, argv=None):
-        """kind: bug (data or behaviour wrong), diff (clients differ), gap (flag missing),
-        endpoint (the endpoint behaves unexpectedly), note."""
+        """kind: bug (data or behaviour wrong), path (the same binary differs between its data
+        paths), diff (clients differ), gap (flag missing), endpoint (the endpoint behaves
+        unexpectedly), note."""
         self.write("findings", {"kind": kind, "title": title, "client": client, "detail": detail, "argv": argv})
         self.say(f"   finding [{kind}] {title}")
 
@@ -499,9 +540,10 @@ class Run:
         return a + list(gflags) + list(args)
 
     def run(self, c, args, label, expect=0, gflags=(), env=None, stdin=None, cwd=None, timeout=1800,
-            debug=False, watch=None, stop_on_watch=False, est=None, quiet=False):
+            debug=False, watch=None, stop_on_watch=False, est=None, quiet=False, stdout=None):
         """Run one client command under `launch`. expect: an exit code, a tuple of them, "fail"
-        (any non-zero) or None (anything; recorded only)."""
+        (any non-zero) or None (anything; recorded only). stdout: a file for the command's output
+        instead of capturing it (a large `cat`)."""
         load_wait, load1 = self.hold()
         argv = self.argv(c, args, gflags, debug)
         e = self.client_env(c, env)
@@ -514,7 +556,7 @@ class Run:
         tx0, rx0 = link_bytes()
         samples, worst, hit, pos, last = [(t0, tx0, rx0)], [0.0, 0.0], None, {".out": 0, ".err": 0}, t0
         fin = open(stdin, "rb") if stdin else subprocess.DEVNULL
-        with open(base + ".out", "wb") as fo, open(base + ".err", "wb") as fe:
+        with open(stdout or base + ".out", "wb") as fo, open(base + ".err", "wb") as fe:
             p = subprocess.Popen(cmd, stdin=fin, stdout=fo, stderr=fe, env=e, cwd=cwd, start_new_session=True)
             try:
                 while p.poll() is None:
@@ -527,7 +569,7 @@ class Run:
                         w = self.rate_check(samples)
                         worst = [max(worst[0], w[0]), max(worst[1], w[1])]
                         del samples[:-40]
-                    for ext in (".err", ".out") if watch and hit is None else ():
+                    for ext in ((".err",) if stdout else (".err", ".out")) if watch and hit is None else ():
                         with open(base + ext, "rb") as f:   # s5cmd logs debug lines to stdout, rs5cmd to stderr
                             f.seek(pos[ext])
                             chunk = f.read()
@@ -560,8 +602,10 @@ class Run:
         rc = j.get("exit", p.returncode)
         if j.get("signal"):
             rc = -j["signal"]
-        with open(base + ".out", "rb") as f:
-            out = f.read().decode("utf-8", "replace")
+        out = ""
+        if not stdout:
+            with open(base + ".out", "rb") as f:
+                out = f.read().decode("utf-8", "replace")
         with open(base + ".err", "rb") as f:
             err = ANSI_RE.sub("", f.read().decode("utf-8", "replace"))
         retries = throttled = 0
@@ -580,7 +624,7 @@ class Run:
                         keep.append(ln)
                 sifted.append("\n".join(keep) + ("\n" if keep else ""))
             out, err = sifted[0], sifted[1] + "".join(x + "\n" for x in kept)
-        for n in (".out", ".err", ".json"):
+        for n in (".err", ".json") if stdout else (".out", ".err", ".json"):
             os.unlink(base + n)
         ok = (expect is None or (expect == "fail" and rc != 0) or
               (isinstance(expect, tuple) and rc in expect) or rc == expect) and not j.get("timed_out")
@@ -610,7 +654,7 @@ class Run:
         for k, v in (est or {}).items():
             cs[k] = cs.get(k, 0) + v
         if not quiet:
-            self.say(f"  {self.scn} {c.name:<8} {label:<34} rc={rc} {res.wall:7.2f}s cpu={res.user + res.sys:6.2f}s "
+            self.say(f"  {self.scn} {c.name:<14} {label:<34} rc={rc} {res.wall:7.2f}s cpu={res.user + res.sys:6.2f}s "
                      f"rss={res.rss // 1024}MiB up={res.tx / MiB:.1f} down={res.rx / MiB:.1f} MiB"
                      + ("" if ok else "   <-- unexpected"))
         if not ok:
@@ -639,11 +683,23 @@ class Run:
             results.append(self.run(c, args, label, **kw))
         if compare:
             self.compare(label, results)
+        self.twin_time(label, results)
         return results
+
+    def twin_time(self, label, results):
+        """The lean path has no upload stall check (the SDK fails an attempt after 5 s without
+        progress), so a lean command that takes far longer than its sdk twin is worth a look."""
+        base = next((x for x in results if x.client.path == "sdk"), None)
+        for x in results:
+            if base and x.client.twin(base.client) and x.wall > 2 * base.wall + 5:
+                self.finding("path", f"{label}: {x.client.name} took {x.wall:.1f} s, its twin {base.client.name} "
+                             f"{base.wall:.1f} s (a stalled transfer?)", {"exit": x.rc, "stderr": x.err.strip()[-300:]},
+                             x.client.name, x.argv)
 
     # --- comparing clients ---
     TS_RES = [(re.compile(r"\d{4}[/-]\d\d[/-]\d\d[ T]\d\d:\d\d:\d\d(\.\d+)?Z?"), "<ts>"),
               (re.compile(r"(request id|host id|RequestId|HostId|x-amz-request-id|x-amz-id-2)[:=] ?[^\s,)\"]+"), r"\1: <id>"),
+              (re.compile(r',? ?\b(aws_request_id|s3_extended_request_id): "[^"]*"'), ""),
               (re.compile(r"\b[0-9a-f]{32}(-\d+)?\b"), "<etag>")]
 
     def norm(self, text, c):
@@ -670,7 +726,10 @@ class Run:
                         "lines": {ref.client.name: len(a), other.client.name: len(b)},
                         f"only_{ref.client.name}": [cap_text(x, 300, 0) for x in sorted(sa - sb)[:6]],
                         f"only_{other.client.name}": [cap_text(x, 300, 0) for x in sorted(sb - sa)[:6]]}
-            if diffs:
+            if diffs and other.client.twin(ref.client):   # one binary, two data paths: must be alike
+                self.finding("path", f"{label}: {other.client.name} differs from {ref.client.name} in "
+                             + ", ".join(diffs), diffs, argv=other.argv)
+            elif diffs:
                 self.finding("diff", f"{label}: {ref.client.name} and {other.client.name} differ in "
                              + ", ".join(diffs), diffs, argv=ref.argv)
 
@@ -739,6 +798,8 @@ class Run:
     # --- scenarios ---
     def scenario(self, sid, fn):
         self.scn = sid
+        self.clients = [c for c in self.all_clients if (c.only is None or sid in c.only)
+                        and (c.name not in self.excluded or sid == "S11")]
         tx0, rx0 = link_bytes()
         st = self.stats[sid] = {
             "status": "ok", "tx0": tx0, "rx0": rx0, "checks": 0, "failed": 0, "t0": time.time(),
@@ -768,6 +829,7 @@ class Run:
                                  "clients": st["clients"], "requests_checker": self.s3.requests})
             self.say(f"== {sid} {st['status']}: {st['seconds']} s, {st['tx'] / MiB:.1f} MiB up, {st['rx'] / MiB:.1f} MiB down")
             self.scn = "between"
+            self.clients = self.all_clients
             shutil.rmtree(os.path.join(self.scratch, "tmp"), ignore_errors=True)
 
     # --- cleanup ---
@@ -864,15 +926,22 @@ def report(run_id):
     with open(os.path.join(d, "meta.json")) as f:
         meta = json.load(f)
     names = [c["name"] for c in meta["clients"]]
+    try:
+        import scenarios
+    except Exception:   # the report still works without the registry of known issues
+        scenarios = None
     L = [f"# Soak run {run_id}", "",
          f"Target: {meta['target_kind']} ({meta['target']}), scale `{meta['scale']}`"
          + (f", server version {meta['server_version']}" if meta.get("server_version") else "") + ".", ""]
-    L += ["| Client | Binary | sha256 | Version | Flags | Env |", "|---|---|---|---|---|---|"]
+    L += ["| Client | Binary | sha256 | Version | Flags | Env | Scenarios |", "|---|---|---|---|---|---|---|"]
     for c in meta["clients"]:
         L.append(f"| {c['name']} | {c['bin']} | {c['sha256'][:16]} | {c['version']} | "
-                 f"{' '.join(c['flags']) or '-'} | {' '.join(c['env']) or '-'} |")
-    if meta.get("stage_b"):
-        L += ["", f"rs5cmd source: perf/stage-b at {meta['stage_b']} when the binary was copied."]
+                 f"{' '.join(c['flags']) or '-'} | {' '.join(c['env']) or '-'} | "
+                 f"{', '.join(c.get('only') or []) or 'all'}{' (uploads only)' if c.get('uploads_only') else ''} |")
+    source = meta.get("rs5cmd_source") or (meta.get("stage_b") and "perf/stage-b " + meta["stage_b"])
+    if source:
+        L += ["", f"rs5cmd binary: `{meta.get('rs5cmd_bin', 'b-stage')}`; its worktree was at {source.strip()} "
+                  "when the binary was copied."]
     scen = [s for s in steps if s.get("t") == "scenario"]
     L += ["", "## Scenarios", "",
           "| Scenario | Ran | " + " | ".join(names)
@@ -903,14 +972,22 @@ def report(run_id):
     rows = {}
     for s in steps:
         if s.get("t") == "step" and s["scn"] == "S14" and s["label"].startswith("W"):
-            rows.setdefault((s["label"].split(" r")[0], s["client"]), []).append(s)
+            rows.setdefault((re.sub(r" r\d+$", "", s["label"]), s["client"]), []).append(s)
     if rows:
+        sdk = next((c["name"] for c in meta["clients"] if c.get("path") == "sdk"), None)
+        s5 = next((c["name"] for c in meta["clients"] if c["kind"] == "s5cmd"), None)
+        cpu = {k: statistics.median(x["user_s"] + x["sys_s"] for x in ss) for k, ss in rows.items()}
+        ratio = lambda row, n, ref: (f"{cpu[(row, n)] / cpu[(row, ref)]:.2f}"   # noqa: E731
+                                     if ref and ref != n and cpu.get((row, ref)) else "-")
         L += ["", "## S14 performance rows (median of the rounds)", "",
-              "| Row | Client | Rounds | Wall s | User s | Sys s | CPU s | Max RSS MiB |", "|---|---|---|---|---|---|---|---|"]
+              "Wall is bound by the rate limit; CPU is what compares. The criterion for the lean path is CPU at or "
+              "below the sdk path on every row except `W7 pipe` (10 % and 0.05 s allowed for noise).", "",
+              "| Row | Client | Rounds | Wall s | User s | Sys s | CPU s | CPU / sdk | CPU / s5cmd | Max RSS MiB |",
+              "|---|---|---|---|---|---|---|---|---|---|"]
         for (row, n), ss in sorted(rows.items()):
             med = lambda k: statistics.median(x[k] for x in ss)  # noqa: E731
             L.append(f"| {row} | {n} | {len(ss)} | {med('wall_s'):.2f} | {med('user_s'):.2f} | {med('sys_s'):.2f} | "
-                     f"{statistics.median(x['user_s'] + x['sys_s'] for x in ss):.2f} | "
+                     f"{cpu[(row, n)]:.2f} | {ratio(row, n, sdk)} | {ratio(row, n, s5)} | "
                      f"{max(x['maxrss_kb'] for x in ss) / 1024:.0f} |")
     gb_down = tot["rx"] / 1e9
     cost = (tot["put"] / 1000 * AWS_PRICE["put_per_1000"] + tot["get"] / 1000 * AWS_PRICE["get_per_1000"]
@@ -948,20 +1025,29 @@ def report(run_id):
           "A client that fails where the reference (s5cmd) passes, wrong data, or an unexpected exit code. "
           "The command is the client's last one before the check."]
     for i, (s, detail, step) in enumerate(bad, 1):
-        L.append(f"{i}. **{s['scn']} {s.get('client') or 'shared'}**: {s['label']}")
+        issue = scenarios.known_issue(s["scn"], s["label"]) if scenarios else None
+        L.append(f"{i}. **{s['scn']} {s.get('client') or 'shared'}**: {s['label']}" + (f" (known: {issue})" if issue else ""))
         L.append("   - Detail: `" + str(detail).replace("`", "'")[:500] + "`")
         if step:
             L.append("   - Command: `" + " ".join(step["argv"]).replace("`", "'")[:400] + "`")
+    if any(c.get("path") == "lean" for c in meta["clients"]):
+        n_path = sum(1 for f in finds if f["kind"] == "path")
+        L += ["", "## Data paths: lean against sdk", "",
+              f"- `path` findings: {n_path}. Each is one command where the same binary behaved differently between "
+              "its data paths (exit code or output), or where a lean command took far longer than its sdk twin. "
+              "They are listed under Findings; there should be none.",
+              "- Intended or known differences, checked or left out as described:"]
+        L += [f"  {i}. {text}" for i, text in enumerate(scenarios.EXPECTED if scenarios else [], 1)]
     L += ["", f"## Findings ({len(finds)} recorded, grouped where they say the same about several steps)", ""]
-    order = {"bug": 0, "endpoint": 1, "gap": 2, "diff": 3, "note": 4}
+    order = {"bug": 0, "path": 0.5, "endpoint": 1, "gap": 2, "diff": 3, "note": 4}
     groups = {}
     for f in sorted(finds, key=lambda f: (order.get(f["kind"], 9), int(re.sub(r"\D", "", f["scn"]) or 99))):
-        what = f["title"].split(": ", 1)[-1] if f["kind"] == "diff" else f["title"]
+        what = f["title"].split(": ", 1)[-1] if f["kind"] in ("diff", "path") else f["title"]
         if f["kind"] == "bug":
             what = re.sub(r"^.*?: (exit .*)$", r"\1", f["title"]) + " " + json.dumps(f.get("detail") or "")[:160]
         sig = (f["kind"], f.get("client"), re.sub(r"\d+", "N", what)[:200],
                re.sub(r"\d+|<base>/\S+|<work>/\S+|<scratch>/\S+|s3://\S+", "N", json.dumps(f.get("detail") or "", ensure_ascii=False))[:240]
-               if f["kind"] == "diff" else "")
+               if f["kind"] in ("diff", "path") else "")
         groups.setdefault(sig, []).append(f)
     for i, fs in enumerate(groups.values(), 1):
         f = fs[0]
@@ -995,7 +1081,7 @@ def prepare():
     except OSError:
         pass
     out = {}
-    for name in ("b-stage", "s5cmd", "launch"):
+    for name in (RS5CMD_BIN, "s5cmd", "launch"):
         src, dst = f"{REVIEW_BINS}/{name}", f"{BINS}/{name}"
         for attempt in range(4):
             shutil.copy2(src, dst + ".new")
@@ -1026,6 +1112,9 @@ def make_clients(a):
         name, kv = spec.split("=", 1)
         k, v = kv.split("=", 1)
         clients[name].env[k] = v
+    for spec in a.client_only:
+        name, ids = spec.split("=", 1)
+        clients[name].only = {s for s in ids.split(",") if s} or None
     names = a.clients.split(",") if a.clients else list(clients)
     return [clients[n] for n in names]
 
@@ -1045,6 +1134,8 @@ def main():
     r.add_argument("--client-bin", action="append", default=[], metavar="NAME=PATH")
     r.add_argument("--client-flag", action="append", default=[], metavar="NAME=FLAG")
     r.add_argument("--client-env", action="append", default=[], metavar="NAME=KEY=VALUE")
+    r.add_argument("--client-only", action="append", default=[], metavar="NAME=S1,S11",
+                   help="the scenarios a client takes part in (empty: all)")
     r.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="override a scale value")
     c = sub.add_parser("cleanup")
     c.add_argument("--target", required=True)
@@ -1084,10 +1175,12 @@ def main():
             bins = json.load(f)
     meta = {"run_id": run_id, "target": a.target, "target_kind": target.kind, "scale": a.scale,
             "region_set": bool(target.region), "addressing": target.addressing, "server_version": target.version,
-            "stage_b": os.environ.get("SOAK_STAGE_B"), "image": os.environ.get("SOAK_IMAGE_ID"),
+            "rs5cmd_bin": RS5CMD_BIN, "rs5cmd_source": os.environ.get("SOAK_RS5CMD_SRC"),
+            "image": os.environ.get("SOAK_IMAGE_ID"),
             "cpus": CPUS, "cap_bytes_per_s": CAP_BYTES, "load_max": LOAD_MAX, "bins": bins,
             "clients": [{"name": c.name, "bin": c.bin, "kind": c.kind, "sha256": c.sha256(), "version": c.version(),
-                         "flags": c.flags, "env": sorted(c.env)} for c in clients],
+                         "flags": c.flags, "env": sorted(c.env), "path": c.path, "trailers": c.trailers,
+                         "only": sorted(c.only) if c.only else None, "uploads_only": c.uploads_only} for c in clients],
             "started": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())}
 
     def save_meta():
@@ -1106,6 +1199,7 @@ def main():
                     + " has no flag for it on a custom endpoint and uses path style")
     try:
         run.guard()
+        scenarios.endpoint_probe(run)
         for sid, fn in scenarios.SCENARIOS:
             if (only and sid not in only) or sid in skip:
                 continue

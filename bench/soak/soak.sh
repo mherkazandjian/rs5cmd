@@ -10,6 +10,10 @@
 # Runner options are passed to soak.py run (--scale, --only, --skip, --client-bin ...). The scale
 # defaults to `dry` for the dry run and `full` for the real endpoints.
 #
+# SOAK_RS5CMD_BIN names the rs5cmd build in the review's bins volume (default b-stage). A build
+# with the data-path switch runs as rs5cmd-sdk, rs5cmd-lean and rs5cmd-lean-tr. SOAK_BINS=keep
+# reuses the copies of the previous run.
+#
 # What this script owns, in order:
 #   1. the containers (compose project rs5cmd-soak) and a check of their limits: cpuset 3,11 on
 #      every container, memory limits of all of them together at most 2 GiB, io.max in place
@@ -27,6 +31,8 @@ PROJECT=rs5cmd-soak
 CT_WARN=10000
 CT_ABORT=30000
 MEM_MAX=$((2 * 1024 * 1024 * 1024))
+bin="${SOAK_RS5CMD_BIN:-b-stage}"
+[[ "$bin" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "soak.sh: STOP: bad SOAK_RS5CMD_BIN" >&2; exit 3; }
 # Test hook: a lower abort threshold (to try the abort path). It can never raise the limit.
 if [[ "${SOAK_TEST_CT_ABORT:-}" =~ ^[0-9]+$ ]] && [ "$SOAK_TEST_CT_ABORT" -lt "$CT_ABORT" ]; then
     CT_ABORT="$SOAK_TEST_CT_ABORT"
@@ -76,10 +82,12 @@ say "limits ok: $(containers | wc -l) container(s), cpuset 3,11, memory limits $
 
 # 2. binaries (copied, never built) and where rs5cmd's came from
 # (SOAK_BINS=keep reuses the copies of the previous run, so that two endpoints get the same build.)
-if [ "${SOAK_BINS:-copy}" = keep ]; then say "keeping the binaries copied earlier"; else "$dc" exec -T soak python3 bench/soak/soak.py prepare; fi
-if [ "${SOAK_BINS:-copy}" = keep ] && [ -s "$run/stage-b" ]; then stage_b="$(cat "$run/stage-b")"; else
-    stage_b="${SOAK_STAGE_B:-$(TZ=UTC git -C "$here/../../../b-stage" log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format='%h %cd' 2>/dev/null || true)}"
-    echo "$stage_b" > "$run/stage-b"
+if [ "${SOAK_BINS:-copy}" = keep ]; then say "keeping the binaries copied earlier"; else "$dc" exec -T -e SOAK_RS5CMD_BIN="$bin" soak python3 bench/soak/soak.py prepare; fi
+# The build's worktree has the binary's name (bench/review/build.sh): its branch and commit now.
+if [ "${SOAK_BINS:-copy}" = keep ] && [ -s "$run/rs5cmd-src" ]; then src="$(cat "$run/rs5cmd-src")"; else
+    wt="$here/../../../$bin"
+    src="${SOAK_RS5CMD_SRC:-$(git -C "$wt" rev-parse --abbrev-ref HEAD 2>/dev/null || true) $(TZ=UTC git -C "$wt" log -1 --date=format-local:%Y-%m-%dT%H:%M:%SZ --format='%h %cd' 2>/dev/null || true)}"
+    echo "$src" > "$run/rs5cmd-src"
 fi
 image_id="$(sudo -n docker inspect -f '{{.Image}}' "$(sudo -n docker ps -q --filter "label=com.docker.compose.project=$PROJECT" --filter label=com.docker.compose.service=soak)")"
 
@@ -149,9 +157,9 @@ case " $* " in *" --scale "*) scale_args=() ;; *) scale_args=(--scale "$scale") 
 log="$run/soak-$target.log"   # console log, not part of the results
 set +e
 if [ "${1:-}" = cleanup ]; then
-    "$dc" exec -T soak python3 -u bench/soak/soak.py cleanup --target "$target" --run-id "${2:?run id}" 2>&1 | tee "$log"
+    "$dc" exec -T -e SOAK_RS5CMD_BIN="$bin" soak python3 -u bench/soak/soak.py cleanup --target "$target" --run-id "${2:?run id}" 2>&1 | tee "$log"
 else
-    "$dc" exec -T -e SOAK_STAGE_B="$stage_b" -e SOAK_IMAGE_ID="$image_id" soak \
+    "$dc" exec -T -e SOAK_RS5CMD_BIN="$bin" -e SOAK_RS5CMD_SRC="$src" -e SOAK_IMAGE_ID="$image_id" soak \
         python3 -u bench/soak/soak.py run --target "$target" "${scale_args[@]}" "$@" 2>&1 | tee "$log"
 fi
 rc=${PIPESTATUS[0]}

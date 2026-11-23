@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
-"""Dry run only: an HTTP/1.1 proxy in front of the MinIO sidecar that answers every Nth PUT or
-GET with `503 SlowDown` (or another status and code), so that S9 can be tried without a real endpoint that throttles.
+"""An HTTP/1.1 proxy in front of a plain-HTTP endpoint (the MinIO sidecar of the dry run). It
+answers every Nth PUT or GET with `503 SlowDown` (or another status and code), so that S9 can be
+tried without an endpoint that throttles, and it counts the requests that carry a signature, so
+that S12 can check that `--no-sign-request` sends none (`--every 0`: count only).
 
     throttle_proxy.py --listen 127.0.0.1:9100 --upstream minio:9000 --every 40 --stats FILE
                       [--status 429 --code TooManyRequests]
@@ -12,10 +14,11 @@ bodies, which is all the dry run needs.
 import argparse
 import asyncio
 import json
+import os
 import signal
 
 SLOW = b""
-stats = {"requests": 0, "injected": 0}
+stats = {"requests": 0, "injected": 0, "signed": 0}
 
 
 def make_reply(status, code):
@@ -78,7 +81,9 @@ async def handle(reader, writer, upstream, every):
             first, hdrs = parse(head)
             method = first.split(b" ", 1)[0]
             stats["requests"] += 1
-            if method in (b"PUT", b"GET") and stats["requests"] % every == 0:
+            if b"authorization" in hdrs or b"X-Amz-Signature=" in first or b"x-amz-security-token" in hdrs:
+                stats["signed"] += 1
+            if every and method in (b"PUT", b"GET") and stats["requests"] % every == 0:
                 stats["injected"] += 1
                 if hdrs.get(b"expect", b"").lower() != b"100-continue":
                     await relay_body(hdrs, reader, None)   # read and drop the body
@@ -132,13 +137,18 @@ async def main():
     SLOW = make_reply(a.status, a.code)
     host, port = a.listen.rsplit(":", 1)
     server = await asyncio.start_server(lambda r, w: handle(r, w, a.upstream, a.every), host, int(port))
+    def dump():   # also on SIGUSR1, so that the counts can be read between two clients
+        if a.stats:
+            with open(a.stats + ".tmp", "w") as f:
+                json.dump(stats, f)
+            os.replace(a.stats + ".tmp", a.stats)
+
     stop = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
+    asyncio.get_running_loop().add_signal_handler(signal.SIGUSR1, dump)
     async with server:
         await stop.wait()
-    if a.stats:
-        with open(a.stats, "w") as f:
-            json.dump(stats, f)
+    dump()
 
 
 if __name__ == "__main__":

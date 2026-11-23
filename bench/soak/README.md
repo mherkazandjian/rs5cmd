@@ -1,12 +1,14 @@
 # Soak harness (`bench/soak/`)
 
-Runs the soak scenarios S1–S14 against a real S3 endpoint for two or more clients and compares
-them: rs5cmd (a build from the optimization review's `bins` volume) and the official s5cmd
-release. A dry run does the same at small scale against a MinIO sidecar. Nothing is compiled
-here, and everything runs inside hard resource limits, because the host is shared.
+Runs the soak scenarios S1–S14 against a real S3 endpoint for several clients and compares them:
+one rs5cmd build from the optimization review's `bins` volume, run through its SDK data path and
+its lean data path, and the official s5cmd release. A dry run does the same at small scale
+against a MinIO sidecar. Nothing is compiled here, and everything runs inside hard resource
+limits, because the host is shared.
 
 ```sh
 bench/soak/soak.sh dry                      # every scenario, small, against the MinIO sidecar
+SOAK_RS5CMD_BIN=l-p3 bench/soak/soak.sh dry # the same with another rs5cmd build (default b-stage)
 bench/soak/soak.sh dry --only S1,S4         # some scenarios
 bench/soak/soak.sh aws                      # the real run (scale `full`), needs aws.env
 bench/soak/soak.sh rgw                      # the same against a Ceph RGW, needs rgw.env
@@ -88,35 +90,64 @@ mount when the directory exists.
 
 ## Clients are configuration
 
+`SOAK_RS5CMD_BIN` names the rs5cmd build in the review's bins volume (default `b-stage`). If the
+build has the data-path switch, that one binary runs as three clients that differ only by flags:
+
+| Client | Flags | Takes part in |
+|---|---|---|
+| `rs5cmd-sdk` | `--data-path=sdk` | everything; it is what the other two are compared with |
+| `rs5cmd-lean` | `--data-path=lean` | everything |
+| `rs5cmd-lean-tr` | `--data-path=lean --checksum-trailers` | the uploads of S1, S11 and S14 |
+| `s5cmd` | - | everything (v2.3.0, the reference for behaviour) |
+
+A build without the switch runs as one client, `rs5cmd`. Other sets are given on the command line:
+
 ```sh
-bench/soak/soak.sh aws --client-bin rs5cmd-lean=/opt/bins/b-stage --client-flag rs5cmd-lean=--some-switch \
-                       --client-env rs5cmd-lean=KEY=VALUE --clients rs5cmd,rs5cmd-lean,s5cmd
+bench/soak/soak.sh aws --client-bin extra=/opt/bins/l-p3 --client-flag extra=--some-switch \
+                       --client-env extra=KEY=VALUE --client-only extra=S1,S14 \
+                       --clients rs5cmd-sdk,rs5cmd-lean,extra,s5cmd
 ```
 
-A name that starts with `s5cmd` speaks s5cmd's dialect, any other name rs5cmd's. The defaults are
-`rs5cmd` = `/opt/bins/b-stage` and `s5cmd` = `/opt/bins/s5cmd` (v2.3.0). Each run records the
-binaries' SHA-256, their versions and the `perf/stage-b` commit at the time of the copy;
-`SOAK_BINS=keep` reuses the copies of the previous run, so that two endpoints get the same build.
+A name that starts with `s5cmd` speaks s5cmd's dialect, any other name rs5cmd's. Each run records
+the binaries' SHA-256 and versions, and the branch and commit of the build's worktree at the time
+of the copy; `SOAK_BINS=keep` reuses the copies of the previous run, so that two endpoints get the
+same build.
+
+## Lean against sdk
+
+Two clients on the same binary are twins: they must behave alike. Wherever the clients' output is
+compared, a difference between twins (exit code, standard output or error) is a `path` finding,
+and so is a lean command that takes more than twice its sdk twin plus 5 s (the lean path has no
+upload stall check). There should be none. What is intended to differ is checked on purpose, not
+left to the comparison: `check_crc32c` in `scenarios.py` says, per client and upload, whether the
+object must carry a CRC32C (lean: bodies held in memory and every `pipe` part; with trailers also
+streamed single PUTs; sdk: never) and verifies its value, also for composite (`-N`) checksums.
+`EXPECTED` in `scenarios.py` lists the intended and known differences and is printed in every
+summary; `KNOWN` maps failed checks to their issues.
+
+A retry on the lean path leaves no log line, so its 503s cannot be counted (the SDK path's come
+from the SDK's retry log, s5cmd's from its debug log). In the dry run the injector counts them
+per client. Where the first 503 must stop a client, lean clients run with `--retry-count 0`.
 
 ## Scenarios
 
 | Id | What runs | What is verified |
 |---|---|---|
 | S0 | One upload and one download of a probe file | Rates against the cap on the container's counters; ETag, SHA-256 |
-| S1 | Sizes from 0 B to the largest object, up and down; `--part-size 5` around 5 MiB; `cat`, `pipe`; copies inside the bucket | Size and ETag of every object (MD5, or the MD5 of the part MD5s with the part size read from the object); SHA-256 of every download |
+| S1 | Sizes from 0 B to the largest object, up and down; `--part-size 5` around 5 MiB; `cat`; `pipe` of 0 B, 1 MiB and 60 MiB; copies inside the bucket | Size and ETag of every object (MD5, or the MD5 of the part MD5s with the part size read from the object); SHA-256 of every download; the CRC32C on each object against the client's data path |
 | S2 | Keys with space, `+ % = & ? # ~`, unicode, `//`, a leading and a trailing `/`, a 1024-byte key | Exact key names with the checker; content after download; `ls` names; `rm` leaves nothing |
 | S3 | Many 1 KiB keys in directories; `ls` by prefix, wildcard, pattern, `--use-list-objects-v1`, `--json`; `du` | Counts, sizes, a sample of ETags, line counts, totals |
 | S4 | `sync`: cold, warm, changed, `--delete`, `--size-only`, `--exclude`, `--include`, same-second, down | Remote key sets, sizes and ETags against the local tree; copy counts |
 | S5 | `rm` by wildcard, by bare prefix, `sync --delete`, `rm` of everything | Key counts after each step |
-| S6 | Content headers, storage classes, SSE, `--request-payer`, `--acl`, `select` | Headers on the stored object (HEAD); nothing readable without credentials |
+| S6 | Content headers, storage classes, SSE, each as a single PUT and as a multipart upload, with `cp` where the client's `cp` has the flag and with `pipe` where only `pipe` has it; `--request-payer`, `--acl`, `select` | Headers on the stored object (HEAD); nothing readable without credentials |
 | S7 | On the scratch bucket `<bucket>-mb-versions` only: `mb`, versioning, two versions, `ls --all-versions`, `cp --version-id`, `rm`, `rb` | Versions and delete markers with the checker; the bucket is gone |
 | S8 | NoSuchKey, NoSuchBucket, AccessDenied, a bare `ls`, the wrong region | Non-zero exit, the error names the cause, no file written |
-| S9 | Many workers of 1 KiB PUTs and GETs on one prefix (256 on AWS; 32 and stop at the first retry on an RGW) | Every object there and intact; retries and throttling counted from the clients' debug logs |
+| S9 | Many workers of 1 KiB PUTs and GETs on one prefix, the same number of keys for every client (256 workers on AWS; 32 and stop at the first 503 on an RGW). Dry run: 503 and 429 from the injector | Every object there and intact; per client failed commands, 503s seen and wall; twins' walls compared |
 | S10 | Environment keys, a profile, `--credentials-file`, no credentials; a sync slowed to 1 MB/s (with the role, if there is one) | Uploads verified; no failed request during the slow sync |
-| S11 | The endpoint: CRC32C header and aws-chunked trailer, right and wrong. The clients: a small and a multipart upload | Wrong checksums are refused; checksums left on the objects are right |
-| S12 | `--no-sign-request` on a public object with no credentials in the environment | Content equals an unsigned GET by the checker. Expected to fail on rs5cmd until its issue #6 is fixed: recorded, not counted |
-| S13 | A loop of uploads, downloads, small batches, syncs and metadata uploads paced to about 5 MB/s, two thirds up | Every step verified as above; failed steps and retries counted |
-| S14 | W1 many 4 KiB objects up and down, W3 one large object up and down, W4 listing; rounds alternate the client order | Wall, user, sys and max RSS per command from `launch` |
+| S11 | The endpoint: CRC32C header and aws-chunked trailer, right and wrong. The clients: 3 kB, 1 MiB, 20 MiB (a streamed body above 16 MiB) and a multipart upload with `cp`, a single and a multipart `pipe` | Wrong checksums are refused; per client, the CRC32C is on the object or not as its data path says, and right. An endpoint that refuses trailers is recorded with its error text |
+| S12 | `--no-sign-request` on a public object with no credentials in the environment | Content equals an unsigned GET by the checker; on a plain-HTTP endpoint a recording proxy checks that no request carries a signature. Fails on rs5cmd builds without the fix for #6: recorded, not counted |
+| S13 | A loop of rounds paced to about 5 MB/s, two thirds up; in a round every client does the same operation with the same size (upload, download, small batch, sync, metadata) | Every step verified as above; failed steps and retries counted; twins' upload times compared |
+| S14 | The review's C4 rows at soak scale: W1 small, W2 1 MiB and W3 large objects up and down, W4 `ls`, W10 `du`, W5 warm `sync`, W6 `rm`, W7 `cat` and `pipe`, W8 `run`, W9 single requests; rounds alternate the client order | Wall, user, sys and max RSS per command from `launch`. Criterion: the lean path's CPU at or below the sdk path's on every row but `W7 pipe` |
 
 S14 runs before S13, so that the performance rows do not depend on the long loop finishing.
 
@@ -132,11 +163,11 @@ gets a failed check; if every client fails, it is a note.
 
 | File | Content |
 |---|---|
-| `summary.md` | Scenario table, resources per client, S14 rows, volume and cost, guards, cleanup, findings |
+| `summary.md` | Scenario table, resources per client, S14 rows with CPU ratios, volume and cost, guards, cleanup, failed checks with their known issues, lean against sdk, findings |
 | `meta.json` | Target kind, scale, clients (binary, SHA-256, version, flags), limits, outcome |
 | `steps.jsonl` | One record per command (`t: step`: argv, exit code, wall, CPU, RSS, bytes, load) and per check, scenario and cleanup |
 | `outputs.jsonl` | Standard output and error of every command (capped) |
-| `findings.jsonl` | `bug` (data or behaviour wrong), `gap` (a flag is missing), `diff` (clients differ), `endpoint`, `note` |
+| `findings.jsonl` | `bug` (data or behaviour wrong), `path` (the same binary differs between its data paths), `gap` (a flag is missing), `diff` (clients differ), `endpoint`, `note` |
 | `events.jsonl` | Load holds, rate changes, probe and throttle numbers, warnings |
 | `state.json` | Scratch buckets and keys outside the run's prefix, for a later cleanup |
 
@@ -154,4 +185,7 @@ search for their values and never prints them).
 - AWS behaviour: `BadDigest`, `AccessControlListNotSupported`, storage classes, KMS, bucket
   regions, virtual-hosted addressing. MinIO refuses keys with `//` and rewrites a leading `/`, so
   those two key shapes are first tried on the real endpoints.
-- Real throttling: S9 in the dry run goes through `throttle_proxy.py`.
+- Real throttling: S9 in the dry run goes through `throttle_proxy.py`. On a real endpoint the lean
+  path's retries cannot be counted (see "Lean against sdk").
+- The full scale's shares are sized for the four clients above (about 77 GiB up and 49 GiB down
+  per endpoint); the largest S1 object (over 5 GiB) is then left to `rs5cmd-sdk` and `rs5cmd-lean`.

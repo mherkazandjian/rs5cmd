@@ -10,6 +10,8 @@ import os
 import random
 import re
 import shutil
+import signal
+import statistics
 import subprocess
 import sys
 import time
@@ -23,35 +25,137 @@ GiB = 1 << 30
 PART = 50 * MiB  # both clients' default part size
 
 # Shares are MiB (up, down) of the plan's volume per endpoint: about 80 GiB up and 55 GiB down.
+# They are sized for the lean client set (rs5cmd-sdk, rs5cmd-lean, s5cmd, and rs5cmd-lean-tr on the
+# uploads of S1, S11 and S14): full shares add up to about 77 GiB up and 49 GiB down.
 SCALES = {
     "dry": {
         "probe_mib": 256,
         "s1_sizes": [0, 1, 5 * MiB - 1, 5 * MiB, 5 * MiB + 1, PART - 1, PART, PART + 1, 160 * MiB],
+        "s1_pipe_mib": [0, 1, 60],
         "s3_dirs": 6, "s3_files": 500,
         "s4_files": 140,
         "s9_workers": 32, "s9_keys": 2000, "s9_seconds": 0, "s9_test_stop": True, "s9_test_429": True,
         "s10_slow_mbps": 1.0, "s10_slow_seconds": 60, "s10_file_mib": 1,
         "s13_seconds": 210, "s13_mbps": 5.0, "s13_sizes_mib": [1, 4, 16, 60], "s13_keep": 6,
-        "s14_w1": 1000, "s14_w3_mib": 64, "s14_rounds": 2,
-        "shares": {"S0": (400, 400), "S1": (1500, 1500), "S2": (20, 20), "S3": (60, 60), "S4": (300, 300),
-                   "S5": (40, 40), "S6": (20, 20), "S7": (20, 20), "S8": (20, 20), "S9": (60, 60),
-                   "S10": (300, 30), "S11": (60, 20), "S12": (20, 20), "S13": (1200, 700), "S14": (400, 400)},
+        "s14_w1": 1000, "s14_w2": [40, 1], "s14_w3_mib": 64, "s14_w7_mib": 32, "s14_w8": 200, "s14_rounds": 2,
+        "shares": {"S0": (400, 400), "S1": (2400, 1500), "S2": (20, 20), "S3": (80, 80), "S4": (400, 400),
+                   "S5": (40, 40), "S6": (400, 20), "S7": (20, 20), "S8": (20, 20), "S9": (80, 80),
+                   "S10": (400, 30), "S11": (300, 20), "S12": (20, 20), "S13": (1200, 700), "S14": (1500, 1200)},
     },
     "full": {
         "probe_mib": 512,
         "s1_sizes": [0, 1, 5 * MiB - 1, 5 * MiB, 5 * MiB + 1, PART - 1, PART, PART + 1, GiB, 6 * GiB],
-        "s3_dirs": 25, "s3_files": 1000,
+        "s1_pipe_mib": [0, 1, 60],
+        "s3_dirs": 20, "s3_files": 1000,
         "s4_files": 2000,
-        "s9_workers": 256, "s9_keys": 100000, "s9_seconds": 60, "s9_test_stop": False, "s9_test_429": False,
-        "s10_slow_mbps": 1.0, "s10_slow_seconds": 2400, "s10_file_mib": 4,
+        "s9_workers": 256, "s9_keys": 40000, "s9_seconds": 60, "s9_test_stop": False, "s9_test_429": False,
+        "s10_slow_mbps": 1.0, "s10_slow_seconds": 1500, "s10_file_mib": 4,
         "s13_seconds": 10800, "s13_mbps": 5.0, "s13_sizes_mib": [1, 8, 64, 200], "s13_keep": 12,
-        "s14_w1": 10000, "s14_w3_mib": 1024, "s14_rounds": 3,
-        "shares": {"S0": (1100, 1100), "S1": (16500, 16500), "S2": (100, 100), "S3": (400, 400),
-                   "S4": (2500, 2500), "S5": (200, 200), "S6": (50, 50), "S7": (50, 50), "S8": (50, 50),
-                   "S9": (1500, 1500), "S10": (5500, 300), "S11": (100, 50), "S12": (50, 200),
-                   "S13": (37000, 19000), "S14": (7000, 7000)},
+        "s14_w1": 5000, "s14_w2": [200, 1], "s14_w3_mib": 384, "s14_w7_mib": 128, "s14_w8": 1000, "s14_rounds": 3,
+        "shares": {"S0": (1100, 1100), "S1": (18500, 17000), "S2": (100, 100), "S3": (400, 400),
+                   "S4": (3500, 2500), "S5": (200, 200), "S6": (600, 50), "S7": (50, 50), "S8": (50, 50),
+                   "S9": (1500, 1500), "S10": (5500, 300), "S11": (400, 50), "S12": (50, 200),
+                   "S13": (37000, 19000), "S14": (9500, 7500)},
     },
 }
+
+# Failed checks that are known issues: (scenario, pattern in the check's label, issue).
+KNOWN = [("S2", r"ls all keys: the names|rm all keys: nothing left", "#31"),
+         ("S2", r"down question: content", "#34, no cp --raw"),
+         ("S4", r"same-second", "#33"),
+         ("S4", r"sync down", "#4"),
+         ("S5", r"bare prefix", "#30"),
+         ("S9", r"429 TooManyRequests", "#32"),
+         ("S12", r"no-sign-request", "#6")]
+
+# Differences between rs5cmd's two data paths, or between rs5cmd and s5cmd, that are intended or
+# known. The report prints them next to what the run found.
+EXPECTED = [
+    "Lean uploads of bodies held in memory (files up to 256 KiB, every part of `pipe`) carry a CRC32C header, and a "
+    "multipart `pipe` ends with a composite checksum (`-N`). The SDK path sends no upload checksum. S1 and S11 check "
+    "exactly this per client on the stored objects; none of it shows in rs5cmd's output.",
+    "With `--checksum-trailers` (client rs5cmd-lean-tr) streamed bodies carry the CRC32C as an aws-chunked trailer. An "
+    "endpoint that refuses trailers is recorded with its error text and version, and the client sits out.",
+    "`pipe` on the lean path computes a CRC32C over every part, so its CPU is above the SDK path's: S14's CPU "
+    "criterion leaves the `W7 pipe` row out.",
+    "#33: a file written in the same second as its upload is uploaded again by the next sync (listed times are kept "
+    "to the second), on both data paths, and how many depends on timing. S4 writes its files more than a second "
+    "before each sync and judges the same-second step by bucket state and copy counts, not by comparing output.",
+    "On the SDK with both settings, so controls and not lean tests: `--use-list-objects-v1`, copies inside the bucket "
+    "(CopyObject, UploadPartCopy), `mb` / `rb` / `bucket-version`, `select`, the region lookup.",
+    "#34: rs5cmd's `cp` has no `--cache-control`, `--content-encoding`, `--content-disposition` or `--sse` (S6 sends "
+    "them through `pipe`, as a single PUT and as a multipart upload), `--expires` exists nowhere, `cp` has no `--raw`, "
+    "and `rm` has no `--all-versions` (S7 removes the versions one by one with `rm --version-id`).",
+    "The versions listing sends no `x-amz-request-payer` even with `--request-payer`. That cannot show on a bucket "
+    "without requester-pays, so it is recorded here and not tested.",
+    "The lean path has no upload stall check (the SDK fails an attempt after 5 s without progress). Every command is "
+    "timed, and a lean command that takes more than twice its sdk twin plus 5 s is reported as a `path` finding.",
+    "A retry on the lean path leaves no log line, so the harness cannot count its 503s (the SDK path's come from the "
+    "SDK's retry log, s5cmd's from its debug log). In the dry run the injector's count per client stands in. Where "
+    "the first 503 must stop a client (a shared cluster), the lean clients run with `--retry-count 0`, so that the "
+    "503 comes out as an error and stops the scenario.",
+    "#6: `--no-sign-request` fails on rs5cmd builds without the fix: S12 records that and does not count it. With the "
+    "fix, S12 also checks on a plain-HTTP endpoint that no request carries a signature.",
+]
+
+
+def known_issue(scn, label):
+    return next((issue for sid, pat, issue in KNOWN if sid == scn and re.search(pat, label)), None)
+
+
+def endpoint_probe(r):
+    """Once per run: does the endpoint keep and return a CRC32C sent with an upload, and does it
+    take aws-chunked uploads with a trailer? A client that needs trailers sits out if it does not."""
+    if "checksums" in r.endpoint:
+        return r.endpoint
+    s3, b, body, base = r.s3, r.t.bucket, small_bytes("probe", 2000), f"{r.base}/checker/probe/"
+    crc = s3check.checksums(body)["crc32c"]
+    st, _, _ = s3.request("PUT", b, base + "header", body=body, ok=None,
+                          headers={"x-amz-sdk-checksum-algorithm": "CRC32C", "x-amz-checksum-crc32c": crc})
+    kept = st == 200 and s3.head_object(b, base + "header", checksum=True).get("x-amz-checksum-crc32c") == crc
+    st2, code = s3.put_object_trailer(b, base + "trailer", body, crc)
+    r.endpoint.update(checksums=kept, trailers=st2 == 200, trailers_error=f"{st2} {code}".strip())
+    if not kept:
+        r.finding("endpoint", "the endpoint does not keep or return a CRC32C sent with an upload: what lean uploads "
+                              "leave on their objects cannot be checked here", f"PUT status {st}")
+    if st2 != 200:
+        r.finding("endpoint", f"aws-chunked uploads with a CRC32C trailer are refused here ({st2} {code}; server version "
+                              f"{r.t.version or 'not given'}): --checksum-trailers cannot work on this endpoint")
+        for c in r.all_clients:
+            if c.trailers:
+                r.excluded[c.name] = f"the endpoint refuses aws-chunked trailers ({st2} {code})"
+    return r.endpoint
+
+
+_CRC = {}
+
+
+def check_crc32c(r, c, key, path, label, how):
+    """The CRC32C an upload left on its object: right if there is one, and there or not as this
+    client's data path says. Lean sends it as a header with bodies it holds in memory (files up to
+    256 KiB, every pipe part) and, with --checksum-trailers, as a trailer with streamed bodies of
+    a single PUT; the SDK path sends none. how: "cp" or "pipe". Returns what the object has."""
+    ep = endpoint_probe(r)
+    h = r.s3.head_object(r.t.bucket, key, checksum=True)
+    got, size, multipart = h.get("x-amz-checksum-crc32c"), os.path.getsize(path), "-" in h.get("etag", "")
+    if got and size <= 1536 * MiB:
+        part = int(r.s3.head_object(r.t.bucket, key, part_number=1)["content-length"]) if "-" in got else 0
+        if (path, part) not in _CRC:
+            _CRC[(path, part)] = s3check.crc32c_composite(path, part) if part else s3check.b64(s3check.crc32c_file(path), 4)
+        r.check(f"{label}: the CRC32C on the object is right", got == _CRC[(path, part)],
+                f"object {got}, computed {_CRC[(path, part)]}", c)
+    if c.kind != "rs5cmd" or not ep["checksums"]:
+        return got
+    if c.path != "lean":
+        r.check(f"{label}: no CRC32C from the sdk path", got is None, f"found {got}", c)
+    elif how == "pipe" or (size <= 256 * 1024 and not multipart):
+        r.check(f"{label}: lean leaves a CRC32C (a body held in memory)", bool(got), "none on the object", c)
+    elif c.trailers and not multipart:
+        r.check(f"{label}: lean with trailers leaves a CRC32C (a streamed body)", bool(got), "none on the object", c)
+    elif not c.trailers:
+        r.check(f"{label}: no CRC32C from lean on a streamed body without trailers", got is None, f"found {got}", c)
+    return got
+
 
 LS_RE = re.compile(r"^(?:\S+ \S+)?\s*(?:DIR|\d+)\s+(.*)$")
 
@@ -135,10 +239,10 @@ def parity(r, label, outcomes):
             r.check(label, ok, d, c)
 
 
-def gap(r, c, sub, flag, others):
+def gap(r, c, sub, flag, others, issue="#34"):
     have = [o.name for o in others if o is not c and o.has(sub, flag)]
-    r.finding("gap", f"`{sub} {flag}` is not in {c.name}'s help" + (f" ({', '.join(have)} has it)" if have else ""),
-              client=c.name)
+    r.finding("gap", f"`{sub} {flag}` is not in {c.name}'s help" + (f" ({', '.join(have)} has it)" if have else "")
+              + (f", {issue}" if issue else ""), client=c.name)
     r.stats[r.scn]["clients"][c.name]["note"] = "flags missing"
 
 
@@ -167,17 +271,27 @@ def s0(r):
 # --- S1 --------------------------------------------------------------------------------------
 
 def s1(r):
-    """Sizes: 0 B to the largest object, up, down and copied, ETag and SHA-256"""
+    """Sizes: 0 B to the largest object, up, down and copied, ETag and SHA-256; pipe from stdin"""
     files = [(size_name(n), n) for n in r.scale["s1_sizes"]]
+    full = [c for c in r.clients if not c.uploads_only]
+
+    def takes(c, size):
+        # Above 5 GiB an object costs each client 12 GiB of the volume. With more than two full
+        # clients it is left to rs5cmd's data paths, which is the comparison that matters there.
+        return size <= 5 * GiB or (not c.uploads_only and (len(full) <= 2 or c.kind == "rs5cmd"))
+
     for name, size in files:
         path = r.gen(f"s1/{name}", size)
         tmo = 900 + size // 1_000_000
-        r.each(f"up {name}", lambda c: ["cp", path, r.url(c, name)], timeout=tmo, est={"put": req_up(size)})
-        for c in r.clients:
-            r.verify_upload(c, r.prefix(c, name), path, f"up {name}")
-        r.each(f"down {name}", lambda c: ["cp", r.url(c, name), r.work(c, "dl", name)], timeout=tmo,
+        ups = [c for c in r.clients if takes(c, size)]
+        downs = [c for c in ups if not c.uploads_only]
+        r.each(f"up {name}", lambda c: ["cp", path, r.url(c, name)], clients=ups, timeout=tmo, est={"put": req_up(size)})
+        for c in ups:
+            if r.verify_upload(c, r.prefix(c, name), path, f"up {name}"):
+                check_crc32c(r, c, r.prefix(c, name), path, f"up {name}", "cp")
+        r.each(f"down {name}", lambda c: ["cp", r.url(c, name), r.work(c, "dl", name)], clients=downs, timeout=tmo,
                est={"get": req_down(size)})
-        for c in r.clients:
+        for c in downs:
             r.verify_download(c, r.work(c, "dl", name), path, f"down {name}")
             if os.path.exists(r.work(c, "dl", name)):
                 os.unlink(r.work(c, "dl", name))
@@ -189,28 +303,33 @@ def s1(r):
                    est={"put": req_up(size, 5 * MiB)})
             for c in r.clients:
                 r.verify_upload(c, r.prefix(c, "p5", name), path, f"up {name} --part-size 5")
-    # cat and pipe
+    # cat
     text = r.src("s1/text.txt")
     with open(text, "w") as f:
         f.write("".join(f"line {i:04d} of the soak text object\n" for i in range(120)))
-    r.each("up text", lambda c: ["cp", text, r.url(c, "text.txt")], est={"put": 1})
-    res = r.each("cat text", lambda c: ["cat", r.url(c, "text.txt")], est={"get": 1})
+    r.each("up text", lambda c: ["cp", text, r.url(c, "text.txt")], clients=full, est={"put": 1})
+    res = r.each("cat text", lambda c: ["cat", r.url(c, "text.txt")], clients=full, est={"get": 1})
     with open(text) as f:
         want = f.read()
     for x in res:
         r.check("cat text: content", x.out == want, f"{len(x.out)} characters, expected {len(want)}", x.client)
-    mid = next((r.src(f"s1/{n}") for n, s in files if s == 5 * MiB + 1), None)
-    if mid:
-        r.each("pipe 5MiB+1", lambda c: ["pipe", r.url(c, "piped")], stdin=mid, est={"put": 3})
-        for c in r.clients:
-            r.verify_upload(c, r.prefix(c, "piped"), mid, "pipe 5MiB+1")
+    # pipe from stdin: nothing, one PUT, a multipart upload (on lean every part carries a CRC32C;
+    # the multipart Create that declares it is the request most likely to differ by server)
+    for m in r.scale["s1_pipe_mib"]:
+        src = r.gen(f"s1/pipe-{m}MiB", m * MiB)
+        res = r.each(f"pipe {m}MiB", lambda c: ["pipe", r.url(c, f"piped-{m}MiB")], stdin=src, expect=None,
+                     est={"put": req_up(m * MiB)})
+        for x in res:
+            if r.check(f"pipe {m}MiB: exit 0", x.rc == 0, f"exit {x.rc}: {x.err.strip()[:200]}", x.client) and \
+                    r.verify_upload(x.client, r.prefix(x.client, f"piped-{m}MiB"), src, f"pipe {m}MiB"):
+                check_crc32c(r, x.client, r.prefix(x.client, f"piped-{m}MiB"), src, f"pipe {m}MiB", "pipe")
     # copies inside the bucket: one single-part object, one multipart object, the largest object
     todo = [(n, s) for n, s in files if s in (1, PART + 1)]
     if files[-1] not in todo:
         todo.append(files[-1])
     for name, size in todo:   # above 5 GiB a copy needs UploadPartCopy: a client may not have it
         res = r.each(f"copy {name} in the bucket", lambda c: ["cp", r.url(c, name), r.url(c, "copy", name)],
-                     timeout=3600, expect=None, est={"put": req_up(size)})
+                     clients=[c for c in full if takes(c, size)], timeout=3600, expect=None, est={"put": req_up(size)})
         for x in res:
             if x.rc == 0:
                 r.verify_upload(x.client, r.prefix(x.client, "copy", name), r.src(f"s1/{name}"), f"copy {name}")
@@ -329,8 +448,9 @@ def s3(r):
     rx = re.compile(r"d0.*/f00.7$")
     want = sum(1 for d in range(D) for f in range(F) if rx.match(f"d{d:02d}/f{f:04d}"))
     lines("ls pattern", r.each("ls pattern", lambda c: ["ls", keys_url(r, c) + "/d0*/f00?7"], est=pages), want)
-    lines("ls --use-list-objects-v1", r.each("ls --use-list-objects-v1", lambda c: ["ls", keys_url(r, c) + "/*"],
-                                             gflags=["--use-list-objects-v1"], est=pages), n)
+    # ListObjects v1 goes through the SDK on both data paths: a control, not a lean test
+    lines("ls --use-list-objects-v1 (control)", r.each("ls --use-list-objects-v1 (control)", lambda c: ["ls", keys_url(r, c) + "/*"],
+                                                       gflags=["--use-list-objects-v1"], est=pages), n)
     res = r.each("ls --json", lambda c: ["ls", keys_url(r, c) + "/d00/*"], gflags=["--json"], est={"put": 1})
     for x in res:
         try:
@@ -481,6 +601,7 @@ def s4(r):
         first = r.run(c, ["sync", trees[c] + "/", r.url(c, "t") + "/"], "sync in the second of the write", est={"put": 21})
         again = r.run(c, ["sync", trees[c] + "/", r.url(c, "t") + "/"], "sync again right after", est={"put": 1})
         outcomes[c] = (copied(first) == 20 and copied(again) == 0, f"{copied(first)} then {copied(again)} copies")
+        same(c, "sync in the second of the write")   # the bucket is right either way
     parity(r, "sync right after a same-second sync copies nothing", outcomes)
     time.sleep(settle)
     # down: into a directory that does not exist yet, then again
@@ -502,8 +623,8 @@ def s4(r):
 # --- S6 --------------------------------------------------------------------------------------
 
 def s6(r):
-    """Metadata and options: content headers, storage classes, SSE, request payer, ACL, select"""
-    f = r.src("s6/obj.bin")
+    """Metadata and options: content headers (through pipe where cp lacks them), storage classes, SSE, payer, ACL, select"""
+    f, big = r.src("s6/obj.bin"), r.gen("s6/big.bin", 6 * MiB)   # big: two parts with --part-size 5
     with open(f, "wb") as fh:
         fh.write(small_bytes("s6", 1024))
     cases = [
@@ -517,32 +638,42 @@ def s6(r):
         ("sse aws:kms", ["--sse", "aws:kms"], lambda h: h.get("x-amz-server-side-encryption") == "aws:kms"),
     ] + [(f"storage-class {sc}", ["--storage-class", sc], lambda h, sc=sc: h.get("x-amz-storage-class", "STANDARD") == sc)
          for sc in r.t.storage_classes]
+    told = set()
+    # Each flag on a single PUT and on a multipart upload (both must send the same headers), with
+    # cp where the client's cp has the flag and with pipe where only pipe has it.
     for tag, flags, pred in cases:
-        outcomes, results = {}, []
-        for c in r.clients:
-            key = tag.replace(" ", "-").replace(":", "-")
-            if c.has("cp", flags[0]):
-                x = r.run(c, ["cp", *flags, f, r.url(c, key)], tag, expect=None, est={"put": 1})
-            elif c.has("pipe", flags[0]):
-                gap(r, c, "cp", flags[0], r.clients)
-                x = r.run(c, ["pipe", *flags, r.url(c, key)], f"{tag} (pipe)", stdin=f, expect=None, est={"put": 1})
-            else:
-                gap(r, c, "cp", flags[0], r.clients)
-                continue
-            results.append(x)
-            detail = f"exit {x.rc}: {x.err.strip()[:200]}"
-            ok = x.rc == 0
-            if ok:
-                try:
-                    h = r.s3.head_object(r.t.bucket, r.prefix(c, key))
-                    ok = pred(h)
-                    detail = "header not as asked: " + json.dumps({k: v for k, v in h.items() if k.startswith(
-                        ("content-", "cache-", "expires", "x-amz-s"))})[:300]
-                except S3Error as e:
-                    ok, detail = False, f"exit 0 but HEAD says {e}"
-            outcomes[c] = (ok, detail)
-        if outcomes:
-            parity(r, f"{tag}: stored as asked", outcomes)
+        for how, src, est in (("single", f, 1), ("multipart", big, 4)):
+            outcomes, twins = {}, []
+            for c in r.clients:
+                key = f"{tag.replace(' ', '-').replace(':', '-')}-{how}"
+                sub = "cp" if c.has("cp", flags[0]) else "pipe" if c.has("pipe", flags[0]) else None
+                if sub != "cp" and (c.name, flags[0]) not in told:
+                    told.add((c.name, flags[0]))
+                    gap(r, c, "cp", flags[0], r.clients)
+                if sub == "cp":
+                    x = r.run(c, ["cp", "--part-size", "5", *flags, src, r.url(c, key)], f"{tag} {how}", expect=None, est={"put": est})
+                elif sub == "pipe":
+                    x = r.run(c, ["pipe", "--part-size", "5", *flags, r.url(c, key)], f"{tag} {how} (pipe)", stdin=src,
+                              expect=None, est={"put": est})
+                else:
+                    continue
+                if c.kind == "rs5cmd":
+                    twins.append(x)
+                detail = f"exit {x.rc}: {x.err.strip()[:200]}"
+                ok = x.rc == 0
+                if ok:
+                    try:
+                        h = r.s3.head_object(r.t.bucket, r.prefix(c, key))
+                        ok = pred(h) and ("-" in h.get("etag", "")) == (how == "multipart")
+                        detail = f"header not as asked, or not a {how} upload: " + json.dumps({k: v for k, v in h.items() if k.startswith(
+                            ("content-", "cache-", "expires", "x-amz-s", "etag"))})[:300]
+                    except S3Error as e:
+                        ok, detail = False, f"exit 0 but HEAD says {e}"
+                outcomes[c] = (ok, detail)
+            if outcomes:
+                parity(r, f"{tag} {how}: stored as asked", outcomes)
+            r.compare(f"{tag} {how}", twins)
+            r.twin_time(f"{tag} {how}", twins)
     # --request-payer on a bucket that is not requester-pays: the request must still work
     res = r.each("request-payer cp", lambda c: ["cp", f, r.url(c, "payer")], gflags=["--request-payer", "requester"],
                  expect=None, est={"put": 1})
@@ -552,8 +683,10 @@ def s6(r):
            est={"put": 1})
     # --acl: with ACLs disabled the bucket must refuse it; nothing may become public
     res = r.each("acl public-read", lambda c: ["cp", "--acl", "public-read", f, r.url(c, "acl")], expect=None, est={"put": 1})
+    res += r.each("acl public-read multipart", lambda c: ["cp", "--part-size", "5", "--acl", "public-read", big, r.url(c, "acl-multipart")],
+                  expect=None, est={"put": 4})
     for x in res:
-        key = r.prefix(x.client, "acl")
+        key = r.prefix(x.client, "acl-multipart" if "multipart" in x.label else "acl")
         if r.t.kind == "aws":
             r.check("acl: refused with AccessControlListNotSupported",
                     x.rc != 0 and "AccessControlListNotSupported" in x.err, f"exit {x.rc}: {x.err.strip()[:200]}", x.client)
@@ -699,13 +832,37 @@ def s9(r):
                                   "--upstream", t.endpoint.split("://")[1], "--every", "40", "--stats", stats])
         time.sleep(1.0)
         env = {"S3_ENDPOINT_URL": t.throttle_endpoint, "AWS_ENDPOINT_URL": t.throttle_endpoint}
-    watch = re.compile("|".join(p.pattern for p in RETRY_RE.values())) if stop_first else THROTTLE_RE
+    # A retry on the lean path leaves no log line (the SDK path's are counted from the SDK's retry
+    # log, s5cmd's from its debug log). Where the first 503 must stop a client, the lean path
+    # therefore runs without retries, so that the 503 comes out as an error line. In the dry run
+    # the injector's own count per client stands in for what cannot be seen.
+    stop_watch = re.compile("|".join([p.pattern for p in RETRY_RE.values()] + [THROTTLE_RE.pattern]))
+    watch = stop_watch if stop_first else THROTTLE_RE
     gf = ["--numworkers", str(workers)]
+
+    def flags(c, stopping):
+        return gf + (["--retry-count", "0"] if stopping and c.path == "lean" and c.has(None, "--retry-count") else [])
+
+    def injected():
+        if not proxy:
+            return 0
+        before = os.path.getmtime(stats) if os.path.exists(stats) else 0
+        proxy.send_signal(signal.SIGUSR1)
+        for _ in range(40):
+            if os.path.exists(stats) and os.path.getmtime(stats) != before:
+                break
+            time.sleep(0.05)
+        try:
+            with open(stats) as fh:
+                return json.load(fh)["injected"]
+        except (OSError, ValueError):
+            return 0
     try:
         K = sc["s9_keys"]
         if sc["s9_seconds"]:   # size the run for about s9_seconds per phase from a short measurement
             cal = make_tree(r.src("s9cal"), 2000, 1024, "s9cal")
-            x = r.run(r.clients[0], ["cp", cal + "/", r.url(r.clients[0], "cal") + "/"], "calibrate", gflags=gf, env=env,
+            x = r.run(r.clients[0], ["cp", cal + "/", r.url(r.clients[0], "cal") + "/"], "calibrate",
+                      gflags=flags(r.clients[0], stop_first), env=env,
                       debug=True, watch=watch, stop_on_watch=stop_first, expect=None, est={"put": 2000})
             if stop_first and x.hit:
                 r.finding("endpoint", f"S9 stopped at the first retry during calibration: {x.hit}", x.err.strip()[-300:])
@@ -713,39 +870,54 @@ def s9(r):
             K = int(min(K, max(2000, 2000 / x.wall * sc["s9_seconds"])) // 1000 * 1000)
             r.say(f"   S9: {2000 / x.wall:.0f} PUT/s measured, {K} keys per phase")
         tree = make_tree(r.src("s9"), K, 1024, "s9")
+        ups, downs = [], []
         for c in r.clients:
-            up = r.run(c, ["cp", tree + "/", r.url(c, "k") + "/"], "put 1 KiB objects", gflags=gf, env=env, debug=True,
+            i0 = injected()
+            up = r.run(c, ["cp", tree + "/", r.url(c, "k") + "/"], "put 1 KiB objects", gflags=flags(c, stop_first), env=env, debug=True,
                        watch=watch, stop_on_watch=stop_first, expect=None, timeout=3600, est={"put": K})
             if stop_first and up.hit:
                 r.finding("endpoint", f"S9 stopped at the first retry ({up.hit}) after {up.wall:.0f} s of PUTs with {workers} workers",
                           up.err.strip()[-300:], c.name)
                 return
+            ups.append(up)
             n = len(r.remote_keys(r.prefix(c, "k") + "/"))
             r.check("put: every object is there, exit 0", up.rc == 0 and n == K, f"exit {up.rc}, {n} of {K} keys; {up.err.strip()[-200:]}", c)
             dl = r.work(c, "dl", "x")[:-2]
-            down = r.run(c, ["cp", r.url(c, "k") + "/*", dl + "/"], "get 1 KiB objects", gflags=gf, env=env, debug=True,
+            i1 = injected()
+            down = r.run(c, ["cp", r.url(c, "k") + "/*", dl + "/"], "get 1 KiB objects", gflags=flags(c, stop_first), env=env, debug=True,
                          watch=watch, stop_on_watch=stop_first, expect=None, timeout=3600, est={"get": K, "put": K // 1000 + 1})
             if stop_first and down.hit:
                 r.finding("endpoint", f"S9 stopped at the first retry ({down.hit}) after {down.wall:.0f} s of GETs with {workers} workers",
                           down.err.strip()[-300:], c.name)
                 return
+            downs.append(down)
             got = local_files(dl) if os.path.isdir(dl) else {}
             bad = [k for i, k in enumerate(sorted(got)) if i % 97 == 0 and md5_file(os.path.join(dl, k)) != md5_file(os.path.join(tree, k))]
             r.check("get: every object arrived intact, exit 0", down.rc == 0 and len(got) == K and not bad,
                     f"exit {down.rc}, {len(got)} of {K} files, {len(bad)} of the sample differ; {down.err.strip()[-200:]}", c)
             shutil.rmtree(dl, ignore_errors=True)
-            r.event("throttle", client=c.name, put_per_s=round(K / up.wall), get_per_s=round(K / down.wall),
-                    put_retries=up.retries, put_throttled=up.throttled, get_retries=down.retries, get_throttled=down.throttled)
-            r.say(f"   S9 {c.name}: {K / up.wall:.0f} PUT/s ({up.retries} retries, {up.throttled} throttled), "
-                  f"{K / down.wall:.0f} GET/s ({down.retries} retries, {down.throttled} throttled)")
-            if proxy:
+            r.event("throttle", client=c.name, keys=K, workers=workers, put_exit=up.rc, get_exit=down.rc,
+                    put_wall_s=round(up.wall, 2), get_wall_s=round(down.wall, 2),
+                    put_per_s=round(K / up.wall), get_per_s=round(K / down.wall),
+                    put_retries=up.retries, put_throttled=up.throttled, get_retries=down.retries, get_throttled=down.throttled,
+                    retries_visible=c.path != "lean", put_injected=i1 - i0 if proxy else None,
+                    get_injected=injected() - i1 if proxy else None)
+            seen = "retries not visible on the lean path" if c.path == "lean" else \
+                f"{up.retries} + {down.retries} retries, {up.throttled} + {down.throttled} throttled"
+            r.say(f"   S9 {c.name}: {K / up.wall:.0f} PUT/s, {K / down.wall:.0f} GET/s ({seen}"
+                  + (f"; {i1 - i0} + {injected() - i1} 503s injected)" if proxy else ")"))
+            if proxy and c.path == "lean":
+                r.check("the injected 503s reached the client (it retried them: every object is there)",
+                        i1 - i0 > 0 and injected() - i1 > 0, f"{i1 - i0} on PUT, {injected() - i1} on GET", c)
+            elif proxy:
                 r.check("the injected 503s were seen and retried", up.throttled > 0 and down.throttled > 0,
                         f"{up.throttled} on PUT, {down.throttled} on GET", c)
+        r.twin_time("put 1 KiB objects", ups)   # the same K for every client: walls compare directly
+        r.twin_time("get 1 KiB objects", downs)
         if proxy and sc["s9_test_stop"]:   # dry run only: the stop-at-the-first-503 path used on a shared cluster
-            stop = re.compile("|".join(p.pattern for p in RETRY_RE.values()))
             for c in r.clients:
-                x = r.run(c, ["cp", tree + "/", r.url(c, "stop") + "/"], "stop at the first 503", gflags=gf, env=env,
-                          debug=True, watch=stop, stop_on_watch=True, expect=None, est={"put": 100})
+                x = r.run(c, ["cp", tree + "/", r.url(c, "stop") + "/"], "stop at the first 503", gflags=flags(c, True), env=env,
+                          debug=True, watch=stop_watch, stop_on_watch=True, expect=None, est={"put": 100})
                 n = len(r.remote_keys(r.prefix(c, "stop") + "/"))
                 r.check("stop at the first 503: the retry was seen and the client stopped early",
                         x.hit is not None and n < K, f"hit {x.hit}, exit {x.rc}, {n} of {K} keys uploaded", c)
@@ -872,29 +1044,32 @@ def s11(r):
         r.check("endpoint: a wrong CRC32C trailer is refused", st == 400, f"status {st} {code}")
         if st == 400 and code != "BadDigest":
             r.finding("endpoint", f"a wrong CRC32C trailer is refused with {code}, not BadDigest")
-    # the clients: which checksums does an upload leave on the object, and are they right?
-    small, multi = r.src("s11/small.bin"), r.gen("s11/multi.bin", 12 * MiB)
+    # The clients: what an upload leaves on the object, checked against the client's data path
+    # (check_crc32c). big is a streamed single PUT above 16 MiB: with trailers its body goes out in
+    # 64 KiB aws-chunked pieces (one piece per body was refused by MinIO above 16 MiB).
+    ep = endpoint_probe(r)
+    small, mid = r.src("s11/small.bin"), r.gen("s11/mid.bin", MiB)
+    big, multi = r.gen("s11/big.bin", 20 * MiB), r.gen("s11/multi.bin", 12 * MiB)
     with open(small, "wb") as f:
         f.write(body)
-    want = s3check.checksums(body)
-    r.each("up small", lambda c: ["cp", small, r.url(c, "small")], est={"put": 1})
-    r.each("up multipart", lambda c: ["cp", "--part-size", "5", multi, r.url(c, "multi")], est={"put": 5})
+    ups = [("small", "cp", small, ["cp", small], 1), ("mid", "cp", mid, ["cp", mid], 1), ("big", "cp", big, ["cp", big], 1),
+           ("multi", "cp", multi, ["cp", "--part-size", "5", multi], 5),
+           ("piped", "pipe", small, ["pipe"], 1), ("piped-multi", "pipe", multi, ["pipe", "--part-size", "5"], 5)]
+    seen = collections.defaultdict(dict)
+    for name, how, path, args, est in ups:
+        res = r.each(f"up {name}", lambda c: [*args, r.url(c, name)], stdin=path if how == "pipe" else None,
+                     expect=None, est={"put": est})
+        for x in res:
+            c = x.client
+            if x.rc != 0 and c.trailers and not ep["trailers"]:   # the endpoint's doing: its error text and version
+                r.finding("endpoint", f"up {name} with --checksum-trailers fails here: exit {x.rc} (server version "
+                                      f"{r.t.version or 'not given'})", x.err.strip()[:400], c.name, x.argv)
+            elif r.check(f"up {name}: exit 0", x.rc == 0, f"exit {x.rc}: {x.err.strip()[:200]}", c) and \
+                    r.verify_upload(c, r.prefix(c, name), path, f"up {name}"):
+                seen[c][name] = check_crc32c(r, c, r.prefix(c, name), path, f"up {name}", how)
     for c in r.clients:
-        seen = {}
-        for name in ("small", "multi"):
-            try:
-                h = s3.head_object(b, r.prefix(c, name), checksum=True)
-            except S3Error as e:
-                r.check(f"up {name}: object exists", False, e, c)
-                continue
-            sums = {k[len("x-amz-checksum-"):]: v for k, v in h.items() if k.startswith("x-amz-checksum-")}
-            seen[name] = sums
-            if name == "small":
-                wrong = {k: v for k, v in sums.items() if k in want and v != want[k]}
-                r.check("up small: every checksum on the object is right", not wrong, f"{wrong}", c)
-        r.finding("note", f"checksums left on uploaded objects: single PUT {seen.get('small') or 'none'}, "
-                          f"multipart {seen.get('multi') or 'none'}", client=c.name)
-        r.verify_upload(c, r.prefix(c, "multi"), multi, "up multipart")
+        r.finding("note", "CRC32C left on uploaded objects: " + ", ".join(f"{n} {seen[c].get(n) or 'none'}" for n, *_ in ups),
+                  client=c.name)
 
 
 # --- S12 -------------------------------------------------------------------------------------
@@ -914,19 +1089,46 @@ def s12(r):
         want = anon.get_object(bucket, key, unsigned=True)
     except S3Error as e:
         raise Skip(f"the public object is not readable without credentials ({e.status} {e.code})")
-    res = r.each("no-sign-request cp", lambda c: ["cp", t.public_url, r.work(c, "pub.dl")], gflags=["--no-sign-request"],
-                 env=env, expect=None, compare=False, est={"get": 2})
-    for x in res:
-        dl = r.work(x.client, "pub.dl")
+    # On a plain-HTTP endpoint the requests go through a local proxy that counts those carrying a
+    # signature (an Authorization header, a presigned query or a session token): there must be none.
+    record = bool(t.endpoint) and t.endpoint.startswith("http://") and t.addressing != "virtual"
+    stats, via = os.path.join(r.scratch, "tmp", "nosign.json"), "http://127.0.0.1:9102"
+    os.makedirs(os.path.dirname(stats), exist_ok=True)
+    for c in r.clients:
+        e, proxy, seen = dict(env), None, None
+        if record:
+            if os.path.exists(stats):
+                os.unlink(stats)
+            proxy = subprocess.Popen([sys.executable, os.path.join(HERE, "throttle_proxy.py"), "--listen", via.split("//")[1],
+                                      "--upstream", t.endpoint.split("://")[1].rstrip("/"), "--every", "0", "--stats", stats])
+            time.sleep(1.0)
+            e.update(S3_ENDPOINT_URL=via, AWS_ENDPOINT_URL=via)
+        try:
+            x = r.run(c, ["cp", t.public_url, r.work(c, "pub.dl")], "no-sign-request cp", gflags=["--no-sign-request"],
+                      env=e, expect=None, est={"get": 2})
+            y = r.run(c, ["ls", t.public_url], "no-sign-request ls", gflags=["--no-sign-request"], env=e, expect=None,
+                      est={"put": 1})
+        finally:
+            if proxy:
+                proxy.terminate()
+                proxy.wait()
+                try:
+                    with open(stats) as fh:
+                        seen = json.load(fh)
+                except (OSError, ValueError):
+                    seen = None
+        dl = r.work(c, "pub.dl")
         ok = x.rc == 0 and os.path.isfile(dl) and open(dl, "rb").read() == want
-        if x.client.kind == "rs5cmd":   # expected to fail until issue #6 is fixed: recorded, not counted
-            r.stats[r.scn]["clients"][x.client.name]["note"] = "works" if ok else "expected failure (#6), not counted"
-            r.finding("note", "--no-sign-request " + ("works in this build (issue #6 looks fixed)" if ok else
-                      f"fails as expected (issue #6): exit {x.rc}"), x.err.strip()[:300], x.client.name, x.argv)
-        else:
-            r.check("no-sign-request: the public object is fetched", ok, f"exit {x.rc}: {x.err.strip()[:200]}", x.client)
-    r.each("no-sign-request ls", lambda c: ["ls", t.public_url], gflags=["--no-sign-request"], env=env, expect=None,
-           compare=False, est={"put": 1})
+        said = f"{seen['signed']} of {seen['requests']} requests carried a signature" if seen else "requests not recorded"
+        if c.kind == "rs5cmd" and not ok:   # expected to fail until issue #6 is fixed: recorded, not counted
+            r.stats[r.scn]["clients"][c.name]["note"] = "expected failure (#6), not counted"
+            r.finding("note", f"--no-sign-request fails as expected without the fix for #6: exit {x.rc}; {said}",
+                      x.err.strip()[:300], c.name, x.argv)
+            continue
+        r.check("no-sign-request: the public object is fetched", ok, f"exit {x.rc}: {x.err.strip()[:200]}", c)
+        r.check("no-sign-request: ls works", y.rc == 0 and len(y.lines) == 1, f"exit {y.rc}: {(y.err + y.out).strip()[:200]}", c)
+        if seen:
+            r.check("no-sign-request: no request carries a signature", seen["signed"] == 0 and seen["requests"] > 0, said, c)
 
 
 # --- S13 -------------------------------------------------------------------------------------
@@ -942,12 +1144,14 @@ def s13(r):
     ops, it = collections.Counter(), 0
     tx0, rx0 = link_bytes()
     t0 = time.time()
-    rnd = 0
+    rnd, timed = 0, []
     while time.time() < deadline:
         # One kind of operation and one size per round, done by every client in turn (the order
         # alternates), so that the clients get the same mix. Choosing per operation instead lets
         # one client end up with the uploads and the other with the downloads.
         if it % len(r.clients) == 0:
+            r.twin_time(f"uploads of round {rnd}", timed)   # no stall check on lean: see twin_time
+            timed = []
             rnd += 1
             tx, rx = link_bytes()
             up, down = tx - tx0, rx - rx0
@@ -973,6 +1177,7 @@ def s13(r):
             m = sc["s13_sizes_mib"][pick % len(sc["s13_sizes_mib"])]
             key = r.prefix(c, "obj", f"{tag}-{m}MiB")
             x = r.run(c, ["cp", pool[m], f"s3://{r.t.bucket}/{key}"], f"up {tag}", debug=True, quiet=True, est={"put": req_up(m * MiB)})
+            timed.append(x)
             if x.rc == 0 and r.verify_upload(c, key, pool[m], f"up {tag}"):
                 held[c].append((key, pool[m]))
             while len(held[c]) > sc["s13_keep"]:
@@ -1011,6 +1216,7 @@ def s13(r):
         if it % 10 == 0:
             el = time.time() - t0
             r.say(f"   S13 {el:5.0f} s: {it} operations {dict(ops)}, {(tx - tx0) / el / 1e6:.2f} MB/s up, {(rx - rx0) / el / 1e6:.2f} MB/s down")
+    r.twin_time(f"uploads of round {rnd}", timed)
     el = time.time() - t0
     tx, rx = link_bytes()
     st = r.stats[r.scn]
@@ -1025,36 +1231,91 @@ def s13(r):
 
 # --- S14 -------------------------------------------------------------------------------------
 
+CPU_EXEMPT = {"W7 pipe"}   # lean computes a CRC32C over every pipe part (an intended difference)
+
+
 def s14(r):
-    """Performance rows: W1 many 4 KiB objects, W3 one large object, W4 listing; wall, CPU and RSS per round"""
+    """Performance rows, as the review's C4 runs: small, medium and large objects, ls, du, sync, rm, cat, pipe, run; CPU per row"""
     sc = r.scale
-    n = sc["s14_w1"]
+    n, (w2n, w2mib), n8 = sc["s14_w1"], sc["s14_w2"], sc["s14_w8"]
     tree = make_tree(r.src("w1"), n, 4096, "w1")
-    w3 = r.gen("s14/w3.bin", sc["s14_w3_mib"] * MiB)
-    size = os.path.getsize(w3)
+    for i in range(w2n):
+        r.gen(f"w2/f{i:04d}.bin", w2mib * MiB)
+    w2, w3, w7 = r.src("w2"), r.gen("s14/w3.bin", sc["s14_w3_mib"] * MiB), r.gen("s14/w7.bin", sc["s14_w7_mib"] * MiB)
+    one, pages = os.path.join(tree, "d00", "f0000"), {"put": -(-n // 1000)}
+    time.sleep(2.1)   # files older than the second of their upload: the warm sync copies nothing
+    cpu = collections.defaultdict(list)
+
+    def row(c, name, rnd, args, **kw):
+        x = r.run(c, args, f"{name} r{rnd}", timeout=3600, **kw)
+        if x.rc == 0:
+            cpu[(name, c)].append(x.user + x.sys)
+        return x
+
+    def tree_ok(c, label, d, src, count):
+        got = local_files(d) if os.path.isdir(d) else {}
+        bad = [k for i, k in enumerate(sorted(got)) if i % 97 == 0 and md5_file(os.path.join(d, k)) != md5_file(os.path.join(src, k))]
+        r.check(f"{label}: every file intact", len(got) == count and not bad, f"{len(got)} of {count} files, {len(bad)} differ", c)
+        shutil.rmtree(d, ignore_errors=True)
+
     for rnd in range(1, sc["s14_rounds"] + 1):
         for c in (r.clients if rnd % 2 else list(reversed(r.clients))):
-            u = r.url(c, f"r{rnd}", "w1")
-            r.run(c, ["cp", tree + "/", u + "/"], f"W1 up r{rnd}", est={"put": n}, timeout=3600)
-            x = r.run(c, ["ls", u + "/*"], f"W4 ls r{rnd}", est={"put": -(-n // 1000)})
-            r.check(f"W4 ls r{rnd}: {n} keys", len(x.lines) == n, f"{len(x.lines)} lines", c)
-            dl = r.work(c, f"r{rnd}", "w1dl", "x")[:-2]
-            r.run(c, ["cp", u + "/*", dl + "/"], f"W1 down r{rnd}", est={"get": n, "put": -(-n // 1000)}, timeout=3600)
-            got = local_files(dl) if os.path.isdir(dl) else {}
-            bad = [k for i, k in enumerate(sorted(got)) if i % 97 == 0 and md5_file(os.path.join(dl, k)) != md5_file(os.path.join(tree, k))]
-            r.check(f"W1 down r{rnd}: every file intact", len(got) == n and not bad, f"{len(got)} of {n} files, {len(bad)} differ", c)
-            shutil.rmtree(dl, ignore_errors=True)
-            r.run(c, ["cp", w3, r.url(c, f"r{rnd}", "w3.bin")], f"W3 up r{rnd}", est={"put": req_up(size)}, timeout=3600)
-            r.verify_upload(c, r.prefix(c, f"r{rnd}", "w3.bin"), w3, f"W3 up r{rnd}")
-            d3 = r.work(c, f"r{rnd}", "w3.dl")
-            r.run(c, ["cp", r.url(c, f"r{rnd}", "w3.bin"), d3], f"W3 down r{rnd}", est={"get": req_down(size)}, timeout=3600)
-            r.verify_download(c, d3, w3, f"W3 down r{rnd}")
-            if os.path.exists(d3):
-                os.unlink(d3)
+            u, base = r.url(c, f"r{rnd}"), r.prefix(c, f"r{rnd}")
+            # uploads; the trailers client takes the rows whose bodies are streamed (over 256 KiB)
+            if not c.uploads_only:
+                row(c, "W1 up", rnd, ["cp", tree + "/", u + "/w1/"], est={"put": n})
+            row(c, "W2 up", rnd, ["cp", w2 + "/", u + "/w2/"], est={"put": w2n})
+            got = r.remote_keys(base + "/w2/")
+            r.check(f"W2 up r{rnd}: {w2n} objects of {w2mib} MiB", len(got) == w2n and all(o["size"] == w2mib * MiB for o in got.values()),
+                    f"{len(got)} objects", c)
+            row(c, "W3 up", rnd, ["cp", w3, u + "/w3.bin"], est={"put": req_up(os.path.getsize(w3))})
+            r.verify_upload(c, base + "/w3.bin", w3, f"W3 up r{rnd}")
+            if not c.uploads_only:
+                row(c, "W7 pipe", rnd, ["pipe", u + "/w7.bin"], stdin=w7, est={"put": req_up(os.path.getsize(w7))})
+                r.verify_upload(c, base + "/w7.bin", w7, f"W7 pipe r{rnd}")
+                cmds = r.work(c, f"r{rnd}", "w8.txt")
+                with open(cmds, "w") as fh:
+                    fh.write("".join(f"cp {tree}/d00/f{i:04d} {u}/w8/f{i:04d}\n" for i in range(n8)))
+                row(c, "W8 run up", rnd, ["run", cmds], est={"put": n8})
+                r.check(f"W8 run up r{rnd}: {n8} objects", len(r.remote_keys(base + "/w8/")) == n8, "count differs", c)
+                row(c, "W9 cp1", rnd, ["cp", one, u + "/one"], est={"put": 1})
+                # listing
+                x = row(c, "W4 ls", rnd, ["ls", u + "/w1/*"], est=pages)
+                r.check(f"W4 ls r{rnd}: {n} keys", len(x.lines) == n, f"{len(x.lines)} lines", c)
+                row(c, "W10 du", rnd, ["du", u + "/w1/*"], est=pages)
+                row(c, "W9 ls1", rnd, ["ls", u + "/one"], est={"put": 1})
+                x = row(c, "W5 sync warm", rnd, ["sync", tree + "/", u + "/w1/"], est=pages)
+                r.check(f"W5 sync warm r{rnd}: copies nothing", copied(x) == 0, f"{copied(x)} copies", c)
+                # downloads
+                dl = r.work(c, f"r{rnd}", "w1dl", "x")[:-2]
+                row(c, "W1 down", rnd, ["cp", u + "/w1/*", dl + "/"], est={"get": n, "put": pages["put"]})
+                tree_ok(c, f"W1 down r{rnd}", dl, tree, n)
+                d2 = r.work(c, f"r{rnd}", "w2dl", "x")[:-2]
+                row(c, "W2 down", rnd, ["cp", u + "/w2/*", d2 + "/"], est={"get": w2n * 2, "put": 1})
+                tree_ok(c, f"W2 down r{rnd}", d2, w2, w2n)
+                d3 = r.work(c, f"r{rnd}", "w3.dl")
+                row(c, "W3 down", rnd, ["cp", u + "/w3.bin", d3], est={"get": req_down(os.path.getsize(w3))})
+                r.verify_download(c, d3, w3, f"W3 down r{rnd}")
+                d7 = r.work(c, f"r{rnd}", "w7.cat")
+                row(c, "W7 cat", rnd, ["cat", u + "/w7.bin"], stdout=d7, est={"get": req_down(os.path.getsize(w7))})
+                r.verify_download(c, d7, w7, f"W7 cat r{rnd}")
+                for p in (d3, d7):
+                    if os.path.exists(p):
+                        os.unlink(p)
+                row(c, "W6 rm", rnd, ["rm", u + "/w1/*"], est={"put": pages["put"]})
+                r.check(f"W6 rm r{rnd}: nothing left", not r.remote_keys(base + "/w1/"), "keys left", c)
             # not measured: empty the round's prefix with the checker, so storage stays bounded
-            keys = list(r.remote_keys(r.prefix(c, f"r{rnd}") + "/"))
+            keys = list(r.remote_keys(base + "/"))
             for i in range(0, len(keys), 1000):
                 r.s3.delete_objects(r.t.bucket, keys[i:i + 1000])
+    # The criterion: on every row the lean path's CPU is at or below the SDK path's (median of the
+    # rounds, with 10 % and 0.05 s for noise). Wall is bound by the network here.
+    med = {k: statistics.median(v) for k, v in cpu.items()}
+    sdk = next((c for c in r.clients if c.path == "sdk"), None)
+    for (name, c), v in sorted(med.items(), key=lambda kv: (kv[0][0], kv[0][1].name)):
+        if sdk and c.twin(sdk) and not c.trailers and (name, sdk) in med and name not in CPU_EXEMPT:
+            r.check(f"{name}: CPU at or below the sdk path", v <= med[(name, sdk)] * 1.10 + 0.05,
+                    f"{v:.2f} s against {med[(name, sdk)]:.2f} s", c)
 
 
 SCENARIOS = [("S0", s0), ("S1", s1), ("S2", s2), ("S3", s3), ("S4", s4), ("S5", s5), ("S6", s6), ("S7", s7),

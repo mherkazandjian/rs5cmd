@@ -1,0 +1,111 @@
+{
+ "run_id": "dry-20261123T171425Z",
+ "target": "dry",
+ "target_kind": "minio",
+ "scale": "dry",
+ "region_set": true,
+ "addressing": null,
+ "server_version": null,
+ "rs5cmd_bin": "l-p3",
+ "rs5cmd_source": "perf/l-p3 3bc3317 2026-11-22T03:44:05Z",
+ "image": "sha256:7e3b13708dd6b96823aade79c7775711b3fa65dc339a8204d614eed869662831",
+ "cpus": "3,11",
+ "cap_bytes_per_s": 40000000,
+ "load_max": 11.0,
+ "bins": {
+  "l-p3": {
+   "sha256": "736ad3f50f60f126f24cfc340220861329804ce1259e5590b8b843b1fa08aaf5",
+   "size": 17159104,
+   "in_manifest": true,
+   "mtime": "2026-11-22T03:45:43Z"
+  },
+  "s5cmd": {
+   "sha256": "672299fea8941281702bd52a4e51c330a4e39c1540f4bdfc3b4e737823ac2878",
+   "size": 17658008,
+   "in_manifest": true,
+   "mtime": "2026-11-19T11:48:31Z"
+  },
+  "launch": {
+   "sha256": "191181576619b8bb97e7fbc4465f031b0e2a9c62c145eb3fe13396a5927565bc",
+   "size": 815456,
+   "in_manifest": false,
+   "mtime": "2026-11-19T11:45:26Z"
+  }
+ },
+ "clients": [
+  {
+   "name": "rs5cmd-sdk",
+   "bin": "/opt/bins/l-p3",
+   "kind": "rs5cmd",
+   "sha256": "736ad3f50f60f126f24cfc340220861329804ce1259e5590b8b843b1fa08aaf5",
+   "version": "rs5cmd 0.1.0",
+   "flags": [
+    "--data-path=sdk"
+   ],
+   "env": [],
+   "path": "sdk",
+   "trailers": false,
+   "only": null,
+   "uploads_only": false
+  },
+  {
+   "name": "rs5cmd-lean",
+   "bin": "/opt/bins/l-p3",
+   "kind": "rs5cmd",
+   "sha256": "736ad3f50f60f126f24cfc340220861329804ce1259e5590b8b843b1fa08aaf5",
+   "version": "rs5cmd 0.1.0",
+   "flags": [
+    "--data-path=lean"
+   ],
+   "env": [],
+   "path": "lean",
+   "trailers": false,
+   "only": null,
+   "uploads_only": false
+  },
+  {
+   "name": "rs5cmd-lean-tr",
+   "bin": "/opt/bins/l-p3",
+   "kind": "rs5cmd",
+   "sha256": "736ad3f50f60f126f24cfc340220861329804ce1259e5590b8b843b1fa08aaf5",
+   "version": "rs5cmd 0.1.0",
+   "flags": [
+    "--data-path=lean",
+    "--checksum-trailers"
+   ],
+   "env": [],
+   "path": "lean",
+   "trailers": true,
+   "only": [
+    "S1",
+    "S11",
+    "S14"
+   ],
+   "uploads_only": true
+  },
+  {
+   "name": "s5cmd",
+   "bin": "/opt/bins/s5cmd",
+   "kind": "s5cmd",
+   "sha256": "672299fea8941281702bd52a4e51c330a4e39c1540f4bdfc3b4e737823ac2878",
+   "version": "v2.3.0-991c9fb",
+   "flags": [],
+   "env": [],
+   "path": null,
+   "trailers": false,
+   "only": null,
+   "uploads_only": false
+  }
+ ],
+ "started": "2026-11-23T17:14:26Z",
+ "outcome": "finished",
+ "finished": "2026-11-23T17:27:00Z",
+ "seconds": 755,
+ "guard": {
+  "max_conntrack": 101,
+  "load_holds": 2,
+  "load_hold_s": 25,
+  "max_tx_bps": 38385179,
+  "max_rx_bps": 38355765
+ }
+}
