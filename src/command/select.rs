@@ -214,7 +214,7 @@ impl S3 {
             match event {
                 SelectObjectContentEventStream::Records(records) => {
                     if let Some(blob) = records.payload() {
-                        out.write_all(blob.as_ref()).await?;
+                        out.write_all(blob.as_ref()).await.map_err(crate::output::stdout_error)?;
                     }
                 }
                 SelectObjectContentEventStream::End(_) => break,
@@ -223,7 +223,7 @@ impl S3 {
             }
         }
 
-        out.flush().await?;
+        out.flush().await.map_err(crate::output::stdout_error)?;
         Ok(())
     }
 }
@@ -350,7 +350,7 @@ pub async fn run(global: &GlobalOpts, args: SelectArgs) -> anyhow::Result<()> {
     if !url.is_wildcard() && !url.is_bucket() && !url.is_prefix() {
         let mut stdout = tokio::io::stdout();
         s3.select(&url, &query, &mut stdout).await?;
-        stdout.flush().await?;
+        stdout.flush().await.map_err(crate::output::stdout_error)?;
         return Ok(());
     }
 
@@ -433,7 +433,7 @@ async fn run_expanded(
         }
     }
 
-    stdout.flush().await?;
+    stdout.flush().await.map_err(crate::output::stdout_error)?;
 
     if had_error {
         anyhow::bail!("select failed for one or more objects");

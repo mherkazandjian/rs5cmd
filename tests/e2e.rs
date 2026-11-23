@@ -334,9 +334,9 @@ fn large_object_multipart_roundtrip() {
     let bucket = unique_bucket();
     let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
 
-    // 12 MiB > default 8 MiB part size => multipart upload (2 parts) and ranged
-    // download (2 ranges). Byte value depends on position so a mis-ordered or
-    // truncated part is detected.
+    // 12 MiB in 5 MiB parts => multipart upload (3 parts) and ranged download
+    // (3 ranges). Byte value depends on position so a mis-ordered or truncated
+    // part is detected.
     let size = 12 * 1024 * 1024usize;
     let mut data = vec![0u8; size];
     for (i, b) in data.iter_mut().enumerate() {
@@ -1388,16 +1388,15 @@ fn rb_force_dry_run_deletes_nothing() {
         .args(["cp", f.to_str().unwrap(), &s3("/a.txt")])
         .assert()
         .success();
-    // Dry-run deletes nothing. rs5cmd's S3 listing path short-circuits under
-    // --dry-run, so the force-empty loop sees no objects and emits no per-object
-    // would-delete lines; remove_bucket is also a no-op under dry-run. The
-    // command still succeeds and prints the final "rb <url>" line. The real
-    // guarantee -- that nothing is deleted -- is verified by the follow-up ls.
+    // Dry-run deletes nothing: one "(dry-run) rm" line per object, no DeleteObjects
+    // request, and remove_bucket is a no-op. The follow-up ls checks that nothing
+    // was deleted.
     rs5cmd()
         .args(["--dry-run", "rb", "--force", &s3("")])
         .assert()
         .success()
-        .stdout(predicate::str::contains("rb "));
+        .stdout(predicate::str::contains("rb "))
+        .stdout(predicate::str::contains("a.txt"));
     // Object still present and bucket still exists: dry-run deleted nothing.
     rs5cmd()
         .args(["ls", &s3("/")])
@@ -2058,4 +2057,112 @@ fn tree_renders_hierarchy_with_connectors() {
 
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn rm_dry_run_lists_objects() {
+    // #5: `--dry-run rm` with a wildcard printed nothing.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["x1", "x2", "x3"] {
+        std::fs::write(tmp.path().join(f), b"x").unwrap();
+    }
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", tmp.path().to_str().unwrap());
+    rs5cmd().args(["cp", &pattern, &s3("/p/")]).assert().success();
+    let out = rs5cmd()
+        .args(["--dry-run", "rm", &s3("/p/*")])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for f in ["x1", "x2", "x3"] {
+        let line = format!("rm {}", s3(&format!("/p/{f}")));
+        assert!(stdout.contains(&line), "missing {line:?} in {stdout:?}");
+    }
+    rs5cmd()
+        .args(["--json", "--dry-run", "rm", &s3("/p/*")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"dryRun\":true"));
+    // Nothing was deleted.
+    rs5cmd()
+        .args(["ls", &s3("/p/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("x1"))
+        .stdout(predicate::str::contains("x3"));
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn sync_delete_bare_prefix_keeps_subdirectories() {
+    // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
+    // file in a subdirectory although its counterpart existed in the source.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(tmp.path().join("t.txt"), b"t").unwrap();
+    std::fs::write(tmp.path().join("b.log"), b"b").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let t = tmp.path().join("t.txt");
+    let b = tmp.path().join("b.log");
+    rs5cmd().args(["cp", t.to_str().unwrap(), &s3("/p/top.txt")]).assert().success();
+    rs5cmd().args(["cp", b.to_str().unwrap(), &s3("/p/sub/b.log")]).assert().success();
+    let mirror = tmp.path().join("mirror");
+    let m = format!("{}/", mirror.to_str().unwrap());
+    rs5cmd().args(["cp", &s3("/p/*"), &m]).assert().success();
+    assert!(mirror.join("sub/b.log").exists());
+    // An extra file at the top level is still deleted.
+    std::fs::write(mirror.join("extra.txt"), b"e").unwrap();
+    rs5cmd().args(["sync", "--delete", &s3("/p/"), &m]).assert().success();
+    assert!(mirror.join("sub/b.log").exists(), "sub/b.log was deleted");
+    assert!(mirror.join("top.txt").exists());
+    assert!(!mirror.join("extra.txt").exists(), "extra.txt was kept");
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn no_region_configured_skips_instance_metadata() {
+    // #20: with no region set anywhere, the SDK's region chain probed EC2 instance metadata and
+    // waited about 3 s for it to time out. Now the region is us-east-1 or the bucket's own.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    rs5cmd().args(["mb", &format!("s3://{bucket}")]).assert().success();
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("a.txt");
+    std::fs::write(&f, b"a").unwrap();
+    rs5cmd()
+        .args(["cp", f.to_str().unwrap(), &format!("s3://{bucket}/a.txt")])
+        .assert()
+        .success();
+    let none = tmp.path().join("none");
+    let start = std::time::Instant::now();
+    rs5cmd()
+        .env_remove("AWS_REGION")
+        .env_remove("AWS_DEFAULT_REGION")
+        .env_remove("AWS_PROFILE")
+        .env("AWS_CONFIG_FILE", &none)
+        .env("AWS_SHARED_CREDENTIALS_FILE", &none)
+        .args(["ls", &format!("s3://{bucket}/")])
+        .assert()
+        .success();
+    let took = start.elapsed();
+    assert!(took < std::time::Duration::from_millis(1500), "took {took:?}");
+    rs5cmd().args(["rm", &format!("s3://{bucket}/*")]).assert().success();
+    rs5cmd().args(["rb", &format!("s3://{bucket}")]).assert().success();
 }

@@ -18,8 +18,8 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
 - **Transfers** (`cp`/`mv`) in every direction — local↔S3 and S3↔S3 (server-side
   copy) — with wildcard, prefix, and recursive expansion over a concurrency-limited
   worker pool. Large objects use concurrent **multipart upload** and **ranged
-  parallel download** (`--part-size <MiB>`, `--concurrency <N>`); small objects use
-  a single PUT/GET. Server-side S3→S3 copies of objects over the 5 GiB
+  parallel download** (`--part-size <MiB>`, default 50; `--concurrency <N>`, default 5,
+  as s5cmd); smaller objects use a single PUT/GET. Server-side S3→S3 copies of objects over the 5 GiB
   `CopyObject` limit transparently fall back to **multipart `UploadPartCopy`**;
   `--client-copy` streams a remote→remote copy through the client instead.
   `--preserve-timestamps` carries the file mtime across as object metadata.
@@ -48,6 +48,13 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   `HTTP_PROXY` env vars): SOCKS5 (`socks5://`, `socks5h://`) and HTTP `CONNECT`
   (`http://`, `https://`), with optional `user:pass@`. Applies to the default
   transport (not the `--fast` io_uring path).
+- **TLS key exchange** is classic by default (X25519, then P-256 and P-384), as s5cmd's is:
+  v2.3.0, and builds with newer Go too, since s5cmd's `go.mod` keeps Go's post-quantum default
+  off. `--tls-post-quantum` offers the post-quantum hybrid X25519MLKEM768 first, on both
+  transfer paths, and says once on stderr that it makes setting up each TLS connection somewhat
+  slower (not with `--json`). Measured against a local server: about 55 µs more CPU per new
+  connection (290 against 237 µs) and 11-14 µs more wall time; with connections kept alive,
+  10,000 small objects take 1-4 % longer and large transfers are unchanged.
 - **Listing** (`ls`) with `-H/--humanize`, `--storage-class`, `--etag`,
   `--summarize` (totals footer), `--show-fullpath`, `--start-after`, JSON output,
   client-side `--newer-than`/`--older-than` time filters, `--include`/`--exclude`
@@ -158,8 +165,10 @@ rs5cmd [--endpoint-url URL] [--region R] [--profile P] [--json]
   completion <bash|zsh|fish|powershell|elvish>     print a shell completion script
 ```
 
-Large-object knobs (`--part-size`, `--concurrency`) and version flags
-(`--version-id`, `--all-versions`) apply where relevant; see `--help`.
+Large-object knobs (`--part-size`, default 50 MiB, and `--concurrency`, default 5 parts per
+object, both s5cmd's defaults) and version flags (`--version-id`, `--all-versions`) apply where
+relevant; see `--help`. With `--fast`, the part is 8 MiB unless `--part-size` is given: the fast
+path holds a whole part in memory per transfer.
 
 ## io_uring fast path (`--fast`, Linux-only, `fast` feature)
 
@@ -177,7 +186,8 @@ It handles upload, download, S3→S3 server-side copy, and mixed-direction batch
 (only local→local falls back to the default path), and honors `--json`,
 `--dry-run`, `--retry-count`, `mv`, HTTP/HTTPS (rustls; webpki roots by default,
 so it works against real AWS), the standard AWS credential provider chain
-(env → profile → SSO → IMDS), and `--no-verify-ssl` for self-signed endpoints.
+(env → profile → IMDS; SSO profiles with the `sso` feature), and `--no-verify-ssl` for
+self-signed endpoints.
 
 ### Benchmark vs Go s5cmd
 
@@ -221,9 +231,13 @@ for all three; every variant verified 50000/50000 byte-complete round-trips). At
   and moves the data for **5–6× less CPU** (99–120 vs 636 CPU-s). At 1 MiB the
   io_uring path no longer beats the tokio path on upload — its wall-clock edge is
   sharpest on *small* objects and on *download*.
-- **Tradeoff — memory:** rs5cmd buffers each object fully in RAM across 256 workers,
-  so peak RSS is **0.9–1.6 GB** vs Go s5cmd's streaming **73–100 MB**. Lower
-  `--numworkers` to trade throughput for memory.
+- **Tradeoff — memory:** in this run (v0.1.0) rs5cmd buffered each object fully in RAM
+  across 256 workers, so peak RSS was **0.9–1.6 GB** vs Go s5cmd's streaming **73–100 MB**.
+  The default path now streams both ways (files over 256 KiB are read in 128 KiB chunks,
+  downloads are written as they arrive): 5,000 × 1 MiB against the in-memory stub peaks at
+  ~42 MB up and ~79 MB down (s5cmd ~36 / ~52 MB). `--fast` still holds each object, up to its
+  8 MiB part, in memory per transfer in flight: lower `--numworkers` there to trade throughput
+  for memory.
 - **Caveat:** storage here is NVMe (not the bottleneck); MinIO peaked at ~16 of 32
   cores serving PUTs, so the *upload* gap partly reflects how efficiently each
   client drives a busy server, not a pure client ceiling.
@@ -312,6 +326,27 @@ the `test-fast` and `bench` services run with a hardened profile
 (`seccomp-iouring.json` = Docker default + the three `io_uring_*` syscalls). The
 HTTPS / `--no-verify-ssl` checks use a self-signed cert for the `minio-tls`
 service — generate it once with `bench/gen-certs.sh` (the cert is git-ignored).
+
+### Cargo features
+
+Opt-in: `fast` (the io_uring path, Linux), `mount` (FUSE) and `sso`. On by default: `mimalloc`.
+
+- `mimalloc`: mimalloc is the global allocator, faster than the system allocator where rs5cmd
+  makes many small allocations (many small objects, `run`, `ls`, `du`). The process runs with
+  transparent huge pages turned off, as with mimalloc's `MIMALLOC_ALLOW_THP=0`, so small
+  commands stay small where THP is `always`. Build with `--no-default-features` (then add back
+  the features you want) for the system allocator.
+- `sso`: credentials from AWS IAM Identity Center (SSO) profiles (`sso_session` or
+  `sso_start_url` in `~/.aws/config`, as `aws sso login` sets up). Release binaries and
+  packages leave it out; such a profile then fails with an error that names the feature.
+  Build with it:
+
+  ```bash
+  cargo build --release --features sso          # with the fast path: --features "sso fast"
+  ```
+
+  With a release binary, the AWS CLI can hand an SSO profile's credentials over instead:
+  `eval "$(aws configure export-credentials --profile NAME --format env)"`.
 
 ### Testing notes
 

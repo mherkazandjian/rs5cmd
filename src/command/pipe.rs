@@ -26,11 +26,12 @@ use crate::storage::Metadata;
 /// every part except the last to be at least 5 MiB.
 const MIN_PART_SIZE_MIB: usize = 5;
 
-/// Default part size, in MiB, matching the Go implementation's default.
-const DEFAULT_PART_SIZE_MIB: usize = 8;
+/// Default part size, in MiB: s5cmd's `pipe --part-size` default.
+const DEFAULT_PART_SIZE_MIB: usize = 50;
 
-/// Default upload concurrency, matching the Go implementation's default.
-const DEFAULT_CONCURRENCY: usize = 8;
+/// Default upload concurrency: s5cmd's `pipe --concurrency` default. At most this many parts of
+/// `--part-size` are held in memory at once.
+const DEFAULT_CONCURRENCY: usize = 5;
 
 /// Uploads stdin to a remote object. Added here because `pipe` streams from
 /// stdin rather than a file (the existing `S3::upload` only accepts a path).
@@ -467,7 +468,7 @@ pub async fn run(global: &GlobalOpts, args: PipeArgs) -> anyhow::Result<()> {
     s3.put_multipart_reader(&mut stdin, &dst, &metadata, part_size, concurrency)
         .await?;
 
-    println!("pipe {dst}");
+    crate::outln!("pipe {dst}");
     Ok(())
 }
 

@@ -56,6 +56,12 @@ pub struct GlobalOpts {
     #[arg(long, global = true)]
     pub no_verify_ssl: bool,
 
+    /// Offer post-quantum hybrid key exchange (X25519MLKEM768) first in TLS handshakes, --fast
+    /// included. Without it rs5cmd offers X25519, P-256 and P-384 only. It makes setting up each
+    /// TLS connection somewhat slower, which a notice on stderr says (not with --json).
+    #[arg(long, global = true)]
+    pub tls_post_quantum: bool,
+
     /// Print what would be done without actually doing it.
     #[arg(long, global = true)]
     pub dry_run: bool,
@@ -117,7 +123,8 @@ pub struct GlobalOpts {
     #[arg(long, short = 'x', global = true)]
     pub proxy: Option<String>,
 
-    /// Number of concurrent workers for batch operations.
+    /// Number of concurrent workers for batch operations. Also bounds the parts of large
+    /// downloads in flight at once over all objects (256 at least, --concurrency at least).
     #[arg(long, global = true, default_value_t = 256)]
     pub numworkers: usize,
 
@@ -371,13 +378,18 @@ pub async fn run(mut cli: Cli) -> anyhow::Result<()> {
     // Fail fast on an invalid bandwidth limit (incl. a translated `--limitrate`)
     // before any storage work begins (#433).
     cli.global.validate_bandwidth_limits()?;
+    // Key exchange for every TLS connection of the run, chosen before any client is built.
+    crate::tls::install(cli.global.tls_post_quantum);
+    if cli.global.tls_post_quantum && !cli.global.json {
+        crate::output::err_line(format_args!("{}", crate::tls::POST_QUANTUM_NOTICE));
+    }
 
     let global = cli.global;
     let Some(command) = cli.command else {
         // No subcommand: show help (like `--help`) and exit success.
         use clap::CommandFactory;
         Cli::command().print_help()?;
-        println!();
+        crate::outln!();
         return Ok(());
     };
     match command {
@@ -524,26 +536,26 @@ fn install_completion() -> anyhow::Result<()> {
         std::fs::create_dir_all(parent)?;
     }
     std::fs::write(&comp_path, script.as_bytes())?;
-    println!("wrote completion script to {}", comp_path.display());
+    crate::outln!("wrote completion script to {}", comp_path.display());
 
     if let Some(rc) = rc_path {
         let source_line = format!("source \"{}\"", comp_path.display());
         let existing = std::fs::read_to_string(&rc).unwrap_or_default();
         if existing.contains(&source_line) {
-            println!("{} already sources it; nothing to do", rc.display());
+            crate::outln!("{} already sources it; nothing to do", rc.display());
         } else {
             let mut f = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
                 .open(&rc)?;
             writeln!(f, "\n# rs5cmd shell completion\n{source_line}")?;
-            println!(
+            crate::outln!(
                 "added completion to {} (restart your shell or `source` it)",
                 rc.display()
             );
         }
     } else {
-        println!("fish will auto-load it on next shell start");
+        crate::outln!("fish will auto-load it on next shell start");
     }
     Ok(())
 }

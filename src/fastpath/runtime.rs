@@ -1,4 +1,4 @@
-//! Thread-per-core driver for the fast path: shard a work-list across N pinned
+//! Thread-per-core driver for the fast path: shard a work-list across N
 //! monoio runtimes (one io_uring instance per thread), each running many
 //! in-flight transfers concurrently. No cross-thread synchronization on the hot
 //! path — results flow back over a channel.
@@ -9,7 +9,7 @@ use std::thread;
 
 use futures::stream::{FuturesUnordered, StreamExt};
 
-use super::client::{Endpoint, FastClient};
+use super::client::{has_status, Endpoint, FastClient};
 use super::sign::Signer;
 
 /// A single transfer unit.
@@ -60,6 +60,8 @@ pub struct FastConfig {
     pub dry_run: bool,
     /// If true, delete the source after a successful transfer (move semantics).
     pub is_move: bool,
+    /// The most bytes one GET asks for; larger objects are downloaded as ranges of this size.
+    pub part_size: u64,
 }
 
 /// Runs all transfers across `cfg.cores` threads, returning every outcome.
@@ -94,7 +96,14 @@ pub fn run_transfers(items: Vec<Transfer>, cfg: FastConfig) -> Vec<Outcome> {
         shards[i % cores].push(item);
     }
 
-    let core_ids = core_affinity::get_core_ids().unwrap_or_default();
+    // Shards pinned themselves to the first CPUs of the process mask, so concurrent runs shared
+    // the same CPUs while others sat idle (F47). The scheduler places them now; RS5CMD_FAST_PIN=1
+    // pins as before, for a run that has the machine to itself.
+    let core_ids = if std::env::var_os("RS5CMD_FAST_PIN").is_some_and(|v| v == "1") {
+        core_affinity::get_core_ids().unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     let (tx, rx) = mpsc::channel::<Outcome>();
     let mut handles = Vec::with_capacity(cores);
 
@@ -110,6 +119,7 @@ pub fn run_transfers(items: Vec<Transfer>, cfg: FastConfig) -> Vec<Outcome> {
         let conc = cfg.per_core_concurrency.max(1);
         let max_retries = cfg.max_retries;
         let is_move = cfg.is_move;
+        let part_size = cfg.part_size;
         let pin = core_ids.get(ci).copied();
 
         handles.push(thread::spawn(move || {
@@ -123,7 +133,7 @@ pub fn run_transfers(items: Vec<Transfer>, cfg: FastConfig) -> Vec<Outcome> {
                 .build()
                 .expect("build monoio runtime (is io_uring blocked by seccomp?)");
             rt.block_on(async move {
-                match FastClient::new(endpoint, signer) {
+                match FastClient::new(endpoint, signer).map(|c| c.with_part_size(part_size)) {
                     Ok(client) => {
                         run_shard(&client, shard, conc, max_retries, is_move, &tx).await
                     }
@@ -230,9 +240,8 @@ async fn do_one(client: &FastClient, item: Transfer, max_retries: u32, is_move: 
         }
         Transfer::Download { bucket, key, local } => {
             async {
-                let bytes =
-                    with_retry(max_retries, &label, || client.get(&bucket, &key)).await?;
-                write_file(&local, bytes).await?;
+                with_retry(max_retries, &label, || download(client, &bucket, &key, &local))
+                    .await?;
                 // For `mv`, delete the remote source after a successful download.
                 if is_move {
                     with_retry(max_retries, &label, || client.delete(&bucket, &key)).await?;
@@ -313,23 +322,100 @@ fn is_retryable(e: &anyhow::Error) -> bool {
 
 /// Reads a whole file asynchronously via io_uring (monoio::fs), so the read
 /// overlaps with in-flight network requests instead of blocking the runtime.
+///
+/// The data goes after the lead the default path's upload bodies keep (`upload_body::buffer`),
+/// which keeps rustls's copy of it into TLS records fast with mimalloc.
 async fn read_file(path: &std::path::Path) -> anyhow::Result<bytes::Bytes> {
+    use monoio::buf::IoBufMut;
     let file = monoio::fs::File::open(path).await?;
     let len = file.metadata().await?.len() as usize;
-    let buf = Vec::with_capacity(len);
-    let (res, mut buf) = file.read_exact_at(buf, 0).await;
+    let buf = crate::storage::upload_body::buffer(len);
+    let lead = buf.len();
+    // The slice covers the `len` bytes after the lead; read_exact_at fills all of it.
+    let slice = buf.slice_mut(lead..lead + len);
+    let (res, slice) = file.read_exact_at(slice, 0).await;
     let _ = file.close().await;
+    let mut buf = slice.into_inner();
     match res {
         Ok(()) => {
-            // SAFETY: read_exact_at filled `len` bytes; reflect that in the Vec.
-            unsafe { buf.set_len(len) };
-            Ok(bytes::Bytes::from(buf))
+            // SAFETY: the lead was initialized by `buffer` and read_exact_at filled the `len`
+            // bytes after it; reflect that in the Vec.
+            unsafe { buf.set_len(lead + len) };
+            Ok(crate::storage::upload_body::bytes(buf))
         }
         Err(e) => Err(e.into()),
     }
 }
 
-/// Writes bytes to a file asynchronously via io_uring (monoio::fs).
+/// Downloads an object a part at a time (see `FastClient::get_part`). Fetched whole, every
+/// object in flight was held in memory (F43: ~4.1 GB RSS for 1 GiB objects, 12 GB for 4 GiB),
+/// and one of 4 GiB or more was a single io_uring write whose length does not fit the 32 bits
+/// monoio gives it, so it failed (#15).
+///
+/// An object that fits in one part is written once its body is complete, so a failed GET
+/// leaves no file. A larger one goes into a temporary file, renamed over `local` once complete
+/// (F03) and removed on an error or a signal (#16).
+async fn download(
+    client: &FastClient,
+    bucket: &str,
+    key: &str,
+    local: &std::path::Path,
+) -> anyhow::Result<()> {
+    let part = client.part_size();
+    let (body, total) = match client.get_part(bucket, key, 0, Some(part)).await {
+        // An empty object: no range fits it.
+        Err(e) if has_status(&e, http::StatusCode::RANGE_NOT_SATISFIABLE) => {
+            client.get_part(bucket, key, 0, None).await?
+        }
+        other => other?,
+    };
+    // No Content-Range (the server sent the whole object), or the object is this one part.
+    let total = match total {
+        Some(t) if t > body.len() as u64 => t,
+        _ => return write_file(local, body).await,
+    };
+    anyhow::ensure!(
+        body.len() as u64 == part,
+        "GET {bucket}/{key}: got {} of the first {part} bytes",
+        body.len()
+    );
+    if let Some(parent) = local.parent() {
+        if !parent.as_os_str().is_empty() && !parent.exists() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let (partial, file) = crate::storage::partial::PartialFile::create(local)?;
+    let file = monoio::fs::File::from_std(file)?;
+    // Each part is written while the next one is fetched.
+    let written = async {
+        let (mut body, mut offset) = (body, 0u64);
+        loop {
+            let next = offset + body.len() as u64;
+            let write = file.write_all_at(body, offset);
+            if next >= total {
+                return anyhow::Ok(write.await.0?);
+            }
+            let len = part.min(total - next);
+            let ((res, _), got) =
+                futures::future::join(write, client.get_part(bucket, key, next, Some(len))).await;
+            res?;
+            let (got, _) = got?;
+            anyhow::ensure!(
+                got.len() as u64 == len,
+                "GET {bucket}/{key}: got {} of {len} bytes at {next}",
+                got.len()
+            );
+            (body, offset) = (got, next);
+        }
+    }
+    .await;
+    let _ = file.close().await;
+    written?;
+    partial.commit()?;
+    Ok(())
+}
+
+/// Writes bytes to a file via io_uring (monoio::fs).
 async fn write_file(path: &std::path::Path, data: bytes::Bytes) -> anyhow::Result<()> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() && !parent.exists() {

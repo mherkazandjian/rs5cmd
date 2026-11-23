@@ -4,11 +4,41 @@ use clap::Parser;
 
 use rs5cmd::command::{self, Cli};
 
+/// mimalloc v3 is faster than glibc's allocator where rs5cmd makes many small allocations
+/// (many small objects, `run`, `ls`, `du`). See `DISABLE_TRANSPARENT_HUGE_PAGES`.
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 /// Exit code returned when the process is interrupted by a termination signal
 /// (SIGINT/Ctrl-C or SIGTERM). 128 + SIGINT(2) = 130, matching the conventional
 /// shell exit code and upstream s5cmd behavior (upstream #615 / PR #863).
 fn interrupt_exit_code() -> u8 {
     130
+}
+
+/// Turns transparent huge pages off for this process (Linux, with mimalloc). mimalloc commits
+/// its memory in large aligned blocks, so where THP is `always` the first touch of a block
+/// faults in a 2 MiB page: a small command would use twice the memory. mimalloc does the same
+/// itself with `MIMALLOC_ALLOW_THP=0`, which it reads as it starts. This runs earlier still,
+/// from the ELF initializers with a priority, so before mimalloc's own initializer (it has none)
+/// and before the Rust runtime's first allocation; from `main` it came too late (`--version`:
+/// 11.0 MB, against 7.3 MB this way). Child processes (a `credential_process` helper) inherit
+/// the setting.
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+#[used]
+#[link_section = ".init_array.00100"]
+static DISABLE_TRANSPARENT_HUGE_PAGES: extern "C" fn() = disable_transparent_huge_pages;
+
+#[cfg(all(feature = "mimalloc", target_os = "linux"))]
+extern "C" fn disable_transparent_huge_pages() {
+    // prctl reads its arguments as unsigned longs, and this option wants the last three zero.
+    let (disable, zero): (libc::c_ulong, libc::c_ulong) = (1, 0);
+    // SAFETY: PR_SET_THP_DISABLE takes integers only and changes no memory of ours; a kernel
+    // without it fails the call, which is ignored.
+    unsafe {
+        libc::prctl(libc::PR_SET_THP_DISABLE, disable, zero, zero, zero);
+    }
 }
 
 #[tokio::main]
@@ -21,32 +51,61 @@ async fn main() -> ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
+    // `println!`/`eprintln!` panic when their pipe is closed. Result lines don't use them (see
+    // rs5cmd::output), but any other such write ends the process as quietly as a result line
+    // does (#7). Other panics first flush the result lines they can.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let p = info.payload();
+        let msg = p
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| p.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if msg.starts_with("failed printing to std") && msg.contains("Broken pipe") {
+            rs5cmd::output::die_of_broken_pipe();
+        }
+        rs5cmd::output::flush_after_panic();
+        default_hook(info);
+    }));
+
     let cli = Cli::parse();
 
     // Best-effort: raise the open-file soft limit and warn if it is likely too
     // low for the configured parallelism (upstream issue #390). `--concurrency`
-    // is a per-`cp`/`sync` flag (default 8); use that default for the estimate.
-    rs5cmd::rlimit::setup_nofile_limits(cli.global.numworkers, 8);
+    // is a per-`cp`/`sync` flag; use its default for the estimate.
+    rs5cmd::rlimit::setup_nofile_limits(
+        cli.global.numworkers,
+        rs5cmd::storage::DEFAULT_CONCURRENCY,
+    );
+    // Download parts in flight over every object at once: --numworkers, 256 at least (and raised
+    // to an object's --concurrency when that is larger).
+    rs5cmd::storage::s3::set_download_parts_in_flight(cli.global.numworkers);
 
     // Race the command against termination signals so that a Ctrl-C (SIGINT) or
     // SIGTERM cancels the in-flight work and exits with code 130 instead of
     // hanging or returning an arbitrary status.
-    tokio::select! {
+    let code = tokio::select! {
         biased;
 
         _ = wait_for_signal() => {
-            eprintln!("interrupted");
+            rs5cmd::storage::remove_partial_downloads();
+            rs5cmd::output::err_line(format_args!("interrupted"));
             ExitCode::from(interrupt_exit_code())
         }
 
         res = command::run(cli) => match res {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                let msg = rs5cmd::error::format_error(&e);
+                rs5cmd::output::err_line(format_args!("error: {msg}"));
                 ExitCode::FAILURE
             }
         }
-    }
+    };
+    // Result lines are buffered (rs5cmd::output::line).
+    rs5cmd::output::flush();
+    code
 }
 
 /// Resolves when the process receives a termination signal. Handles Ctrl-C

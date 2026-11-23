@@ -24,11 +24,9 @@ use tokio::time::{sleep, Instant};
 pub struct RateLimiter {
     /// Allowed bytes per second (must be > 0).
     rate: u64,
-    /// Earliest instant the next chunk may start, shared across all tasks.
+    /// Earliest instant the next chunk may start, shared across all tasks. It never lags
+    /// behind `now`, so an idle period grants no burst.
     next_time: Mutex<Instant>,
-    /// Maximum burst (bytes). Bounds how far `next_time` may lag behind `now`,
-    /// capping the instantaneous burst granted after an idle period.
-    burst: u64,
 }
 
 impl RateLimiter {
@@ -36,13 +34,9 @@ impl RateLimiter {
     /// it can be cheaply cloned into every worker task. Assumes `rate > 0`
     /// (callers simply do not build a limiter for the "no limit" case).
     pub fn new(rate: u64) -> Arc<Self> {
-        // Allow a burst of up to one second's worth of bytes (but at least a
-        // 5 MiB part) so a single large chunk is never starved.
-        let burst = rate.max(5 * 1024 * 1024);
         Arc::new(RateLimiter {
             rate,
             next_time: Mutex::new(Instant::now()),
-            burst,
         })
     }
 
@@ -69,15 +63,7 @@ impl RateLimiter {
             let now = Instant::now();
 
             // Earliest allowed start for this reservation.
-            let mut start = if *next > now { *next } else { now };
-
-            // Bound how far we may have fallen behind, so an idle period grants
-            // only a limited burst rather than an unbounded catch-up.
-            let max_lag = Duration::from_nanos(div_rate_to_nanos(self.burst, self.rate));
-            if now > start + max_lag {
-                start = now - max_lag;
-            }
-
+            let start = if *next > now { *next } else { now };
             *next = start + cost;
             start
         };

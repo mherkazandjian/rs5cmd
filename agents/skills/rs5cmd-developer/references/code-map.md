@@ -59,6 +59,7 @@ or `--dry-run` therefore changes the output mode for lines running at the same t
 | `url.rs` | `Url::new` / `parse`, `is_remote` / `is_bucket` / `is_prefix` / `is_wildcard`, `absolute`, `relative`, `set_relative`, `join`, `matches`. Ported from the Go URL package, including its path arithmetic |
 | `fs.rs` | Local backend: `stat`, `list` (`expand_glob`, `walk_dir`), `delete`, `copy`. Local wildcards go through the `glob` crate (shell rules: `*` does not cross `/`), while S3 wildcards are matched by regex in `Url::matches` (`*` crosses `/`) |
 | `s3.rs` | `S3::new` builds the SDK client: credentials chain, region, endpoint (`S3_ENDPOINT_URL` fallback is here), addressing style, proxy connector, TLS (`load_ca_bundle`, no-verify), retry count, limiters. Then `upload` (`upload_single`, `upload_multipart`), `download` (`download_single`, `download_remaining_parts`), `copy` (`copy_object_single`, `copy_multipart`, `client_copy`, `client_copy_to`), listing (`list_v2`, `list_objects_v1`, `list_object_versions`), `multi_delete` / `delete_chunk`, bucket calls |
+| `upload_body.rs` | Upload bodies over 256 KiB (`file_range`): 128 KiB chunks read on the blocking pool under one 4 MiB budget for the whole process. `buffer` / `bytes` (also used for `upload_single`'s whole-file bodies) leave a 64-byte `LEAD` before the data, which keeps TLS uploads fast with mimalloc: read the comment on `LEAD` before changing it |
 
 `list` returns an `mpsc::Receiver<Object>`; an entry with `err` set is an error in the stream,
 not a panic. Consumers must check `obj.err`.
@@ -95,6 +96,7 @@ ACL, content type and the other copy flags are ignored there.
 | `s3cfg.rs` | `parse_ini`, `translate_s3cfg` → `Translated` (values plus warnings), `parse_byte_rate` |
 | `error.rs` | `JobError`, `is_cancellation`, `is_emfile`, `format_error` |
 | `strutil.rs` | `wildcard_to_regexp` and friends, ported from s5cmd |
+| `tls.rs` | `provider()`: the rustls provider (aws-lc-rs) both paths' TLS clients take; `install(post_quantum)` from `command::run` sets its key exchange groups (`--tls-post-quantum`) |
 | `bin/s3stub.rs` | Stateless S3 stub for benchmarks (feature `bench-stub`) |
 
 ## Tests

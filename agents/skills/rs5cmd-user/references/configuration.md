@@ -54,7 +54,11 @@ rs5cmd uses the AWS SDK default credential chain, in this order:
 2. The shared files `~/.aws/credentials` and `~/.aws/config`. Choose a profile with
    `--profile NAME` or `AWS_PROFILE`. Point at another credentials file with
    `--credentials-file PATH` (it sets `AWS_SHARED_CREDENTIALS_FILE`).
-3. SSO, web identity, and container or instance metadata, as configured for the SDK.
+3. Web identity, and container or instance metadata, as configured for the SDK. SSO (IAM
+   Identity Center) profiles only in builds with the `sso` feature, which release binaries and
+   packages leave out: there such a profile fails with an error that names the feature, and
+   `eval "$(aws configure export-credentials --profile NAME --format env)"` puts its
+   credentials in the environment instead.
 
 Keys found in a `--s3cfg` file or in `~/.rs5cmd` are used only when the three environment
 variables in step 1 are not already set.

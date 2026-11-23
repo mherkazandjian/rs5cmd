@@ -1,8 +1,16 @@
 //! Storage abstraction over local filesystem and S3.
 
 pub mod fs;
+pub(crate) mod partial;
+
+/// Removes the temporary files of downloads still in progress, for a process that was
+/// interrupted (SIGINT, SIGTERM) and is about to exit.
+pub fn remove_partial_downloads() {
+    partial::remove_pending();
+}
 pub mod s3;
 pub mod url;
+pub(crate) mod upload_body;
 
 use std::fmt;
 use std::sync::Arc;
@@ -217,11 +225,11 @@ pub struct Options {
     pub download_limiter: Option<Arc<RateLimiter>>,
 }
 
-/// Default multipart part size (bytes). Mirrors a common 8 MiB default and is
-/// safely above S3's 5 MiB minimum part size.
-pub const DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
-/// Default per-object part concurrency.
-pub const DEFAULT_CONCURRENCY: usize = 8;
+/// Default multipart part size (bytes): 50 MiB, s5cmd's `--part-size` default (`cp`, `mv`,
+/// `sync`, `pipe`). Objects up to it are one PUT or GET.
+pub const DEFAULT_PART_SIZE: u64 = 50 * 1024 * 1024;
+/// Default per-object part concurrency: 5, s5cmd's `--concurrency` default.
+pub const DEFAULT_CONCURRENCY: usize = 5;
 
 impl Default for Options {
     fn default() -> Self {

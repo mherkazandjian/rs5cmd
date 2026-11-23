@@ -80,13 +80,20 @@ rs5cmd ls                                                 # lists buckets
 
 - **Credentials** come from the AWS SDK default chain: environment variables, the shared
   `~/.aws/credentials` and `~/.aws/config` files (`--profile NAME`, `--credentials-file PATH`),
-  SSO, and container or instance metadata.
+  and container or instance metadata. SSO (IAM Identity Center) profiles need a build with the
+  `sso` feature; release binaries and packages leave it out. With those, run
+  `eval "$(aws configure export-credentials --profile NAME --format env)"` first.
 - **Endpoint**, first match wins: `--endpoint-url`, `AWS_ENDPOINT_URL`, a `--s3cfg` file,
   `~/.rs5cmd`, then `S3_ENDPOINT_URL`. With a custom endpoint, requests use path-style
   addressing unless `--addressing-style virtual` is given.
 - **Region**: `--region` or `AWS_REGION`, else the profile, else `us-east-1`.
 - **TLS**: `--ca-certs-file bundle.pem` trusts a private CA. `--no-verify-ssl` turns off
-  certificate and hostname checks; use it only for a trusted test endpoint.
+  certificate and hostname checks; use it only for a trusted test endpoint. Key exchange is
+  classic (X25519, P-256, P-384) unless `--tls-post-quantum` is given, which offers the
+  post-quantum hybrid X25519MLKEM768 first, `--fast` included. That makes setting up each TLS
+  connection somewhat slower (about 22 % more CPU per new connection; 1-4 % on 10,000 small
+  objects, nothing on large transfers), and prints a notice saying so on stderr (none with
+  `--json`).
 - **From s3cmd**: `rs5cmd --s3cfg ~/.s3cfg ls` uses an s3cmd config for one run.
   `rs5cmd import-s3cfg ~/.s3cfg` saves it for later runs. It writes `~/.rs5cmd` and replaces
   the `[default]` profile in `~/.aws/credentials`; pass `--profile NAME` or `--no-credentials`
@@ -161,7 +168,8 @@ rs5cmd cp 'data/*' s3://bucket/data/
 rs5cmd cp 's3://bucket/data/*' ./restore/
 rs5cmd cp --exclude '*.tmp' --include '*.parquet' 'data/*' s3://bucket/data/
 
-# Large objects: multipart above --part-size MiB, --concurrency parts per object
+# Large objects: multipart above --part-size MiB (default 50), --concurrency parts per object
+# (default 5); the defaults are s5cmd's
 rs5cmd cp --part-size 64 --concurrency 16 big.bin s3://bucket/big.bin
 
 # Bucket to bucket (server-side copy), then a move
@@ -248,8 +256,10 @@ Full list with details and workarounds: [known issues](references/known-issues.m
   inside a wildcard source fails. `cp --links` stores links as placeholder objects instead.
 - **Uploads are `application/octet-stream`** unless `--content-type` is given. `cp` and `sync`
   do not guess the type from the file extension.
-- **Memory grows with `--numworkers`.** The default of 256 workers can use over 1 GB with
-  megabyte-sized objects. Lower it on small machines.
+- **`--fast` memory grows with `--numworkers`.** It holds each object (up to its 8 MiB part)
+  in memory per transfer in flight, so the default of 256 workers can use over 1 GB with
+  megabyte-sized objects. Lower it on small machines. The default path streams instead (tens of
+  MB for 256 transfers of 1 MiB objects).
 - Tested against MinIO only. Check behaviour on real AWS S3 before relying on multipart edge
   cases, versioning, encryption, cross-region copies or dual-stack endpoints.
 
@@ -263,9 +273,9 @@ comparison follow s5cmd. Main differences between rs5cmd v0.1.0 and s5cmd v2.3:
   `--metadata`, `--metadata-directive`, `--show-progress`, `--no-follow-symlinks`.
 - Missing elsewhere: `rm --all-versions`, the global `--log` and `--stat`, the `-r` short flag,
   and the `version` command (use `--version`; set `RUST_LOG=debug` for logs).
-- Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. `cp`
-  defaults are `--part-size 8` and `--concurrency 8` (s5cmd: 50 and 5). Region and endpoint
-  per side are global flags.
+- Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. Region
+  and endpoint per side are global flags. `cp --fast` uses 8 MiB parts unless `--part-size` is
+  given (the default path uses s5cmd's 50).
 - Added: `tree`, `mount`, `import-s3cfg` and `--s3cfg`, `cp --fast`, several sources in one
   `cp`, `--if-none-match`, `--links`, `--client-copy`, `--preserve-timestamps`, `sync --checksum`
   and `--max-delete`, `rb --force`, `ls --newer-than` / `--older-than` / `--summarize`,

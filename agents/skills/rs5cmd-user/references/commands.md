@@ -41,6 +41,7 @@ Accepted before or after the command name.
 | `--source-endpoint-url`, `--destination-endpoint-url` | Endpoint for one side |
 | `--use-dualstack-endpoint`, `--use-fips-endpoint` | AWS endpoint variants; no effect with a custom endpoint |
 | `--no-verify-ssl` | Skip TLS certificate and hostname checks |
+| `--tls-post-quantum` | Offer the post-quantum hybrid X25519MLKEM768 first in the TLS key exchange (default: X25519, P-256, P-384), on both engines. Each new TLS connection then costs a little more; a notice on stderr says so (not with `--json`) |
 | `--ca-certs-file PEM` | Trust extra CA certificates; ignored with `--no-verify-ssl` |
 | `-x`, `--proxy URL` | `socks5://`, `socks5h://`, `http://` or `https://[user:pass@]host:port` |
 | `--request-payer requester` | For requester-pays buckets |
@@ -136,8 +137,8 @@ destination must be a bucket, a prefix ending in `/`, or a local directory.
 
 | Flag | Meaning |
 |---|---|
-| `--part-size MiB` | Multipart part size. Default 8, minimum 5. Files up to this size use one PUT |
-| `--concurrency N` | Parts in flight per object. Default 8 |
+| `--part-size MiB` | Multipart part size. Default 50 (s5cmd's), minimum 5. Files up to this size use one PUT. `--fast` uses 8 unless it is given |
+| `--concurrency N` | Parts in flight per object. Default 5 (s5cmd's) |
 | `--storage-class CLASS` | For example `STANDARD_IA`, `GLACIER` |
 | `--acl ACL` | Canned ACL, for example `bucket-owner-full-control` |
 | `--content-type TYPE` | Default for uploads is `application/octet-stream` |
@@ -231,7 +232,7 @@ is concatenated in key order. A local source must be a single file. Flag: `--ver
 `rs5cmd pipe [OPTIONS] <s3://bucket/key>` uploads stdin, as a multipart upload when the input
 fills at least one part. Without `--content-type`, the type is guessed from the key's extension.
 
-Flags: `-p/--part-size MiB` (default 8), `-c/--concurrency N` (default 8), `--storage-class`,
+Flags: `-p/--part-size MiB` (default 50), `-c/--concurrency N` (default 5), `--storage-class`,
 `--acl`, `--content-type`, `--content-encoding`, `--content-disposition`, `--cache-control`,
 `--sse AES256|aws:kms`, `--sse-kms-key-id ID`.
 
@@ -240,8 +241,9 @@ pg_dump mydb | gzip | rs5cmd pipe --content-encoding gzip s3://bucket/db/mydb.sq
 ```
 
 Input shorter than one part is sent as a single PUT. The part size is fixed for the whole
-stream, so on AWS S3 (at most 10,000 parts per upload) the default 8 MiB parts cap a stream at
-about 78 GiB. Raise `--part-size` for longer streams.
+stream, so on AWS S3 (at most 10,000 parts per upload) the default 50 MiB parts cap a stream at
+about 488 GiB. Raise `--part-size` for longer streams. Memory holds the `--concurrency` parts in
+flight and the one being read: about 300 MiB by default.
 
 ## presign
 

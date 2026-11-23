@@ -40,12 +40,13 @@ pub struct CpArgs {
     #[arg(long)]
     pub fast: bool,
 
-    /// Multipart part size in MiB for large objects (min 5).
-    #[arg(long, default_value_t = 8)]
-    pub part_size: u64,
+    /// Multipart part size in MiB for large objects (min 5) [default: 50, as s5cmd; with --fast:
+    /// 8, the largest object --fast transfers whole]
+    #[arg(long, value_name = "MIB")]
+    pub part_size: Option<u64>,
 
-    /// Concurrent parts per large object (multipart upload / ranged download).
-    #[arg(long, default_value_t = 8)]
+    /// Concurrent parts per large object (multipart upload / ranged download), as s5cmd.
+    #[arg(long, default_value_t = crate::storage::DEFAULT_CONCURRENCY)]
     pub concurrency: usize,
 
     /// Copy the given source object version id (single-object remote source).
@@ -140,7 +141,9 @@ impl CpArgs {
 
 pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Result<()> {
     let mut opts = global.storage_options();
-    opts.part_size = args.part_size.max(5).saturating_mul(1024 * 1024);
+    if let Some(mib) = args.part_size {
+        opts.part_size = mib.max(5).saturating_mul(1024 * 1024);
+    }
     opts.concurrency = args.concurrency.max(1);
     opts.preserve_timestamps = args.preserve_timestamps;
     opts.client_copy = args.client_copy;
@@ -182,37 +185,59 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let excludes = patterns_with_files(&args.exclude, &args.exclude_from)?;
     let filters = Filters::new(&includes, &excludes)?;
 
-    // Expand every source through the existing single-source logic and collect
-    // all (src, dst) pairs so they share one client and one worker pool.
-    let mut pairs: Vec<(Url, Url)> = Vec::new();
-    for raw in src_raws {
-        let src = Url::new(
-            raw,
-            crate::storage::url::UrlOptions {
-                version_id: args.version_id.clone(),
-                all_versions: args.all_versions,
-                ..Default::default()
-            },
-        )
-        .map_err(|e| anyhow::anyhow!(e))?;
-        let expanded = expand_sources(&src, &dst, &opts, args.follow_symlinks, &filters).await?;
-        pairs.extend(expanded);
-    }
+    let srcs: Vec<Url> = src_raws
+        .iter()
+        .map(|raw| {
+            Url::new(
+                raw,
+                crate::storage::url::UrlOptions {
+                    version_id: args.version_id.clone(),
+                    all_versions: args.all_versions,
+                    ..Default::default()
+                },
+            )
+            .map_err(|e| anyhow::anyhow!(e))
+        })
+        .collect::<anyhow::Result<_>>()?;
+
+    // Pairs stream from a listing task through a bounded channel while transfers run (F13);
+    // collecting them all first held every (source, destination) pair in memory at once.
+    // (`--fast` may replace them with the pairs it collected and declined.)
+    #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
+    let mut pairs =
+        Pairs::new(srcs.clone(), dst.clone(), opts.clone(), args.follow_symlinks, filters);
 
     // Any remote side present means we need an S3 client. Use the first source
     // (or the destination) that is remote as the config anchor.
-    let any_src_remote = pairs.iter().any(|(s, _)| s.is_remote());
+    let any_src_remote = srcs.iter().any(|s| s.is_remote());
     let dst_remote = dst.is_remote();
+    let anchor = srcs.iter().find(|s| s.is_remote()).unwrap_or(&dst);
 
     // io_uring fast path: dispatch small-object upload/download/server-side-copy
     // sets (any mix as long as each pair touches a remote) to the per-core
     // monoio engine. Falls back to the default path for local->local.
+    #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
+    let mut fast_failed = false;
     if args.fast {
         #[cfg(feature = "fast")]
         {
-            if let Some(r) = try_fast_path(global, &pairs, is_move, op).await? {
-                return r;
+            // The fast path shards a complete list, so it still collects first.
+            let mut all = Vec::new();
+            while let Some(p) = pairs.next().await {
+                all.push(p);
             }
+            pairs.finish().await?;
+            let fast_part = args
+                .part_size
+                .map_or(FAST_DEFAULT_PART_SIZE, |mib| mib.max(5).saturating_mul(1024 * 1024));
+            match try_fast_path(global, &mut all, fast_part, is_move, op).await? {
+                Some(r) if all.is_empty() => return r,
+                Some(r) => fast_failed = r.is_err(),
+                None => {}
+            }
+            // What it declined (a set with a local->local pair) or left (files larger than a
+            // part) runs on the default path.
+            pairs = Pairs::Known(all.into_iter());
         }
         #[cfg(not(feature = "fast"))]
         eprintln!("warning: --fast ignored (built without the `fast` feature); using default path");
@@ -234,24 +259,14 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let (s3, s3_dst): (Option<Arc<S3>>, Option<Arc<S3>>) = if any_src_remote || dst_remote {
         if sides_differ {
             // Source-anchored client: prefer a remote source pair, else dst.
-            let src_anchor = pairs
-                .iter()
-                .find(|(s, _)| s.is_remote())
-                .map(|(s, _)| s)
-                .unwrap_or(&dst);
             let src_opts = opts.for_side(crate::storage::Side::Source);
             let dst_opts = opts.for_side(crate::storage::Side::Destination);
-            let src_client = Arc::new(S3::new(src_anchor, &src_opts).await?);
+            let src_client = Arc::new(S3::new(anchor, &src_opts).await?);
             let dst_client = Arc::new(S3::new(&dst, &dst_opts).await?);
             (Some(src_client), Some(dst_client))
         } else {
             // Single shared client (fast path). Anchor on whichever side is
             // remote: prefer a remote source pair, otherwise the destination.
-            let anchor = pairs
-                .iter()
-                .find(|(s, _)| s.is_remote())
-                .map(|(s, _)| s)
-                .unwrap_or(&dst);
             (Some(Arc::new(S3::new(anchor, &opts).await?)), None)
         }
     } else {
@@ -269,11 +284,13 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // single core.) The in-flight `JoinSet` is bounded to `workers`, which caps
     // both running tasks *and* buffered completed results — important when the
     // object count is huge.
-    let mut had_error = false;
+    let mut had_error = fast_failed;
     // Count-of-transfers progress bar (no-op in JSON mode / non-TTY stderr).
-    let pb = crate::progress::Progress::new(pairs.len() as u64, op);
+    // The total grows as the listing yields pairs.
+    let pb = crate::progress::Progress::new(0, op);
     let mut set = tokio::task::JoinSet::new();
-    for (s, d) in pairs.into_iter() {
+    while let Some((s, d)) = pairs.next().await {
+        pb.inc_length(1);
         while set.len() >= workers {
             let (s, d, r) = set.join_next().await.unwrap().expect("transfer task panicked");
             report(op, &s, &d, r, &mut had_error);
@@ -305,11 +322,92 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         pb.inc(1);
     }
     pb.finish();
+    // A listing that failed ends the run with its error, after the transfers it already
+    // yielded have finished.
+    pairs.finish().await?;
 
     if had_error {
         anyhow::bail!("one or more {op} operations failed");
     }
     Ok(())
+}
+
+/// How many listed (source, destination) pairs may wait for a transfer slot.
+const PAIRS_QUEUED: usize = 1024;
+
+/// The (source, destination) pairs of a cp or mv, in source order.
+enum Pairs {
+    /// No source expands (one key or file each, as on most lines of a `run` file): the pairs
+    /// are known at once. A listing task and its channel per command made glibc hand memory back
+    /// and fault it in again (+11 % on a 10k-line `run` file).
+    Known(std::vec::IntoIter<(Url, Url)>),
+    /// Listed by a task of its own, through a bounded channel. The task's result is the first
+    /// listing error, if any; it stops early once the receiver is gone.
+    Listed {
+        rx: tokio::sync::mpsc::Receiver<(Url, Url)>,
+        task: tokio::task::JoinHandle<anyhow::Result<()>>,
+    },
+}
+
+impl Pairs {
+    fn new(
+        srcs: Vec<Url>,
+        dst: Url,
+        opts: Options,
+        follow_symlinks: bool,
+        filters: Filters,
+    ) -> Pairs {
+        if !srcs.iter().any(expands) {
+            let known: Vec<(Url, Url)> = srcs
+                .iter()
+                .map(|s| (s.clone(), resolve_single_dest(s, &dst)))
+                .collect();
+            return Pairs::Known(known.into_iter());
+        }
+        let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
+        let task = tokio::spawn(async move {
+            for src in &srcs {
+                if !expand_sources(src, &dst, &opts, follow_symlinks, &filters, &tx).await? {
+                    break;
+                }
+            }
+            Ok(())
+        });
+        Pairs::Listed { rx, task }
+    }
+
+    async fn next(&mut self) -> Option<(Url, Url)> {
+        match self {
+            Pairs::Known(pairs) => pairs.next(),
+            Pairs::Listed { rx, .. } => rx.recv().await,
+        }
+    }
+
+    /// The listing's result: its first error, if any.
+    async fn finish(self) -> anyhow::Result<()> {
+        match self {
+            Pairs::Known(_) => Ok(()),
+            Pairs::Listed { rx, task } => {
+                drop(rx);
+                task.await.expect("listing task panicked")
+            }
+        }
+    }
+}
+
+/// Whether a source expands into several (source, destination) pairs: a wildcard, a bucket or
+/// prefix, a local directory, or every version of a key.
+fn expands(src: &Url) -> bool {
+    if src.is_wildcard() {
+        true
+    } else if src.is_remote() {
+        src.all_versions || src.is_bucket() || src.is_prefix()
+    } else {
+        // Local: a directory expands.
+        std::fs::metadata(src.absolute())
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+    }
 }
 
 /// Prints the per-transfer result line, tracking whether any failed.
@@ -331,15 +429,20 @@ fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut boo
     }
 }
 
-/// Determines whether the source expands to multiple objects, and builds the
-/// list of (source, destination) URL pairs to copy.
+/// Determines whether the source expands to multiple objects, and sends its
+/// (source, destination) pairs to `out`. Returns false if the receiver is gone.
 async fn expand_sources(
     src: &Url,
     dst: &Url,
     opts: &Options,
     follow_symlinks: bool,
     filters: &Filters,
-) -> anyhow::Result<Vec<(Url, Url)>> {
+    out: &tokio::sync::mpsc::Sender<(Url, Url)>,
+) -> anyhow::Result<bool> {
+    if !expands(src) {
+        let dst_url = resolve_single_dest(src, dst);
+        return Ok(out.send((src.clone(), dst_url)).await.is_ok());
+    }
     let client = new_client(src, opts).await?;
 
     // `--all-versions` against a single remote key: route the source through the
@@ -348,28 +451,16 @@ async fn expand_sources(
     // collide (#762). `src.all_versions` makes `list()` dispatch to the version
     // lister, where every emitted object carries its `version_id`.
     if src.is_remote() && src.all_versions && !src.is_wildcard() {
-        return expand_all_versions(client.as_ref(), src, dst, follow_symlinks).await;
-    }
-
-    let is_multi = if src.is_wildcard() {
-        true
-    } else if src.is_remote() {
-        src.is_bucket() || src.is_prefix()
-    } else {
-        // Local: a directory expands.
-        std::fs::metadata(src.absolute())
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-    };
-
-    if !is_multi {
-        let dst_url = resolve_single_dest(src, dst);
-        return Ok(vec![(src.clone(), dst_url)]);
+        for pair in expand_all_versions(client.as_ref(), src, dst, follow_symlinks).await? {
+            if out.send(pair).await.is_err() {
+                return Ok(false);
+            }
+        }
+        return Ok(true);
     }
 
     // Expand by listing.
     let mut rx = client.list(src, follow_symlinks);
-    let mut pairs = Vec::new();
     while let Some(obj) = rx.recv().await {
         if let Some(err) = obj.err {
             // A per-entry listing error (e.g. a broken symlink) must not abort
@@ -389,9 +480,11 @@ async fn expand_sources(
         // Destination keeps the source's relative layout under dst as a prefix.
         let rel = obj_url.relative();
         let dst_url = dst.join(&rel);
-        pairs.push((obj_url, dst_url));
+        if out.send((obj_url, dst_url)).await.is_err() {
+            return Ok(false);
+        }
     }
-    Ok(pairs)
+    Ok(true)
 }
 
 /// Expands a single remote `--all-versions` source into one (source, dest) pair
@@ -692,9 +785,9 @@ fn prune_empty_dirs(src: &Url) {
 
 use crate::storage::Storage as _;
 
-/// Resolves AWS credentials + region via the default provider chain (env →
-/// profile → SSO → IMDS), honoring `--region`/`--profile`. Returns
-/// (access_key, secret_key, session_token, region).
+/// Resolves AWS credentials via the default provider chain (env → profile → SSO → IMDS) and the
+/// region via `configured_region` (env → profile, no instance metadata), honoring `--region` and
+/// `--profile`. Returns (access_key, secret_key, session_token, region).
 #[cfg(feature = "fast")]
 async fn resolve_credentials(
     global: &GlobalOpts,
@@ -702,10 +795,13 @@ async fn resolve_credentials(
     use aws_config::BehaviorVersion;
     use aws_credential_types::provider::ProvideCredentials;
 
-    let mut loader = aws_config::defaults(BehaviorVersion::latest());
-    if let Some(r) = &global.region {
-        loader = loader.region(aws_sdk_s3::config::Region::new(r.clone()));
-    }
+    // A fixed region, so neither the region nor the credentials chain probes instance metadata
+    // (#20); us-east-1 when none is configured.
+    let region =
+        crate::storage::s3::configured_region(global.region.as_deref(), global.profile.as_deref())
+            .await
+            .unwrap_or_else(|| aws_sdk_s3::config::Region::new("us-east-1"));
+    let mut loader = aws_config::defaults(BehaviorVersion::latest()).region(region);
     if let Some(p) = &global.profile {
         loader = loader.profile_name(p);
     }
@@ -733,14 +829,30 @@ async fn resolve_credentials(
     ))
 }
 
+/// The most the fast path sends or receives in one request: it reads a file to upload whole into
+/// memory, and gets a download's body as one buffer, each in one io_uring operation whose length
+/// must fit 32 bits (#15). Larger files, and any larger than a part, go to the default path (a
+/// multipart upload for those larger than a part); downloads are fetched in ranges of this size
+/// or a part, whichever is smaller.
+#[cfg(feature = "fast")]
+const FAST_PART_MAX: u64 = 1 << 30;
+
+/// The fast path's part without --part-size: 8 MiB, not the default path's 50 MiB (s5cmd's
+/// default), since the fast path holds a whole part in memory per transfer in flight (up to
+/// --numworkers of them): files up to this size go to it, and downloads come in ranges of it.
+#[cfg(feature = "fast")]
+const FAST_DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
+
 /// Attempts to run the (src,dst) pairs on the io_uring fast path. Each pair is
 /// mapped independently to upload / download / server-side copy, so mixed sets
 /// are supported. Returns `Ok(Some(result))` if handled, or `Ok(None)` if the
-/// set contains a local->local pair (caller falls back to the default path).
+/// set contains a local->local pair (caller falls back to the default path). Pairs it does not
+/// take (files larger than `part_size`) stay in `pairs` for the default path.
 #[cfg(feature = "fast")]
 async fn try_fast_path(
     global: &GlobalOpts,
-    pairs: &[(Url, Url)],
+    pairs: &mut Vec<(Url, Url)>,
+    part_size: u64,
     is_move: bool,
     op: &str,
 ) -> anyhow::Result<Option<anyhow::Result<()>>> {
@@ -795,15 +907,26 @@ async fn try_fast_path(
     let per_core_concurrency = (global.numworkers / cores).max(1);
 
     // Map each pair independently to the right transfer variant based on which
-    // side(s) are remote. Mixed-direction sets are supported.
-    let transfers: Vec<Transfer> = pairs
-        .iter()
-        .map(|(s, d)| match (s.is_remote(), d.is_remote()) {
-            (false, true) => Transfer::Upload {
-                local: std::path::PathBuf::from(s.absolute()),
-                bucket: d.bucket.clone(),
-                key: d.path.clone(),
-            },
+    // side(s) are remote. Mixed-direction sets are supported. A file larger than a part, or
+    // than FAST_PART_MAX, is left to the default path: the fast path PUTs a file whole, read
+    // into memory in one io_uring read (F43, #15).
+    let largest = part_size.min(FAST_PART_MAX);
+    let mut rest = Vec::new();
+    let mut transfers = Vec::with_capacity(pairs.len());
+    for (s, d) in std::mem::take(pairs) {
+        let t = match (s.is_remote(), d.is_remote()) {
+            (false, true) => {
+                let local = std::path::PathBuf::from(s.absolute());
+                if std::fs::metadata(&local).is_ok_and(|m| m.len() > largest) {
+                    rest.push((s, d));
+                    continue;
+                }
+                Transfer::Upload {
+                    local,
+                    bucket: d.bucket.clone(),
+                    key: d.path.clone(),
+                }
+            }
             (true, false) => Transfer::Download {
                 bucket: s.bucket.clone(),
                 key: s.path.clone(),
@@ -817,8 +940,13 @@ async fn try_fast_path(
             },
             // local->local was already excluded above.
             (false, false) => unreachable!("local->local excluded from fast path"),
-        })
-        .collect();
+        };
+        transfers.push(t);
+    }
+    *pairs = rest;
+    if transfers.is_empty() {
+        return Ok(Some(Ok(())));
+    }
 
     let cfg = FastConfig {
         endpoint,
@@ -831,11 +959,19 @@ async fn try_fast_path(
         max_retries: global.retry_count,
         dry_run: global.dry_run,
         is_move,
+        part_size: largest,
     };
 
-    // run_transfers blocks (spawns OS threads); keep it off the tokio worker.
-    let outcomes =
-        tokio::task::block_in_place(|| run_transfers(transfers, cfg));
+    // run_transfers blocks until every transfer ends, so it runs on a thread of its own and this
+    // task waits for it: in block_in_place it held the task that also waits for SIGINT and
+    // SIGTERM, which then went unanswered until the last transfer finished (#16).
+    let (done, outcomes) = tokio::sync::oneshot::channel();
+    std::thread::spawn(move || {
+        let _ = done.send(run_transfers(transfers, cfg));
+    });
+    let outcomes = outcomes
+        .await
+        .map_err(|_| anyhow::anyhow!("the fast path's thread ended without a result"))?;
 
     let mut had_error = false;
     for o in &outcomes {
@@ -851,4 +987,34 @@ async fn try_fast_path(
         return Ok(Some(Err(anyhow::anyhow!("one or more fast-path transfers failed"))));
     }
     Ok(Some(Ok(())))
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use crate::command::{Cli, Command};
+
+    fn cp_args(argv: &[&str]) -> super::CpArgs {
+        let cli = Cli::try_parse_from(argv).unwrap();
+        match cli.command {
+            Some(Command::Cp(args)) => args,
+            other => panic!("not cp: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn multipart_defaults_are_s5cmds() {
+        let args = cp_args(&["rs5cmd", "cp", "a", "s3://b/a"]);
+        // No --part-size: the default path's part is the storage default (50 MiB), --fast's 8 MiB.
+        assert_eq!(args.part_size, None);
+        assert_eq!(args.concurrency, 5);
+        assert_eq!(crate::storage::Options::default().part_size, 50 << 20);
+        #[cfg(feature = "fast")]
+        assert_eq!(super::FAST_DEFAULT_PART_SIZE, 8 << 20);
+
+        let args = cp_args(&["rs5cmd", "cp", "--part-size", "16", "--concurrency", "3", "a", "b"]);
+        assert_eq!(args.part_size, Some(16));
+        assert_eq!(args.concurrency, 3);
+    }
 }

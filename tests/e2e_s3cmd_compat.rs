@@ -46,8 +46,8 @@ fn limitrate_throttles_download() {
 
     let tmp = tempfile::tempdir().unwrap();
     let local = tmp.path().join("blob.bin");
-    // 12 MiB payload — larger than the 8 MiB part size, so the download issues
-    // multiple ranged GETs. The aggregate limiter "charges forward" (the first
+    // 12 MiB payload in 5 MiB parts, so the download issues multiple ranged
+    // GETs. The aggregate limiter "charges forward" (the first
     // acquire is free), so a multi-part transfer is needed to observe the
     // throttle: at 4 MB/s a 12 MiB download takes ~2 s.
     std::fs::write(&local, vec![7u8; 12 * 1024 * 1024]).unwrap();
@@ -65,6 +65,8 @@ fn limitrate_throttles_download() {
     rs5cmd()
         .args([
             "cp",
+            "--part-size",
+            "5",
             "--limitrate",
             "4MB",
             &s3("/blob.bin"),
