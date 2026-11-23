@@ -45,12 +45,12 @@ rs5cmd cp --content-type text/html --include '*.html' 'site/*' s3://bucket/site/
 rs5cmd cp --content-type text/css  --include '*.css'  'site/*' s3://bucket/site/
 ```
 
-Copies from S3 to S3 keep the source object's content type.
+Copies from S3 to S3 keep the source object's content type unless `--content-type` is given.
 
-### 2.3 Symbolic links are always followed
+### 2.3 `sync` always follows symbolic links
 
-`--follow-symlinks` is on and cannot be switched off; `--no-follow-symlinks` is rejected as an
-unknown argument.
+`cp` and `mv` follow links unless `--no-follow-symlinks` is given. `sync` has no
+`--no-follow-symlinks` (it is rejected as an unknown argument) and always follows them:
 
 - A link to a file is copied as the file's content.
 - A link to a directory is walked and its files are copied, whether the source is a directory
@@ -59,6 +59,8 @@ unknown argument.
   target, and recreates the link on download. The printed line shows the name without the
   suffix. A link to a directory is stored as a link when a wildcard matches it or it is the
   source itself; inside a directory source, links to directories are still walked.
+- `cp --no-follow-symlinks` skips the links inside a directory source and a source that is a
+  link; a link a wildcard matches is still copied when it points to a file, as in s5cmd.
 
 ### 2.4 `sync` may copy a just-uploaded file once more
 
@@ -100,18 +102,16 @@ not exercised against a real service. Try them on a small sample first:
 
 Compared with s5cmd v2.3:
 
-- `cp` / `mv`: `-n/--no-clobber`, `-s/--if-size-differ`, `-u/--if-source-newer`, `-f/--flatten`,
-  `--raw`, `--sse`, `--sse-kms-key-id`, `--cache-control`, `--expires`, `--metadata`,
-  `--metadata-directive`, `--content-encoding`, `--content-disposition`, `--show-progress`,
-  `--no-follow-symlinks`, `--ignore-glacier-warnings`.
-- `rm --all-versions`; `cat --raw`, `--concurrency`, `--part-size`; `pipe --no-clobber`, `--raw`,
-  `--metadata`, `--expires`.
+- `sync`: `--no-follow-symlinks`, `--raw`, `--sse`, `--sse-kms-key-id`, `--cache-control`,
+  `--expires`, `--content-encoding`, `--content-disposition`, `--metadata`,
+  `--metadata-directive`, `--part-size`, `--concurrency`, `--ignore-glacier-warnings`.
+- `cat --raw`, `--concurrency`, `--part-size`; `pipe --no-clobber`, `--raw`, `--metadata`,
+  `--expires`.
 - Global `--log` and `--stat`, the short flag `-r`, and the `version` command.
 
-Closest substitutes: `cp --if-none-match` for `--no-clobber` when the destination is S3 and the
-service supports conditional writes; `sync --size-only` for `--if-size-differ`; plain `sync` for
-`--if-source-newer`; `pipe` when an upload needs encryption or cache headers and can be
-streamed (`rs5cmd pipe --sse AES256 s3://bucket/key < file`).
+Closest substitute for a `sync` that needs one of the flags: `cp` with the flag and a wildcard
+source, plus `-u` (`--if-source-newer`) or `-s` (`--if-size-differ`, as `sync --size-only`) to
+skip what is already there. It deletes nothing (no `--delete`).
 
 Also absent: bucket policy, tagging and lifecycle commands, customer-provided encryption keys,
 byte-level progress, and preserving file permissions.

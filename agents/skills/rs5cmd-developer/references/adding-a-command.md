@@ -162,9 +162,9 @@ fn name_does_the_thing() {
      sends the set to the default path with a warning (#10). Never let `--fast` drop a flag.
 4. Test it, and add it to the user skill's command reference.
 
-A boolean that defaults to true cannot be switched off as a plain flag (that is the
+A boolean that defaults to true cannot be switched off as a plain flag (that is `sync`'s
 `--follow-symlinks` defect). For an on-by-default behaviour, add the negative flag
-(`--no-<name>`) instead.
+(`--no-<name>`) instead, as `cp --no-follow-symlinks` does.
 
 ## 3. A new global flag
 
