@@ -700,6 +700,7 @@ impl Lean {
                 }
                 Err(_) => return Err(failure),
             }
+            log_retry(req.method, attempt, kind, delay, &failure);
             tokio::time::sleep(delay).await;
             attempt += 1;
         }
@@ -792,6 +793,25 @@ fn judge(resp: HttpResponse, body: bytes::Bytes) -> (Option<ErrorKind>, Option<D
         .and_then(|v| v.parse::<u64>().ok())
         .map(Duration::from_millis);
     (kind, retry_after, Failure::Status(resp, body))
+}
+
+/// One debug line per retry, worded as the SDK's standard strategy words its own (`attempt #N
+/// failed with ...; retrying after ...`), so that one filter counts the retries of both data
+/// paths (`RUST_LOG=debug`); the method, status and S3 error code are fields.
+fn log_retry(method: &str, attempt: u32, kind: ErrorKind, delay: Duration, failure: &Failure) {
+    let (status, code) = match failure {
+        Failure::Status(resp, body) => {
+            let code = parse_error(body).ok().and_then(|p| p.code).unwrap_or_default();
+            (resp.status().as_u16().to_string(), code)
+        }
+        _ => ("none".to_string(), String::new()),
+    };
+    tracing::debug!(
+        method = %method,
+        status = %status,
+        code = %code,
+        "attempt #{attempt} failed with {kind:?}; retrying after {delay:?}"
+    );
 }
 
 /// Whether a body is an S3 error document (`rest_xml_unwrapped_errors::body_is_error`).

@@ -36,7 +36,8 @@ impl Seen {
 type Log = Arc<Mutex<Vec<Seen>>>;
 
 /// Answers one request per connection: `object` (TOTAL bytes, ranges honoured), `flaky` (503
-/// SlowDown on its first GET, then like `object`), anything else 404 NoSuchKey.
+/// SlowDown on its first GET, then like `object`), `busy` (the same with 429 TooManyRequests,
+/// #32), anything else 404 NoSuchKey.
 fn answer(stream: TcpStream, log: &Log) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut first = String::new();
@@ -63,18 +64,26 @@ fn answer(stream: TcpStream, log: &Log) {
         headers,
     };
     let range = seen.header("range").map(str::to_string);
-    let flaky_before = {
+    let gets_before = {
         let mut log = log.lock().unwrap();
         let before = log
             .iter()
-            .filter(|s| s.method == "GET" && s.path == "/bucket/flaky")
+            .filter(|s| s.method == "GET" && s.path == path)
             .count();
         log.push(seen);
         before
     };
     let common = "Connection: close\r\nLast-Modified: Mon, 02 Nov 2026 10:00:00 GMT\r\nETag: \"e\"";
-    let known = path == "/bucket/object" || path == "/bucket/flaky";
-    let mut out = if path == "/bucket/flaky" && method == "GET" && flaky_before == 0 {
+    let known = ["/bucket/object", "/bucket/flaky", "/bucket/busy"].contains(&path.as_str());
+    let mut out = if path == "/bucket/busy" && method == "GET" && gets_before == 0 {
+        let body = "<Error><Code>TooManyRequests</Code><Message>busy</Message></Error>";
+        format!(
+            "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/xml\r\n\
+             Content-Length: {}\r\n{common}\r\n\r\n{body}",
+            body.len()
+        )
+        .into_bytes()
+    } else if path == "/bucket/flaky" && method == "GET" && gets_before == 0 {
         let body = "<Error><Code>SlowDown</Code><Message>slow down</Message></Error>";
         format!(
             "HTTP/1.1 503 Service Unavailable\r\nContent-Type: application/xml\r\n\
@@ -135,9 +144,12 @@ fn start_server() -> (u16, Log) {
 }
 
 fn rs5cmd(port: u16, data_path: &str, args: &[&str]) -> std::process::Output {
-    Command::cargo_bin("rs5cmd")
-        .unwrap()
-        .env("AWS_ACCESS_KEY_ID", "test")
+    command(port, data_path, args).output().unwrap()
+}
+
+fn command(port: u16, data_path: &str, args: &[&str]) -> Command {
+    let mut cmd = Command::cargo_bin("rs5cmd").unwrap();
+    cmd.env("AWS_ACCESS_KEY_ID", "test")
         .env("AWS_SECRET_ACCESS_KEY", "test")
         .env("AWS_REGION", "us-east-1")
         .env_remove("AWS_SESSION_TOKEN")
@@ -151,9 +163,8 @@ fn rs5cmd(port: u16, data_path: &str, args: &[&str]) -> std::process::Output {
             "--data-path",
             data_path,
         ])
-        .args(args)
-        .output()
-        .unwrap()
+        .args(args);
+    cmd
 }
 
 /// (method, path, range) of each request, sorted (parts arrive in any order).
@@ -256,6 +267,47 @@ fn a_throttled_request_is_retried_as_the_sdk_retries_it() {
             .filter(|s| s.method == "GET")
             .count();
         assert_eq!(gets, 2, "{path}: one 503, one retry");
+    }
+}
+
+/// Drops the ANSI colour sequences the log formatter adds around field names.
+fn plain(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            chars.by_ref().find(|&c| c == 'm');
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn a_429_is_retried_on_lean_and_each_retry_is_logged() {
+    // #32: 429 TooManyRequests is a throttling error on the lean path (the SDK path's classifier
+    // for it is on fix/older-bugs). Each lean retry is one debug line, worded as the SDK words
+    // its own, with the method, status and code as fields.
+    let (port, log) = start_server();
+    let dir = tempfile::tempdir().unwrap();
+    let dst = dir.path().join("busy");
+    let args = ["cp", "--part-size", "16", "s3://bucket/busy", dst.to_str().unwrap()];
+    let out = command(port, "lean", &args).env("RUST_LOG", "rs5cmd=debug").output().unwrap();
+    let stderr = plain(&String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "{stderr}");
+    assert!(std::fs::read(&dst).unwrap() == expected(), "wrong content");
+    let gets = log.lock().unwrap().iter().filter(|s| s.method == "GET").count();
+    assert_eq!(gets, 2, "one 429, one retry");
+    let retries: Vec<&str> = stderr.lines().filter(|l| l.contains("retrying after")).collect();
+    assert_eq!(retries.len(), 1, "{stderr}");
+    for part in [
+        "attempt #1 failed with ThrottlingError; retrying after",
+        "method=GET",
+        "status=429",
+        "code=TooManyRequests",
+    ] {
+        assert!(retries[0].contains(part), "{part:?} in {:?}", retries[0]);
     }
 }
 
