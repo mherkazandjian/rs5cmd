@@ -103,3 +103,64 @@ fn sso_profile_without_the_sso_feature_names_the_feature() {
     let hint = "aws configure export-credentials";
     assert!(stderr.contains("error: ") && stderr.contains(hint), "{stderr}");
 }
+
+#[cfg(unix)]
+#[test]
+fn no_follow_symlinks_skips_links() {
+    // #34: s5cmd's --no-follow-symlinks. A walked directory's links and a source that is a link
+    // are skipped; without the flag both are copied as their targets' content.
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("dir");
+    fs::create_dir(&dir).unwrap();
+    fs::write(dir.join("a.txt"), b"a").unwrap();
+    std::os::unix::fs::symlink(dir.join("a.txt"), dir.join("l.txt")).unwrap();
+    let copy = |flags: &[&str], src: &str, out: &str| {
+        rs5cmd()
+            .current_dir(tmp.path())
+            .args(["cp"])
+            .args(flags)
+            .args([src, out])
+            .assert()
+            .success();
+    };
+    copy(&[], "dir/", "followed/");
+    assert!(tmp.path().join("followed/l.txt").exists());
+    copy(&["--no-follow-symlinks"], "dir/", "skipped/");
+    assert_eq!(fs::read(tmp.path().join("skipped/a.txt")).unwrap(), b"a");
+    assert!(!tmp.path().join("skipped/l.txt").exists());
+    copy(&["--no-follow-symlinks"], "dir/l.txt", "single/");
+    assert!(!tmp.path().join("single/l.txt").exists());
+    // Next to a source that expands, too.
+    fs::create_dir(tmp.path().join("other")).unwrap();
+    fs::write(tmp.path().join("other/o.txt"), b"o").unwrap();
+    rs5cmd()
+        .current_dir(tmp.path())
+        .args(["cp", "--no-follow-symlinks", "dir/l.txt", "other", "mixed/"])
+        .assert()
+        .success();
+    assert!(tmp.path().join("mixed/other/o.txt").exists());
+    assert!(!tmp.path().join("mixed/l.txt").exists());
+}
+
+#[test]
+fn show_progress_prints_no_line_per_object() {
+    // #34: --show-progress / --sp, as s5cmd: the bar (on a terminal) instead of a line per copy.
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("a.txt"), b"a").unwrap();
+    for flag in ["--show-progress", "--sp"] {
+        let out = rs5cmd()
+            .current_dir(tmp.path())
+            .args(["cp", flag, "a.txt", &format!("out{flag}/")])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{flag}");
+        assert!(out.stdout.is_empty(), "{flag}: {:?}", String::from_utf8_lossy(&out.stdout));
+        assert_eq!(fs::read(tmp.path().join(format!("out{flag}/a.txt"))).unwrap(), b"a");
+    }
+    rs5cmd()
+        .current_dir(tmp.path())
+        .args(["cp", "--ignore-glacier-warnings", "a.txt", "g/"])
+        .assert()
+        .success()
+        .stdout(predicates::str::contains("g/a.txt"));
+}

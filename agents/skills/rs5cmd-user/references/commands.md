@@ -142,7 +142,18 @@ destination must be a bucket, a prefix ending in `/`, or a local directory.
 | `--storage-class CLASS` | For example `STANDARD_IA`, `GLACIER` |
 | `--acl ACL` | Canned ACL, for example `bucket-owner-full-control` |
 | `--content-type TYPE` | Default for uploads is `application/octet-stream` |
+| `--cache-control`, `--content-encoding`, `--content-disposition` VALUE | That header on the new objects |
+| `--expires TIME` | `Expires` header, an RFC 3339 time such as `2030-01-02T03:04:05Z` |
+| `--metadata KEY=VALUE` | User metadata (`x-amz-meta-KEY`); repeat it for several keys. The key ends at the first `=` |
+| `--metadata-directive COPY\|REPLACE` | S3→S3 copies only (refused for uploads and downloads). Without it, a copy given `--content-type`, one of the headers above or `--metadata` replaces the source's metadata; any other copy keeps it |
+| `--sse AES256\|aws:kms`, `--sse-kms-key-id ID` | Server-side encryption |
 | `--if-none-match` | Write only when the destination does not exist; an existing one is skipped |
+| `-n`, `--no-clobber` | Keep a destination that exists |
+| `-s`, `--if-size-differ` | Overwrite a destination that exists only when the sizes differ |
+| `-u`, `--if-source-newer` | Overwrite a destination that exists only when the source is newer. With several of `-n`, `-s`, `-u`, the last given in this order decides, as in s5cmd. A kept destination prints nothing |
+| `-f`, `--flatten` | Put each matched object directly under the destination, by its base name |
+| `--raw` | No wildcards: `*` and `?` in the sources and the destination are part of the name |
+| `--show-progress`, `--sp` | Progress bar (on a terminal, without `--json`) and no line per copied object; errors still print |
 | `--preserve-timestamps` | Store the local mtime as object metadata on upload; restore it on download |
 | `--links` | Store local symlinks as small `.s5cmdlink` placeholder objects, and recreate them on download (Unix) |
 | `--client-copy` | S3→S3 through the client (download then upload) instead of a server-side copy |
@@ -150,8 +161,10 @@ destination must be a bucket, a prefix ending in `/`, or a local directory.
 | `--all-versions` | Copy every version of one remote key; each lands at `<destination>_<versionid>` |
 | `--remove-empty-dirs` | `mv` local→S3 only: remove source directories that became empty |
 | `--fast` | io_uring engine for small objects; see `fast-path-and-mount.md` |
-| `--follow-symlinks` | Always on; it cannot be turned off |
+| `--follow-symlinks` | On by default |
+| `--no-follow-symlinks` | Skip symbolic links: inside a directory source, and a source that is a link. A link a wildcard matches is still copied when it points to a file, as in s5cmd |
 | `--force-glacier-transfer` | Accepted for compatibility; `cp` copies every storage class anyway |
+| `--ignore-glacier-warnings` | Accepted for compatibility; no effect, for the same reason |
 | filter flags | see top |
 
 ```bash
@@ -162,6 +175,10 @@ rs5cmd cp 'data/*' s3://bucket/data/                # recursive upload
 rs5cmd cp 's3://bucket/data/*' ./data/              # recursive download
 rs5cmd cp 's3://a/x/*' s3://b/x/                    # server-side copy
 rs5cmd cp --if-none-match 'data/*' s3://bucket/data/
+rs5cmd cp -n 'data/*' s3://bucket/data/             # keep the objects that exist
+rs5cmd cp --flatten 'logs/*/*.gz' s3://bucket/all/  # logs/a/x.gz -> all/x.gz
+rs5cmd cp --sse aws:kms --sse-kms-key-id KEY --metadata team=ops f.bin s3://bucket/f.bin
+rs5cmd cp --raw 's3://bucket/what?.txt' out.txt     # a key with a literal `?`
 rs5cmd --source-endpoint-url https://old.example.com \
        --destination-endpoint-url https://new.example.com \
        cp 's3://bucket/*' s3://bucket/              # between two endpoints, via the client
@@ -213,13 +230,18 @@ s3://bucket/p/: s3 bucket/prefix cannot be used for delete operations (forgot wi
 character?)`, exit 1, and nothing is deleted, also when other targets were fine. Write
 `'s3://bucket/p/*'` to delete everything under a prefix.
 
-Flags: `--version-id ID` (one version), `--raw` (treat each target as a literal key: no wildcard
-expansion, so a key ending in `/`, a directory marker, or containing `*` can be removed), filter
-flags.
+Flags: `--version-id ID` (one version), `--all-versions` (every version of each target, delete
+markers included: of one key, or of every key a wildcard matches; not with `--version-id`),
+`--raw` (treat each target as a literal key: no wildcard expansion, so a key ending in `/`, a
+directory marker, or containing `*` can be removed), filter flags.
+
+A deleted version is printed as s5cmd prints it, `rm <url> <version id>` with the URL padded to
+50 columns, and its JSON result has `"version_id"`.
 
 ```bash
 rs5cmd rm s3://bucket/a.txt s3://bucket/b.txt
 rs5cmd rm 's3://bucket/tmp/*'
+rs5cmd rm --all-versions 's3://bucket/tmp/*'        # versioned bucket: every version
 rs5cmd rm --exclude '*.keep' 's3://bucket/tmp/*'
 rs5cmd rm --raw 's3://bucket/weird*name'
 ```

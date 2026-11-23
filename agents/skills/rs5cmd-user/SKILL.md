@@ -207,8 +207,10 @@ rs5cmd cat 's3://bucket/logs/2026-01-*.log' > january.log
   endpoint from `--endpoint-url`, `AWS_ENDPOINT_URL` or a config file. `S3_ENDPOINT_URL` alone is
   not enough: `error: --fast currently requires --endpoint-url`.
 - It handles upload, download and S3→S3 copy, with `mv`, `--json`, `--dry-run`, `--retry-count`,
-  `--no-verify-ssl`, `--numworkers`, `--part-size`, and `--include` / `--exclude`.
-- With a flag it does not honour (`--storage-class`, `--acl`, `--content-type`,
+  `--no-verify-ssl`, `--numworkers`, `--part-size`, `--include` / `--exclude`, `--flatten`,
+  `--raw` and `--no-follow-symlinks`.
+- With a flag it does not honour (`--storage-class`, `--acl`, `--content-type`, the other
+  header, metadata and encryption flags, `-n` / `-s` / `-u`, `--show-progress`,
   `--preserve-timestamps`, `--if-none-match`, `--links`, `--version-id`, `--all-versions`,
   `--concurrency`, `--no-sign-request`, `--proxy`, the bandwidth limits, the per-side region
   and endpoint flags, ...) the command runs on the default engine and prints
@@ -232,7 +234,8 @@ stderr.
 ```
 
 These are a `cp`/`mv`/`rm`/`sync`/`mb`/`rb` result (success, then failure), an `ls` record, a
-`du` summary and a `presign` result. `rm`, `mb` and `rb` results have no `destination`.
+`du` summary and a `presign` result. `rm`, `mb` and `rb` results have no `destination`; an `rm`
+of one version (`--version-id`, `--all-versions`) has `version_id`.
 `--dry-run` adds `"dryRun":true`. A `pipe` result has a `destination` and no `source`. `tree`
 refuses `--json` (use `ls --json`), and `cat` prints the object's bytes.
 In `--json` mode, failed operations are also printed on stdout, so check `success`.
@@ -245,8 +248,9 @@ interrupted (SIGINT or SIGTERM), `101` internal panic. When the reader of the ou
 
 Full list with details and workarounds: [known issues](references/known-issues.md).
 
-- **Symlinks are always followed.** There is no `--no-follow-symlinks`: a link to a directory
-  is walked and its files copied. `cp --links` stores links as placeholder objects instead.
+- **Symlinks are followed by default:** a link to a directory is walked and its files copied.
+  `cp` / `mv --no-follow-symlinks` skip links; `sync` has no such flag and always follows them.
+  `cp --links` stores links as placeholder objects instead.
 - **Uploads are `application/octet-stream`** unless `--content-type` is given. `cp` and `sync`
   do not guess the type from the file extension.
 - **`--fast` memory grows with `--numworkers`.** It holds each object (up to its 8 MiB part)
@@ -261,14 +265,17 @@ Full list with details and workarounds: [known issues](references/known-issues.m
 Commands, wildcard rules, `run` files, `--json`, `--dry-run`, `--numworkers` and the `sync`
 comparison follow s5cmd. Main differences between rs5cmd v0.1.0 and s5cmd v2.3:
 
-- Missing on `cp` / `mv`: `-n/--no-clobber`, `-s/--if-size-differ`, `-u/--if-source-newer`,
-  `-f/--flatten`, `--raw`, `--sse`, `--sse-kms-key-id`, `--cache-control`, `--expires`,
-  `--metadata`, `--metadata-directive`, `--show-progress`, `--no-follow-symlinks`.
-- Missing elsewhere: `rm --all-versions`, the global `--log` and `--stat`, the `-r` short flag,
-  and the `version` command (use `--version`; set `RUST_LOG=debug` for logs).
+- Missing on `sync`: the flags it shares with s5cmd's `cp` beyond `--storage-class`, `--acl`,
+  `--content-type` and the filters: `--no-follow-symlinks`, `--raw`, `--sse`,
+  `--sse-kms-key-id`, `--cache-control`, `--expires`, `--content-encoding`,
+  `--content-disposition`, `--metadata`, `--metadata-directive`, `--part-size`, `--concurrency`
+  (rs5cmd's `cp` has them).
+- Missing elsewhere: the global `--log` and `--stat`, the `-r` short flag, and the `version`
+  command (use `--version`; set `RUST_LOG=debug` for logs).
 - Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. Region
   and endpoint per side are global flags. `cp --fast` uses 8 MiB parts unless `--part-size` is
-  given (the default path uses s5cmd's 50).
+  given (the default path uses s5cmd's 50). An S3→S3 `cp` keeps the source's metadata unless
+  a flag sets the new object's (s5cmd v2.3 replaces it on every such copy).
 - Added: `tree`, `mount`, `import-s3cfg` and `--s3cfg`, `cp --fast`, several sources in one
   `cp`, `--if-none-match`, `--links`, `--client-copy`, `--preserve-timestamps`, `sync --checksum`
   and `--max-delete`, `rb --force`, `ls --newer-than` / `--older-than` / `--summarize`,

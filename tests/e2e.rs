@@ -2451,6 +2451,140 @@ fn sync_twice_copies_nothing_when_the_server_keeps_milliseconds() {
 }
 
 #[test]
+fn cp_sets_metadata_and_a_copy_keeps_or_replaces_it() {
+    // #34: `--metadata` and `--metadata-directive`. A copy keeps the source's metadata unless a
+    // flag sets it (then REPLACE) or the directive says otherwise.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f.txt");
+    std::fs::write(&f, b"meta").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let src = s3("/src.txt");
+    rs5cmd()
+        .args(["cp", "--metadata", "owner=a", "--content-type", "text/plain"])
+        .args([f.to_str().unwrap(), &src])
+        .assert()
+        .success();
+    let head = |key: &str| {
+        let out = rs5cmd().args(["--json", "head", &s3(key)]).output().unwrap();
+        assert!(out.status.success(), "head {key}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let owner = v["metadata"]["owner"].as_str().map(str::to_string);
+        (owner, v["content_type"].as_str().map(str::to_string))
+    };
+    assert_eq!(head("/src.txt"), (Some("a".into()), Some("text/plain".into())));
+    // No flag: S3's COPY, the metadata travels with the object.
+    rs5cmd().args(["cp", &src, &s3("/kept.txt")]).assert().success();
+    assert_eq!(head("/kept.txt"), (Some("a".into()), Some("text/plain".into())));
+    // --metadata: REPLACE.
+    rs5cmd()
+        .args(["cp", "--metadata", "owner=b", &src, &s3("/replaced.txt")])
+        .assert()
+        .success();
+    assert_eq!(head("/replaced.txt").0.as_deref(), Some("b"));
+    // --metadata-directive COPY wins over the flag.
+    rs5cmd()
+        .args(["cp", "--metadata-directive", "COPY", "--metadata", "owner=c"])
+        .args([&src, &s3("/copied.txt")])
+        .assert()
+        .success();
+    assert_eq!(head("/copied.txt").0.as_deref(), Some("a"));
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_overwrite_flags_keep_or_replace_the_destination() {
+    // #34: --no-clobber, --if-size-differ, --if-source-newer, as s5cmd decides them.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f.txt");
+    let back = tmp.path().join("back.txt");
+    let dst = s3("/k.txt");
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    std::fs::write(&f, b"one").unwrap();
+    rs5cmd().args(["cp", f.to_str().unwrap(), &dst]).assert().success();
+    let remote = || {
+        let _ = std::fs::remove_file(&back);
+        rs5cmd().args(["cp", &dst, back.to_str().unwrap()]).assert().success();
+        std::fs::read(&back).unwrap()
+    };
+    let cp = |flag: &str| {
+        let out = rs5cmd().args(["cp", flag, f.to_str().unwrap(), &dst]).output().unwrap();
+        assert!(out.status.success(), "cp {flag}");
+        !out.stdout.is_empty()
+    };
+    // The local file is older than the object from here on; same size, new content.
+    std::fs::write(&f, b"two").unwrap();
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(past).unwrap();
+    assert!(!cp("--no-clobber"), "-n prints nothing when it keeps the object");
+    assert_eq!(remote(), b"one");
+    assert!(!cp("--if-size-differ"));
+    assert!(!cp("--if-source-newer"));
+    assert_eq!(remote(), b"one");
+    std::fs::write(&f, b"three").unwrap();
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(past).unwrap();
+    assert!(cp("--if-size-differ"), "sizes differ: copied");
+    assert_eq!(remote(), b"three");
+    std::fs::write(&f, b"three").unwrap();
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(future).unwrap();
+    assert!(cp("--if-source-newer"), "newer: copied");
+    // A destination that does not exist is always written.
+    let out = rs5cmd()
+        .args(["cp", "-n", f.to_str().unwrap(), &s3("/new.txt")])
+        .output()
+        .unwrap();
+    assert!(out.status.success() && !out.stdout.is_empty());
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_flatten_and_raw() {
+    // #34: --flatten drops the source's directories; --raw takes `?` in a key literally.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("a/b")).unwrap();
+    std::fs::write(src.join("a/b/c.txt"), b"c").unwrap();
+    std::fs::write(src.join("a/d.txt"), b"d").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", src.to_str().unwrap());
+    rs5cmd().args(["cp", "--flatten", &pattern, &s3("/flat/")]).assert().success();
+    let ls = rs5cmd().args(["ls", &s3("/flat/*")]).output().unwrap();
+    let listed = String::from_utf8_lossy(&ls.stdout);
+    assert!(listed.contains(" c.txt") && listed.contains(" d.txt"), "{listed}");
+    assert!(!listed.contains("a/"), "{listed}");
+
+    let f = tmp.path().join("q.txt");
+    std::fs::write(&f, b"literal").unwrap();
+    let key = s3("/p/what?.txt");
+    rs5cmd().args(["cp", "--raw", f.to_str().unwrap(), &key]).assert().success();
+    let out = tmp.path().join("out.bin");
+    rs5cmd().args(["cp", "--raw", &key, out.to_str().unwrap()]).assert().success();
+    assert_eq!(std::fs::read(&out).unwrap(), b"literal", "out.bin is the object, not a directory");
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn sync_delete_bare_prefix_keeps_subdirectories() {
     // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
     // file in a subdirectory although its counterpart existed in the source.

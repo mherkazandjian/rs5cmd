@@ -26,6 +26,11 @@ pub struct RmArgs {
     #[arg(long)]
     pub version_id: Option<String>,
 
+    /// Delete every version of each target, delete markers included: of one key, or of every
+    /// key a wildcard matches. Each deleted version is printed with its version id.
+    #[arg(long)]
+    pub all_versions: bool,
+
     /// Disable wildcard and prefix (trailing-slash) expansion; treat each target
     /// as a single literal key. Lets you delete a directory-marker object such as
     /// `s3://bucket/path/dirobj/` directly. Mirrors upstream s5cmd PR #861.
@@ -67,6 +72,10 @@ fn refused(url: &Url) -> bool {
 pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
     let opts = global.storage_options();
     let mut had_error = false;
+    anyhow::ensure!(
+        !(args.all_versions && args.version_id.is_some()),
+        "it is not allowed to combine \"all-versions\" and \"version-id\" flags"
+    );
 
     // Compile include/exclude filters into regexes once. Inline patterns are
     // combined with any read from `--include-from`/`--exclude-from` files.
@@ -81,6 +90,7 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
             let options = crate::storage::url::UrlOptions {
                 raw: args.raw,
                 version_id: args.version_id.clone(),
+                all_versions: args.all_versions,
                 ..Default::default()
             };
             Url::new(target, options).map_err(|e| anyhow::anyhow!(e))
@@ -97,16 +107,19 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
 
     for url in urls {
 
-        // Collect the concrete object URLs to delete, expanding wildcards. A bare prefix was
-        // refused above; with `--raw` there is no expansion (`is_wildcard` is false), so a key
-        // ending in `/` (a directory marker) takes the single delete.
-        let expand = url.is_wildcard();
+        // Collect the concrete object URLs to delete, expanding wildcards and, with
+        // --all-versions, the versions of a key. A bare prefix was refused above; with `--raw`
+        // there is no wildcard (`is_wildcard` is false), so a key ending in `/` (a directory
+        // marker) takes the single delete.
+        let expand = url.is_wildcard() || (url.is_remote() && url.all_versions);
 
         if !expand {
             // Single concrete object: deleted as-is, never filtered.
             let client = new_client(&url, &opts).await?;
             match client.delete(&url).await {
-                Ok(()) => crate::output::op_success("rm", &url.to_string(), None),
+                Ok(()) => {
+                    crate::output::op_success_version("rm", &url.to_string(), &url.version_id)
+                }
                 Err(e) => {
                     had_error = true;
                     crate::output::op_error("rm", &url.to_string(), None, &format!("{e:#}"));
@@ -127,10 +140,16 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
             // The feeder forwards listed object URLs to the delete channel,
             // skipping any that the include/exclude filters reject.
             let filters = filters.clone();
+            // `--all-versions` of one key: only that key's versions. The listing matches by
+            // prefix (`s3://b/k` also lists `k2`), as s5cmd's does, whose rm then deletes them.
+            let exact = (url.all_versions && !url.is_wildcard()).then(|| url.path.clone());
             let feeder = tokio::spawn(async move {
                 while let Some(obj) = rx.recv().await {
                     if let Some(u) = obj.url {
                         if filters.should_skip(&filter_key(&u)) {
+                            continue;
+                        }
+                        if exact.as_ref().is_some_and(|key| *key != u.path) {
                             continue;
                         }
                         if tx.send(u).await.is_err() {
@@ -142,8 +161,9 @@ pub async fn run(global: &GlobalOpts, args: RmArgs) -> anyhow::Result<()> {
 
             while let Some(obj) = resultrx.recv().await {
                 let key = obj.url.as_ref().map(|u| u.to_string()).unwrap_or_default();
+                let version = obj.url.as_ref().map_or("", |u| u.version_id.as_str());
                 match obj.err {
-                    None => crate::output::op_success("rm", &key, None),
+                    None => crate::output::op_success_version("rm", &key, version),
                     Some(e) => {
                         had_error = true;
                         crate::output::op_error("rm", &key, None, &format!("{e:#}"));
@@ -201,6 +221,14 @@ mod tests {
         // `--raw`: a key ending in `/` is one object (a directory marker); a bucket stays refused.
         assert!(!refused(&url("s3://b/dirobj/", true)));
         assert!(refused(&url("s3://b", true)));
+    }
+
+    #[test]
+    fn all_versions_expands_one_key_and_keeps_the_bare_prefix_refused() {
+        let opts = UrlOptions { all_versions: true, ..Default::default() };
+        let key = Url::new("s3://b/k", opts.clone()).unwrap();
+        assert!(key.all_versions && !key.is_wildcard() && !refused(&key));
+        assert!(refused(&Url::new("s3://b/p/", opts).unwrap()));
     }
 
     #[test]

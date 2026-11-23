@@ -35,12 +35,12 @@ from a config file are exported as `AWS_*` variables only when those are not set
 | File | Notes |
 |---|---|
 | `mod.rs` | `Cli`, `GlobalOpts`, `Command`, `run`. `GlobalOpts::storage_options` is the only bridge from flags to `storage::Options`. `bandwidth_limiters` builds the shared limiters per command. The `completion` command is handled inline in the dispatch |
-| `cp.rs` | `cp` and `mv` (`run(global, args, is_move)`). `expand_sources` turns each source into `(src, dst)` pairs; `copy_one` does one transfer; `try_fast_path` hands the pairs to `fastpath`; `expand_all_versions`, `upload_symlink` / `download_symlink` (`--links`), `prune_empty_dirs` |
+| `cp.rs` | `cp` and `mv` (`run(global, args, is_move)`). `expand_sources` turns each source into `(src, dst)` pairs; `copy_one` does one transfer; `try_fast_path` hands the pairs to `fastpath`; `expand_all_versions`, `upload_symlink` / `download_symlink` (`--links`), `prune_empty_dirs`. `CpArgs::metadata` turns the object-property flags into a `Metadata`; `Listing` carries `--flatten` and `--no-follow-symlinks` into the expansion; `Overwrite` decides `-n` / `-s` / `-u` per pair (a stat of each side) before `copy_one`, and a kept destination is the silent `Skipped` error |
 | `sync.rs` | `collect_source_objects` and `collect_dest_objects` build maps keyed by relative path; the partition into copy / delete sets; `--max-delete` check before any work; copy phase, then delete phase |
 | `sync_strategy.rs` | `SyncStrategy::{SizeOnly, SizeAndModification, Checksum}` and `should_sync` |
 | `filters.rs` | `Filters::should_skip`, `patterns_with_files`; globs become anchored regexes via `strutil` |
 | `ls.rs`, `du.rs`, `tree.rs`, `head.rs`, `cat.rs` | Read-only commands. `ls.rs` also holds the time-filter parsing and `list_buckets` |
-| `rm.rs` | Expands targets, then deletes through `S3::multi_delete` (batches of 1000) or the local backend |
+| `rm.rs` | Refuses a bucket or a bare prefix (`refused`), expands targets (wildcards; `--all-versions` through the versions listing, cut to the one key when there is no wildcard), then deletes through `S3::multi_delete` (batches of 1000, with version ids) or the local backend |
 | `bucket.rs`, `bucket_version.rs` | `mb`, `rb`, `bucket-version` |
 | `pipe.rs`, `presign.rs`, `select.rs`, `head.rs` | Each adds methods to `S3` in its own `impl S3` block (`put_multipart_reader`, `presign`, `select`, `head_object`, ...) |
 | `run.rs` | Reads lines, splits them with `shell_words`, rebuilds argv in `build_argv`, parses a fresh `Cli` and calls `command::run` again for each line |
@@ -58,7 +58,7 @@ or `--dry-run` therefore changes the output mode for lines running at the same t
 | `mod.rs` | `Storage` trait (`stat`, `list`, `delete`, `copy`), `new_client` (picks S3 or local from the URL), `Object`, `ObjectType`, `StorageClass`, `Metadata`, `Options`, `Side`, `Options::for_side` / `sides_differ` |
 | `url.rs` | `Url::new` / `parse`, `is_remote` / `is_bucket` / `is_prefix` / `is_wildcard`, `absolute`, `relative`, `set_relative`, `join`, `matches`. Ported from the Go URL package, including its path arithmetic |
 | `fs.rs` | Local backend: `stat`, `list` (`expand_glob`, `walk_dir`), `delete`, `copy`. Local wildcards go through the `glob` crate (shell rules: `*` does not cross `/`), while S3 wildcards are matched by regex in `Url::matches` (`*` crosses `/`) |
-| `s3.rs` | `S3::new` builds the SDK client: credentials chain, region, endpoint (`S3_ENDPOINT_URL` fallback is here), addressing style, proxy connector, TLS (`load_ca_bundle`, no-verify), retry count and the `TooManyRequests` classifier (429 is throttling, as `SlowDown`; the SDK's own classifiers skip it), limiters. Then `upload` (`upload_single`, `upload_multipart`), `download` (`download_single`, `download_remaining_parts`), `copy` (`copy_object_single`, `copy_multipart`, `client_copy`, `client_copy_to`), listing (`list_v2`, `list_objects_v1`, `list_object_versions`), `multi_delete` / `delete_chunk`, bucket calls |
+| `s3.rs` | `S3::new` builds the SDK client: credentials chain, region, endpoint (`S3_ENDPOINT_URL` fallback is here), addressing style, proxy connector, TLS (`load_ca_bundle`, no-verify), retry count and the `TooManyRequests` classifier (429 is throttling, as `SlowDown`; the SDK's own classifiers skip it), limiters. Then `upload` (`upload_single`, `upload_multipart`), `download` (`download_single`, `download_remaining_parts`), `copy` (`copy_object_single`, `copy_multipart`, `client_copy`, `client_copy_to`), listing (`list_v2`, `list_objects_v1`, `list_object_versions`), `multi_delete` / `delete_chunk`, bucket calls. `object_properties!` sets the object-property headers on a PUT, a multipart Create and a CopyObject alike; `expires_time` parses `--expires` |
 | `upload_body.rs` | Upload bodies over 256 KiB (`file_range`): 128 KiB chunks read on the blocking pool under one 4 MiB budget for the whole process. `buffer` / `bytes` (also used for `upload_single`'s whole-file bodies) leave a 64-byte `LEAD` before the data, which keeps TLS uploads fast with mimalloc: read the comment on `LEAD` before changing it |
 
 `list` returns an `mpsc::Receiver<Object>`; an entry with `err` set is an error in the stream,
@@ -93,7 +93,7 @@ ACL, content type and the other copy flags are ignored there.
 
 | File | Notes |
 |---|---|
-| `output.rs` | Process-global atomics `JSON`, `DRY_RUN`, `COLOR`. `op_success(op, src, dst)`, `op_error(op, src, dst, err)`, `json_line(value)`, `is_json()`, `is_dry_run()`, `paint_*`. In JSON mode `op_error` prints to stdout |
+| `output.rs` | Process-global atomics `JSON`, `DRY_RUN`, `COLOR`. `op_success(op, src, dst)`, `op_success_version(op, src, version_id)` (s5cmd's versioned `rm` line), `op_error(op, src, dst, err)`, `json_line(value)`, `is_json()`, `is_dry_run()`, `paint_*`. In JSON mode `op_error` prints to stdout |
 | `progress.rs` | `Progress::new(total, op)`, `inc`, `finish`. Counts objects, not bytes. A no-op under `--json` or when stderr is not a terminal |
 | `ratelimit.rs` | `RateLimiter::new(bytes_per_sec)` and `acquire(n)`: token bucket shared through `Arc` |
 | `rlimit.rs` | `setup_nofile_limits`, `nofile_warning`, `EMFILE_HINT` |
@@ -109,7 +109,8 @@ ACL, content type and the other copy flags are ignored there.
 |---|---|---|
 | unit tests in `src/**` | always | Pure logic: URL arithmetic, filters, sync strategy, argv rebuild, parsers |
 | `tests/e2e.rs` | endpoint set (else skips) | Most commands against MinIO, through the built binary |
-| `tests/e2e_s3cmd_compat.rs`, `tests/e2e_cp_all_versions.rs` | endpoint set (else skips) | `.s3cfg` handling; `cp --all-versions` |
+| `tests/e2e_s3cmd_compat.rs`, `tests/e2e_cp_all_versions.rs`, `tests/e2e_rm_all_versions.rs` | endpoint set (else skips) | `.s3cfg` handling; `cp --all-versions`; `rm --all-versions` |
+| `tests/cp_object_properties.rs` | always (in-test HTTP server) | The headers and metadata directive `cp` sends for the object-property flags |
 | `tests/e2e_region.rs` | endpoint set (else skips) | Per-side region and endpoint flags |
 | `tests/e2e_fast.rs` | feature `fast`, endpoint set | `cp --fast` round trips |
 | `tests/e2e_mount.rs` | feature `mount`, Linux, endpoint and `/dev/fuse` | FUSE mount |
@@ -122,4 +123,4 @@ entry from both files when it is fixed, and add a regression test with the fix.
 
 | Symptom | Where to look |
 |---|---|
-| `--follow-symlinks` cannot be switched off | Declared as a plain flag with `default_value_t = true` in `CpArgs` and `SyncArgs` |
+| `sync` cannot switch off `--follow-symlinks` | `SyncArgs` declares it as a plain flag with `default_value_t = true` and has no `--no-follow-symlinks`; `CpArgs` shows the fix |

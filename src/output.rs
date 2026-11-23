@@ -123,6 +123,30 @@ pub fn op_success(op: &str, src: &str, dst: Option<&str>) {
     }
 }
 
+/// Emits the success of an operation on one object version (`rm --version-id`, `rm
+/// --all-versions`), as s5cmd: text `[(dry-run) ]op <src padded to 50> <version id>`, JSON with
+/// `"version_id"`. Without a version id it is `op_success(op, src, None)`.
+pub fn op_success_version(op: &str, src: &str, version_id: &str) {
+    if version_id.is_empty() {
+        return op_success(op, src, None);
+    }
+    if is_json() {
+        let mut v = serde_json::json!({
+            "operation": op,
+            "success": true,
+            "source": src,
+            "version_id": version_id,
+        });
+        if is_dry_run() {
+            v["dryRun"] = serde_json::Value::Bool(true);
+        }
+        line(format_args!("{v}"));
+    } else {
+        let marker = if is_dry_run() { "(dry-run) " } else { "" };
+        line(format_args!("{marker}{op} {src:<50} {version_id}"));
+    }
+}
+
 /// Emits a failed operation result (to stderr in text mode, stdout in JSON mode
 /// so it stays machine-parseable alongside successes — matching s5cmd).
 pub fn op_error(op: &str, src: &str, dst: Option<&str>, err: &str) {
