@@ -47,7 +47,7 @@ Accepted before or after the command name.
 | `--request-payer requester` | For requester-pays buckets |
 | `--no-sign-request` | Send requests unsigned, without credentials: anonymous access to public buckets. `cp --fast` then uses the default path |
 | `--numworkers N` | Parallel operations. Default 256 |
-| `--retry-count N` | Retries for transient errors. Default 10 |
+| `--retry-count N` | Retries for transient errors: network errors, 500, 502, 503 and 504, throttling (`503 SlowDown`, `429 TooManyRequests`), with a growing delay. Default 10 |
 | `--limit-upload RATE`, `--limit-download RATE` | Bandwidth cap in bytes per second: `512KB`, `100MB`, `1GB`. One budget shared by all workers of a command |
 | `--limitrate RATE` | Caps both directions; the two flags above override it per direction |
 | `--use-list-objects-v1` | Use ListObjects v1 (for providers without v2) |

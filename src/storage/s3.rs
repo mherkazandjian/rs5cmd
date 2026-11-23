@@ -263,6 +263,63 @@ async fn bucket_region(client: &Client, endpoint: &str, bucket: &str) -> Option<
     r
 }
 
+/// Classifies `429 Too Many Requests` as a throttling error, as `503 SlowDown` is (#32). The SDK
+/// retries throttling only for the codes it lists (`TooManyRequestsException`, not the
+/// `TooManyRequests` S3-compatible servers send) and by status only 500, 502, 503 and 504, so a
+/// 429 failed at once; s5cmd (Go SDK v1) treats any 429 as throttling. Retried like `SlowDown`:
+/// same backoff, same retry quota, at most `--retry-count` times.
+mod too_many_requests {
+    use aws_smithy_runtime_api::client::interceptors::context::InterceptorContext;
+    use aws_smithy_runtime_api::client::retries::classifiers::{
+        ClassifyRetry, RetryAction, RetryClassifierPriority,
+    };
+
+    #[derive(Debug)]
+    pub(super) struct TooManyRequests;
+
+    impl ClassifyRetry for TooManyRequests {
+        fn classify_retry(&self, ctx: &InterceptorContext) -> RetryAction {
+            match ctx.response() {
+                Some(res) if u16::from(res.status()) == 429 => RetryAction::throttling_error(),
+                _ => RetryAction::NoActionIndicated,
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "429 Too Many Requests"
+        }
+
+        fn priority(&self) -> RetryClassifierPriority {
+            RetryClassifierPriority::http_status_code_classifier()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use aws_smithy_runtime_api::client::interceptors::context::Input;
+        use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+        use aws_smithy_types::body::SdkBody;
+        use aws_smithy_types::retry::ErrorKind;
+
+        fn classify(status: u16) -> RetryAction {
+            let mut ctx = InterceptorContext::new(Input::erase(()));
+            let status = status.try_into().unwrap();
+            ctx.set_response(HttpResponse::new(status, SdkBody::empty()));
+            TooManyRequests.classify_retry(&ctx)
+        }
+
+        #[test]
+        fn a_429_is_throttling_and_other_statuses_are_left_to_the_sdk() {
+            assert_eq!(classify(429), RetryAction::retryable_error(ErrorKind::ThrottlingError));
+            for status in [200, 400, 403, 404, 500, 503] {
+                assert_eq!(classify(status), RetryAction::NoActionIndicated, "{status}");
+            }
+        }
+    }
+}
+use too_many_requests::TooManyRequests;
+
 /// The HTTP client of every S3 client in the process, one per distinct (no-verify, proxy, CA
 /// bundle), so they share connection pools: the SDK builds its default client per S3 client, which
 /// opened 10,001 connections for a 10k-line `run` file (#19).
@@ -1250,6 +1307,7 @@ impl S3 {
             aws_config::retry::RetryConfig::standard()
                 .with_max_attempts(opts.max_retries.saturating_add(1)),
         );
+        builder = builder.retry_classifier(TooManyRequests);
 
         let mut client = Client::from_conf(builder.clone().build());
         // No region configured: like s5cmd, ask the bucket where it lives (x-amz-bucket-region)
