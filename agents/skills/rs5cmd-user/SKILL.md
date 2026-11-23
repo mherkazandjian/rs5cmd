@@ -19,26 +19,23 @@ rs5cmd is a Rust port of [s5cmd](https://github.com/peak/s5cmd): one binary that
 moves, deletes and syncs objects between the local filesystem and S3 or S3-compatible storage,
 running many operations in parallel. Project home: <https://github.com/mherkazandjian/rs5cmd>.
 
-Everything here was checked against release **v0.1.0** and its source. The binary is the
-authority: run `rs5cmd --help` or `rs5cmd <command> --help` when a flag matters, and re-read
+Everything here was checked against release **v0.1.0** and its source, and follows the source
+since: bugs fixed after v0.1.0 are no longer described. The binary is the authority: run
+`rs5cmd --help` or `rs5cmd <command> --help` when a flag matters, and re-read
 [known issues](references/known-issues.md) after an upgrade, because several entries are bugs
 that a later release may fix.
 
 ## Working rules
 
-1. **Preview first.** Put `--dry-run` in front of a `cp`, `mv` or `sync` you have not run
-   before and read the `(dry-run) cp <src> <dst>` lines. Check that every destination is where
-   you expect. Preview a wildcard `rm` with `ls` and the same pattern; its dry-run prints
-   nothing.
-2. **Never pass a bare relative directory as a source** (`cp data dst/`, `sync ./data dst/`).
-   In v0.1.0 this maps files to the wrong place and can empty the source files. Write `data/`
-   or `'data/*'`. See [Paths](#paths-wildcards-and-where-things-land).
-3. **Quote wildcards** (`'s3://bucket/logs/*'`) so the shell does not expand them.
-4. **Set a region** (`AWS_REGION` or `--region`), also for MinIO and other custom endpoints.
-   Without one, start-up waits a few seconds on instance-metadata lookups.
-5. **Ask before deleting.** `rm` with a wildcard, `sync --delete`, `mv` and `rb --force` remove
+1. **Preview first.** Put `--dry-run` in front of a `cp`, `mv`, `sync` or `rm` you have not run
+   before and read the `(dry-run) cp <src> <dst>` (or `rm`) lines. Check that every destination
+   is where you expect. See [Paths](#paths-wildcards-and-where-things-land).
+2. **Quote wildcards** (`'s3://bucket/logs/*'`) so the shell does not expand them.
+3. **Set a region** (`AWS_REGION` or `--region`) when you know it. Without one, rs5cmd asks the
+   bucket for its region with one extra request.
+4. **Ask before deleting.** `rm` with a wildcard, `sync --delete`, `mv` and `rb --force` remove
    data. Show the user the preview and get a yes, unless they already told you to proceed.
-6. Do not echo secrets. Use environment variables or a profile, not keys on the command line.
+5. Do not echo secrets. Use environment variables or a profile, not keys on the command line.
 
 ## Install
 
@@ -86,7 +83,8 @@ rs5cmd ls                                                 # lists buckets
 - **Endpoint**, first match wins: `--endpoint-url`, `AWS_ENDPOINT_URL`, a `--s3cfg` file,
   `~/.rs5cmd`, then `S3_ENDPOINT_URL`. With a custom endpoint, requests use path-style
   addressing unless `--addressing-style virtual` is given.
-- **Region**: `--region` or `AWS_REGION`, else the profile, else `us-east-1`.
+- **Region**: `--region` or `AWS_REGION`, else the profile, else the region the bucket reports
+  (one `HeadBucket`), else `us-east-1`.
 - **TLS**: `--ca-certs-file bundle.pem` trusts a private CA. `--no-verify-ssl` turns off
   certificate and hostname checks; use it only for a trusted test endpoint. Key exchange is
   classic (X25519, P-256, P-384) unless `--tls-post-quantum` is given, which offers the
@@ -109,7 +107,7 @@ Details, proxy settings and the full `.s3cfg` key mapping:
 | `ls [target]` | List buckets (no argument), or objects under a prefix or wildcard |
 | `cp <src>... <dst>` | Copy local↔S3, S3↔S3 (server-side), local↔local; wildcards, several sources |
 | `mv <src>... <dst>` | Same flags as `cp`; deletes each source after it was copied |
-| `rm <target>...` | Delete objects or local files; wildcards and prefixes |
+| `rm <target>...` | Delete objects or local files; wildcards (a bare prefix is refused) |
 | `cat <src>` | Print one object, or all objects matching an S3 wildcard, to stdout |
 | `mb` / `rb <s3://bucket>` | Create / remove a bucket (`rb --force` empties it first) |
 | `sync <src> <dst>` | Copy what is new or changed; `--delete` removes extras |
@@ -150,13 +148,14 @@ behaves the same way.
 | `file.txt` | one file | `p/file.txt` |
 | `data/` or `'data/*'` | everything under `data`, recursively | `p/<path below data>` |
 | `/abs/data` or `parent/data` | everything under `data` | `p/data/<path below data>` |
-| `data` or `./data` | **broken in v0.1.0, do not use** | keys containing `../`; see known issues |
+| `data` or `./data` | everything under `data` | `p/data/<path below data>` |
 | `'s3://b/p/*'` | every object under the prefix, recursively | relative layout kept |
 | `s3://b/p/` | only objects directly under the prefix | no sub-prefixes |
 | `s3://b/key` | one object | `<dst>/key`, or exactly `<dst>` if it has no trailing `/` |
 
 - `cp file s3://b/p` (no trailing slash) writes an object named `p`.
-- `ls`, `du`, `cp`, `sync` and `rm` on an S3 prefix ending in `/` do not descend. Add `*`.
+- `ls`, `du`, `cp` and `sync` on an S3 prefix ending in `/` do not descend. Add `*`. `rm` refuses
+  a bucket or such a prefix, as s5cmd does: write `'s3://b/p/*'`.
 - `--include` / `--exclude` take globs matched against the path relative to the source root.
   Exclude wins. They apply only when a source expands, never to a single named object.
 
@@ -208,11 +207,16 @@ rs5cmd cat 's3://bucket/logs/2026-01-*.log' > january.log
   endpoint from `--endpoint-url`, `AWS_ENDPOINT_URL` or a config file. `S3_ENDPOINT_URL` alone is
   not enough: `error: --fast currently requires --endpoint-url`.
 - It handles upload, download and S3→S3 copy, with `mv`, `--json`, `--dry-run`, `--retry-count`,
-  `--no-verify-ssl`, `--numworkers`, and `--include` / `--exclude`.
-- It **silently ignores** `--storage-class`, `--acl`, `--content-type`, `--preserve-timestamps`,
-  `--if-none-match`, `--links`, `--version-id`, `--all-versions`, `--part-size`, `--concurrency`,
-  `--proxy`, the bandwidth limits and the per-side region and endpoint flags.
-- Each object is held whole in memory and sent in one request. Do not use it for large objects.
+  `--no-verify-ssl`, `--numworkers`, `--part-size`, `--include` / `--exclude`, `--flatten`,
+  `--raw` and `--no-follow-symlinks`.
+- With a flag it does not honour (`--storage-class`, `--acl`, `--content-type`, the other
+  header, metadata and encryption flags, `-n` / `-s` / `-u`, `--show-progress`,
+  `--preserve-timestamps`, `--if-none-match`, `--links`, `--version-id`, `--all-versions`,
+  `--concurrency`, `--no-sign-request`, `--proxy`, the bandwidth limits, the per-side region
+  and endpoint flags, ...) the command runs on the default engine and prints
+  `warning: --fast does not support <flags>; using the default path`.
+- Each file is held whole in memory and sent in one request; files larger than the part
+  (8 MiB unless `--part-size` is given) go to the default engine.
 
 Requirements, tuning and limits: [fast path and mount](references/fast-path-and-mount.md).
 
@@ -230,30 +234,23 @@ stderr.
 ```
 
 These are a `cp`/`mv`/`rm`/`sync`/`mb`/`rb` result (success, then failure), an `ls` record, a
-`du` summary and a `presign` result. `rm`, `mb` and `rb` results have no `destination`.
-`--dry-run` adds `"dryRun":true`. `pipe`, `tree` and `cat` print plain text even with `--json`.
+`du` summary and a `presign` result. `rm`, `mb` and `rb` results have no `destination`; an `rm`
+of one version (`--version-id`, `--all-versions`) has `version_id`.
+`--dry-run` adds `"dryRun":true`. A `pipe` result has a `destination` and no `source`. `tree`
+refuses `--json` (use `ls --json`), and `cat` prints the object's bytes.
 In `--json` mode, failed operations are also printed on stdout, so check `success`.
 
 Exit codes: `0` success, `1` at least one operation failed, `2` bad command line, `130`
-interrupted (SIGINT or SIGTERM), `101` internal panic (see the broken-pipe pitfall below).
+interrupted (SIGINT or SIGTERM), `101` internal panic. When the reader of the output exits early
+(`| head`), rs5cmd ends by SIGPIPE as s5cmd does (the shell reports 141).
 
 ## Pitfalls that bite
 
 Full list with details and workarounds: [known issues](references/known-issues.md).
 
-- **Bare relative directory source.** `cp data out/` and `mv data out/` truncate the source files
-  to 0 bytes (`mv` then deletes them). `cp data s3://b/p/` uploads to keys with a literal `../`.
-  Use `data/` or `'data/*'`.
-- **`sync` into a missing or empty local directory fails** with `no match found for "dir/*"`.
-  Do the first copy with `cp`, then `sync`.
-- **`sync --delete` with a bare S3 prefix source** (`s3://b/p/`) deletes destination files in
-  subdirectories, because the source lists only one level. Use `'s3://b/p/*'` and `--max-delete`.
-- **`--dry-run rm 's3://b/p/*'` prints nothing.** Preview with `ls` and the same pattern.
-- **`--no-sign-request` has no effect.** Requests are still signed, and fail without credentials.
-- **Piping into `head` or another early-exiting reader** makes rs5cmd panic with
-  `failed printing to stdout: Broken pipe` and exit `101`. Read all output, or use a file.
-- **Symlinks are always followed.** There is no `--no-follow-symlinks`. A link to a directory
-  inside a wildcard source fails. `cp --links` stores links as placeholder objects instead.
+- **Symlinks are followed by default:** a link to a directory is walked and its files copied.
+  `cp` / `mv --no-follow-symlinks` skip links; `sync` has no such flag and always follows them.
+  `cp --links` stores links as placeholder objects instead.
 - **Uploads are `application/octet-stream`** unless `--content-type` is given. `cp` and `sync`
   do not guess the type from the file extension.
 - **`--fast` memory grows with `--numworkers`.** It holds each object (up to its 8 MiB part)
@@ -268,14 +265,17 @@ Full list with details and workarounds: [known issues](references/known-issues.m
 Commands, wildcard rules, `run` files, `--json`, `--dry-run`, `--numworkers` and the `sync`
 comparison follow s5cmd. Main differences between rs5cmd v0.1.0 and s5cmd v2.3:
 
-- Missing on `cp` / `mv`: `-n/--no-clobber`, `-s/--if-size-differ`, `-u/--if-source-newer`,
-  `-f/--flatten`, `--raw`, `--sse`, `--sse-kms-key-id`, `--cache-control`, `--expires`,
-  `--metadata`, `--metadata-directive`, `--show-progress`, `--no-follow-symlinks`.
-- Missing elsewhere: `rm --all-versions`, the global `--log` and `--stat`, the `-r` short flag,
-  and the `version` command (use `--version`; set `RUST_LOG=debug` for logs).
+- Missing on `sync`: the flags it shares with s5cmd's `cp` beyond `--storage-class`, `--acl`,
+  `--content-type` and the filters: `--no-follow-symlinks`, `--raw`, `--sse`,
+  `--sse-kms-key-id`, `--cache-control`, `--expires`, `--content-encoding`,
+  `--content-disposition`, `--metadata`, `--metadata-directive`, `--part-size`, `--concurrency`
+  (rs5cmd's `cp` has them).
+- Missing elsewhere: the global `--log` and `--stat`, the `-r` short flag, and the `version`
+  command (use `--version`; set `RUST_LOG=debug` for logs).
 - Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. Region
   and endpoint per side are global flags. `cp --fast` uses 8 MiB parts unless `--part-size` is
-  given (the default path uses s5cmd's 50).
+  given (the default path uses s5cmd's 50). An S3→S3 `cp` keeps the source's metadata unless
+  a flag sets the new object's (s5cmd v2.3 replaces it on every such copy).
 - Added: `tree`, `mount`, `import-s3cfg` and `--s3cfg`, `cp --fast`, several sources in one
   `cp`, `--if-none-match`, `--links`, `--client-copy`, `--preserve-timestamps`, `sync --checksum`
   and `--max-delete`, `rb --force`, `ls --newer-than` / `--older-than` / `--summarize`,

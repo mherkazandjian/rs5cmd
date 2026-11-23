@@ -23,6 +23,34 @@ pub struct CpArgs {
     #[arg(long, default_value_t = true)]
     pub follow_symlinks: bool,
 
+    /// Do not follow symbolic links: links inside a local directory source are skipped, and so
+    /// is a source that is a link itself (s5cmd's rules; a wildcard match is still copied).
+    #[arg(long)]
+    pub no_follow_symlinks: bool,
+
+    /// Do not overwrite a destination that exists.
+    #[arg(long, short = 'n')]
+    pub no_clobber: bool,
+
+    /// Overwrite a destination that exists only if its size differs. Overrides --no-clobber.
+    #[arg(long, short = 's')]
+    pub if_size_differ: bool,
+
+    /// Overwrite a destination that exists only if the source's modification time is newer.
+    /// Overrides --no-clobber and --if-size-differ.
+    #[arg(long, short = 'u')]
+    pub if_source_newer: bool,
+
+    /// Flatten the source's directory structure: each object lands directly under the
+    /// destination, under its base name.
+    #[arg(long, short = 'f')]
+    pub flatten: bool,
+
+    /// Disable wildcards: a source or destination with `*`, `?` or `[` is one literal key or
+    /// file name.
+    #[arg(long)]
+    pub raw: bool,
+
     /// Storage class for the destination object.
     #[arg(long)]
     pub storage_class: Option<String>,
@@ -34,6 +62,41 @@ pub struct CpArgs {
     /// Content-Type for the destination object.
     #[arg(long)]
     pub content_type: Option<String>,
+
+    /// Cache-Control for the destination object, e.g. 'public, max-age=345600'.
+    #[arg(long)]
+    pub cache_control: Option<String>,
+
+    /// Expires for the destination object, an RFC 3339 time such as 2024-10-01T20:30:00Z.
+    #[arg(long)]
+    pub expires: Option<String>,
+
+    /// Content-Encoding for the destination object, e.g. gzip.
+    #[arg(long)]
+    pub content_encoding: Option<String>,
+
+    /// Content-Disposition for the destination object, e.g. 'attachment; filename="f.jpg"'.
+    #[arg(long)]
+    pub content_disposition: Option<String>,
+
+    /// User metadata for the destination object, as key=value (repeatable):
+    /// --metadata foo=bar --metadata fizz=buzz.
+    #[arg(long, value_name = "KEY=VALUE")]
+    pub metadata: Vec<String>,
+
+    /// For S3 to S3 copies: COPY the source's metadata or REPLACE it with what the flags give.
+    /// Default: COPY, or REPLACE when a flag sets the content type, cache control, expires,
+    /// content encoding or disposition, or user metadata. Not for uploads or downloads.
+    #[arg(long, value_parser = ["COPY", "REPLACE"], ignore_case = true)]
+    pub metadata_directive: Option<String>,
+
+    /// Server-side encryption of the destination object, e.g. AES256 or aws:kms.
+    #[arg(long)]
+    pub sse: Option<String>,
+
+    /// KMS key id for --sse aws:kms; leave it out for the key S3 manages.
+    #[arg(long)]
+    pub sse_kms_key_id: Option<String>,
 
     /// Use the io_uring fast path (Linux, requires the `fast` build feature and
     /// an explicit --endpoint-url). Optimized for many small objects.
@@ -59,6 +122,16 @@ pub struct CpArgs {
     /// versions do not collide (#762).
     #[arg(long)]
     pub all_versions: bool,
+
+    /// Accepted for compatibility with s5cmd, where it silences the errors for skipped Glacier
+    /// objects; `cp` skips no storage class (see --force-glacier-transfer), so it has no effect.
+    #[arg(long)]
+    pub ignore_glacier_warnings: bool,
+
+    /// Show the progress bar and print no line per copied object (errors are still printed), as
+    /// s5cmd's --show-progress. The bar shows on a terminal, without --json.
+    #[arg(long, visible_alias = "sp")]
+    pub show_progress: bool,
 
     /// Force transfer of glacier objects whether they are restored or not.
     /// `cp` transfers every listed object regardless of storage class, so this
@@ -128,15 +201,56 @@ pub struct CpArgs {
 pub const LINK_SUFFIX: &str = ".s5cmdlink";
 
 impl CpArgs {
-    fn metadata(&self) -> Metadata {
-        Metadata {
+    /// What the destination objects get, checked before anything is copied: `--expires` must be
+    /// an RFC 3339 time, `--metadata` key=value pairs with distinct keys (s5cmd's rules).
+    fn metadata(&self) -> anyhow::Result<Metadata> {
+        if let Some(v) = &self.expires {
+            crate::storage::s3::expires_time(v)?;
+        }
+        Ok(Metadata {
             storage_class: self.storage_class.clone(),
             acl: self.acl.clone(),
             content_type: self.content_type.clone(),
+            cache_control: self.cache_control.clone(),
+            expires: self.expires.clone(),
+            content_encoding: self.content_encoding.clone(),
+            content_disposition: self.content_disposition.clone(),
+            encryption_method: self.sse.clone(),
+            encryption_key_id: self.sse_kms_key_id.clone(),
+            user_defined: parse_metadata(&self.metadata)?,
+            directive: self.metadata_directive.as_deref().map(str::to_ascii_uppercase),
             if_none_match: self.if_none_match,
-            ..Default::default()
-        }
+        })
     }
+}
+
+/// `--metadata key=value` pairs: the key is what comes before the first `=`; an empty pair, one
+/// without `=` or a key given twice is an error, as in s5cmd.
+fn parse_metadata(pairs: &[String]) -> anyhow::Result<std::collections::HashMap<String, String>> {
+    let mut out = std::collections::HashMap::new();
+    for pair in pairs {
+        anyhow::ensure!(!pair.is_empty(), "--metadata can't be empty: use key=value");
+        let Some((key, value)) = pair.split_once('=') else {
+            anyhow::bail!("--metadata {pair:?}: use key=value");
+        };
+        anyhow::ensure!(
+            out.insert(key.to_string(), value.to_string()).is_none(),
+            "--metadata: key {key:?} is already defined"
+        );
+    }
+    Ok(out)
+}
+
+/// Whether a flag sets what an S3 to S3 copy's object metadata is, which S3 ignores under the
+/// default COPY directive: then the copy REPLACEs it (as s5cmd, which always replaces).
+fn sets_object_metadata(m: &Metadata) -> bool {
+    let given = |v: &Option<String>| v.as_deref().is_some_and(|v| !v.is_empty());
+    given(&m.content_type)
+        || given(&m.cache_control)
+        || given(&m.expires)
+        || given(&m.content_encoding)
+        || given(&m.content_disposition)
+        || !m.user_defined.is_empty()
 }
 
 pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Result<()> {
@@ -148,6 +262,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     opts.preserve_timestamps = args.preserve_timestamps;
     opts.client_copy = args.client_copy;
     opts.remove_empty_dirs = args.remove_empty_dirs;
+    opts.keep_links = args.links;
     let op = if is_move { "mv" } else { "cp" };
 
     // The final positional is the destination; everything before it is a source.
@@ -159,8 +274,9 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let dst_raw = args.paths.last().expect("paths is non-empty");
     let src_raws = &args.paths[..args.paths.len() - 1];
 
-    let dst = Url::parse(dst_raw).map_err(|e| anyhow::anyhow!(e))?;
-    let metadata = args.metadata();
+    let dst_options = crate::storage::url::UrlOptions { raw: args.raw, ..Default::default() };
+    let dst = Url::new(dst_raw, dst_options).map_err(|e| anyhow::anyhow!(e))?;
+    let metadata = args.metadata()?;
 
     // With more than one source, the destination must be a directory (local) or
     // a prefix/bucket (s3) — a single named target cannot receive many objects.
@@ -191,6 +307,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
             Url::new(
                 raw,
                 crate::storage::url::UrlOptions {
+                    raw: args.raw,
                     version_id: args.version_id.clone(),
                     all_versions: args.all_versions,
                     ..Default::default()
@@ -200,12 +317,13 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         })
         .collect::<anyhow::Result<_>>()?;
 
+    let follow_symlinks = args.follow_symlinks && !args.no_follow_symlinks;
+    let listing = Listing { follow_symlinks, flatten: args.flatten };
     // Pairs stream from a listing task through a bounded channel while transfers run (F13);
     // collecting them all first held every (source, destination) pair in memory at once.
     // (`--fast` may replace them with the pairs it collected and declined.)
     #[cfg_attr(not(feature = "fast"), allow(unused_mut))]
-    let mut pairs =
-        Pairs::new(srcs.clone(), dst.clone(), opts.clone(), args.follow_symlinks, filters);
+    let mut pairs = Pairs::new(srcs.clone(), dst.clone(), opts.clone(), listing, filters);
 
     // Any remote side present means we need an S3 client. Use the first source
     // (or the destination) that is remote as the config anchor.
@@ -220,7 +338,17 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let mut fast_failed = false;
     if args.fast {
         #[cfg(feature = "fast")]
-        {
+        'fast: {
+            // A flag the fast path does not honour sends the whole set to the default path, with
+            // a warning, rather than being dropped (#10).
+            let unsupported = fast_unsupported(global, &args);
+            if !unsupported.is_empty() {
+                eprintln!(
+                    "warning: --fast does not support {}; using the default path",
+                    unsupported.join(", ")
+                );
+                break 'fast;
+            }
             // The fast path shards a complete list, so it still collects first.
             let mut all = Vec::new();
             while let Some(p) = pairs.next().await {
@@ -276,6 +404,11 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     let opts = Arc::new(opts);
     let metadata = Arc::new(metadata);
     let workers = global.numworkers.max(1);
+    let overwrite = Overwrite {
+        no_clobber: args.no_clobber,
+        if_size_differ: args.if_size_differ,
+        if_source_newer: args.if_source_newer,
+    };
 
     // Spawn each transfer as a tokio task so the multi-threaded runtime spreads
     // the per-request CPU (request build, SigV4 signing, response parse) across
@@ -285,6 +418,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
     // both running tasks *and* buffered completed results — important when the
     // object count is huge.
     let mut had_error = fast_failed;
+    let quiet = args.show_progress;
     // Count-of-transfers progress bar (no-op in JSON mode / non-TTY stderr).
     // The total grows as the listing yields pairs.
     let pb = crate::progress::Progress::new(0, op);
@@ -293,7 +427,7 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         pb.inc_length(1);
         while set.len() >= workers {
             let (s, d, r) = set.join_next().await.unwrap().expect("transfer task panicked");
-            report(op, &s, &d, r, &mut had_error);
+            report(op, &s, &d, r, &mut had_error, quiet);
             pb.inc(1);
         }
         let opts = Arc::clone(&opts);
@@ -302,23 +436,21 @@ pub async fn run(global: &GlobalOpts, args: CpArgs, is_move: bool) -> anyhow::Re
         let s3_dst = s3_dst.clone();
         let links = args.links;
         set.spawn(async move {
-            let r = copy_one(
-                &s,
-                &d,
-                s3.as_deref(),
-                s3_dst.as_deref(),
-                &opts,
-                &metadata,
-                is_move,
-                links,
-            )
-            .await;
+            let (src_s3, dst_s3) = (s3.as_deref(), s3_dst.as_deref().or(s3.as_deref()));
+            let r = match overwrite.allows(&s, &d, src_s3, dst_s3, &opts).await {
+                Ok(true) => {
+                    copy_one(&s, &d, src_s3, s3_dst.as_deref(), &opts, &metadata, is_move, links)
+                        .await
+                }
+                Ok(false) => Err(Skipped.into()),
+                Err(e) => Err(e),
+            };
             (s, d, r)
         });
     }
     while let Some(joined) = set.join_next().await {
         let (s, d, r) = joined.expect("transfer task panicked");
-        report(op, &s, &d, r, &mut had_error);
+        report(op, &s, &d, r, &mut had_error, quiet);
         pb.inc(1);
     }
     pb.finish();
@@ -350,16 +482,11 @@ enum Pairs {
 }
 
 impl Pairs {
-    fn new(
-        srcs: Vec<Url>,
-        dst: Url,
-        opts: Options,
-        follow_symlinks: bool,
-        filters: Filters,
-    ) -> Pairs {
+    fn new(srcs: Vec<Url>, dst: Url, opts: Options, listing: Listing, filters: Filters) -> Pairs {
         if !srcs.iter().any(expands) {
             let known: Vec<(Url, Url)> = srcs
                 .iter()
+                .filter(|s| !listing.skips(s))
                 .map(|s| (s.clone(), resolve_single_dest(s, &dst)))
                 .collect();
             return Pairs::Known(known.into_iter());
@@ -367,7 +494,7 @@ impl Pairs {
         let (tx, rx) = tokio::sync::mpsc::channel(PAIRS_QUEUED);
         let task = tokio::spawn(async move {
             for src in &srcs {
-                if !expand_sources(src, &dst, &opts, follow_symlinks, &filters, &tx).await? {
+                if !expand_sources(src, &dst, &opts, listing, &filters, &tx).await? {
                     break;
                 }
             }
@@ -395,6 +522,91 @@ impl Pairs {
     }
 }
 
+/// How sources are listed: whether local links are followed, and whether destinations keep the
+/// source's relative path or, with `--flatten`, only the base name.
+#[derive(Clone, Copy, Debug)]
+struct Listing {
+    follow_symlinks: bool,
+    flatten: bool,
+}
+
+/// `--no-clobber`, `--if-size-differ` and `--if-source-newer`: when an existing destination is
+/// overwritten. As s5cmd's `shouldOverride`, each later flag overrides the earlier ones' verdict.
+#[derive(Clone, Copy, Debug, Default)]
+struct Overwrite {
+    no_clobber: bool,
+    if_size_differ: bool,
+    if_source_newer: bool,
+}
+
+/// A destination the overwrite flags keep: no output and not an error, as in s5cmd.
+#[derive(Debug, thiserror::Error)]
+#[error("destination kept")]
+struct Skipped;
+
+impl Overwrite {
+    /// Whether `src` may be copied to `dst`: always when no flag is given or the destination does
+    /// not exist; otherwise by the flags, compared on sizes and modification times. Dry runs too.
+    async fn allows(
+        self,
+        src: &Url,
+        dst: &Url,
+        src_s3: Option<&S3>,
+        dst_s3: Option<&S3>,
+        opts: &Options,
+    ) -> anyhow::Result<bool> {
+        if !(self.no_clobber || self.if_size_differ || self.if_source_newer) {
+            return Ok(true);
+        }
+        let Some(to) = stat_or_none(dst, dst_s3, opts).await? else {
+            return Ok(true);
+        };
+        let from = stat_or_none(src, src_s3, opts).await?.ok_or_else(|| {
+            anyhow::anyhow!(crate::storage::ObjectNotFound(src.absolute()))
+        })?;
+        Ok(self.verdict(&from, &to))
+    }
+
+    fn verdict(self, from: &crate::storage::Object, to: &crate::storage::Object) -> bool {
+        let mut allowed = !self.no_clobber;
+        if self.if_size_differ {
+            allowed = from.size != to.size;
+        }
+        if self.if_source_newer {
+            allowed = matches!((from.mod_time, to.mod_time), (Some(f), Some(t)) if f > t);
+        }
+        allowed
+    }
+}
+
+/// The object or file at `u`, or `None` when there is none.
+async fn stat_or_none(
+    u: &Url,
+    s3: Option<&S3>,
+    opts: &Options,
+) -> anyhow::Result<Option<crate::storage::Object>> {
+    use crate::storage::Storage;
+    let r = match (u.is_remote(), s3) {
+        (true, Some(s3)) => s3.stat(u).await,
+        _ => new_client(u, opts).await?.stat(u).await,
+    };
+    match r {
+        Ok(o) => Ok(Some(o)),
+        Err(e) if e.downcast_ref::<crate::storage::ObjectNotFound>().is_some() => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
+impl Listing {
+    /// Whether a source given on the command line is skipped: with --no-follow-symlinks, a local
+    /// source that is a symbolic link itself (s5cmd's `expandSource`).
+    fn skips(self, src: &Url) -> bool {
+        !self.follow_symlinks
+            && !src.is_remote()
+            && std::fs::symlink_metadata(src.absolute()).is_ok_and(|m| m.file_type().is_symlink())
+    }
+}
+
 /// Whether a source expands into several (source, destination) pairs: a wildcard, a bucket or
 /// prefix, a local directory, or every version of a key.
 fn expands(src: &Url) -> bool {
@@ -410,9 +622,11 @@ fn expands(src: &Url) -> bool {
     }
 }
 
-/// Prints the per-transfer result line, tracking whether any failed.
-fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut bool) {
+/// Prints the per-transfer result line, tracking whether any failed. `quiet` (--show-progress):
+/// no line for a success.
+fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut bool, quiet: bool) {
     match r {
+        Ok(()) if quiet => {}
         Ok(()) => crate::output::op_success(op, &s.to_string(), Some(&d.to_string())),
         // A failed `--if-none-match` conditional write means the destination
         // already exists: this is a skip, not a failure, so it must NOT set
@@ -420,6 +634,8 @@ fn report(op: &str, s: &Url, d: &Url, r: anyhow::Result<()>, had_error: &mut boo
         Err(ref e) if e.downcast_ref::<crate::storage::PreconditionFailedError>().is_some() => {
             eprintln!("{op} {s} {d}: object already exists, skipped");
         }
+        // Kept by --no-clobber / --if-size-differ / --if-source-newer: silent, as in s5cmd.
+        Err(ref e) if e.downcast_ref::<Skipped>().is_some() => {}
         Err(e) => {
             *had_error = true;
             // Annotate raw EMFILE with the RLIMIT_NOFILE hint (#390).
@@ -435,11 +651,15 @@ async fn expand_sources(
     src: &Url,
     dst: &Url,
     opts: &Options,
-    follow_symlinks: bool,
+    listing: Listing,
     filters: &Filters,
     out: &tokio::sync::mpsc::Sender<(Url, Url)>,
 ) -> anyhow::Result<bool> {
+    let follow_symlinks = listing.follow_symlinks;
     if !expands(src) {
+        if listing.skips(src) {
+            return Ok(true);
+        }
         let dst_url = resolve_single_dest(src, dst);
         return Ok(out.send((src.clone(), dst_url)).await.is_ok());
     }
@@ -477,8 +697,9 @@ async fn expand_sources(
         if filters.should_skip(&filter_key(&obj_url)) {
             continue;
         }
-        // Destination keeps the source's relative layout under dst as a prefix.
-        let rel = obj_url.relative();
+        // Destination keeps the source's relative layout under dst as a prefix, or with
+        // --flatten only the base name.
+        let rel = if listing.flatten { obj_url.base() } else { obj_url.relative() };
         let dst_url = dst.join(&rel);
         if out.send((obj_url, dst_url)).await.is_err() {
             return Ok(false);
@@ -619,6 +840,13 @@ async fn copy_one(
         // destination client) (#858/#816/#514/#702/#700/#671).
         (true, true) => {
             let s3 = s3.expect("remote copy requires an S3 client");
+            let replaced;
+            let metadata = if metadata.directive.is_none() && sets_object_metadata(metadata) {
+                replaced = Metadata { directive: Some("REPLACE".to_string()), ..metadata.clone() };
+                &replaced
+            } else {
+                metadata
+            };
             if let Some(dst_s3) = s3_dst {
                 // Per-side clients: cross-client streaming copy.
                 s3.client_copy_to(dst_s3, src, dst, metadata).await?;
@@ -633,6 +861,10 @@ async fn copy_one(
         }
         // remote -> local: download.
         (true, false) => {
+            anyhow::ensure!(
+                metadata.directive.is_none(),
+                "metadata directive is not supported for download"
+            );
             let s3 = s3.expect("download requires an S3 client");
             s3.download(src, &PathBuf::from(dst.absolute())).await?;
             if is_move {
@@ -642,6 +874,10 @@ async fn copy_one(
         // local -> remote: upload. When per-side clients exist, the destination
         // client is the one anchored on the destination's region/endpoint.
         (false, true) => {
+            anyhow::ensure!(
+                metadata.directive.is_none(),
+                "metadata directive is not supported for upload"
+            );
             let s3 = s3_dst
                 .or(s3)
                 .expect("upload requires an S3 client");
@@ -843,6 +1079,59 @@ const FAST_PART_MAX: u64 = 1 << 30;
 #[cfg(feature = "fast")]
 const FAST_DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
 
+/// The flags given that `--fast` does not honour (#10); with any of them `cp`/`mv` runs the set on
+/// the default path and says so. The fast path does honour `--part-size`, what shapes the listing
+/// and the pairs (`--include`/`--exclude` and their `-from` files, `--follow-symlinks`,
+/// `--no-follow-symlinks`, `--flatten`, `--raw`, `--use-list-objects-v1`),
+/// `--force-glacier-transfer` and `--ignore-glacier-warnings` (`cp` skips no storage class
+/// anyway) and the globals `--endpoint-url`, `--region`, `--profile`, `--credentials-file`,
+/// `--no-verify-ssl`, `--tls-post-quantum`, `--retry-count`, `--numworkers`, `--dry-run`,
+/// `--json` and `--color`. Dual-stack and FIPS endpoints do not apply with `--endpoint-url`, on
+/// either path. `--no-sign-request` is here because the fast path signs every request (#6).
+#[cfg(feature = "fast")]
+fn fast_unsupported(global: &GlobalOpts, args: &CpArgs) -> Vec<&'static str> {
+    let given = [
+        // What the objects or files become.
+        (args.storage_class.is_some(), "--storage-class"),
+        (args.acl.is_some(), "--acl"),
+        (args.content_type.is_some(), "--content-type"),
+        (args.cache_control.is_some(), "--cache-control"),
+        (args.expires.is_some(), "--expires"),
+        (args.content_encoding.is_some(), "--content-encoding"),
+        (args.content_disposition.is_some(), "--content-disposition"),
+        (!args.metadata.is_empty(), "--metadata"),
+        (args.metadata_directive.is_some(), "--metadata-directive"),
+        (args.sse.is_some(), "--sse"),
+        (args.sse_kms_key_id.is_some(), "--sse-kms-key-id"),
+        (args.no_clobber, "--no-clobber"),
+        (args.if_size_differ, "--if-size-differ"),
+        (args.if_source_newer, "--if-source-newer"),
+        (args.show_progress, "--show-progress"),
+        (args.preserve_timestamps, "--preserve-timestamps"),
+        (args.if_none_match, "--if-none-match"),
+        (args.links, "--links"),
+        (args.version_id.is_some(), "--version-id"),
+        (args.all_versions, "--all-versions"),
+        (args.client_copy, "--client-copy"),
+        (args.remove_empty_dirs, "--remove-empty-dirs"),
+        // How requests travel.
+        (args.concurrency != crate::storage::DEFAULT_CONCURRENCY, "--concurrency"),
+        (global.no_sign_request, "--no-sign-request"),
+        (global.proxy.is_some(), "--proxy"),
+        (global.ca_certs_file.is_some(), "--ca-certs-file"),
+        (global.request_payer.is_some(), "--request-payer"),
+        (global.addressing_style.as_deref() == Some("virtual"), "--addressing-style virtual"),
+        (global.limit_upload.is_some(), "--limit-upload"),
+        (global.limit_download.is_some(), "--limit-download"),
+        (global.limitrate.is_some(), "--limitrate"),
+        (global.source_region.is_some(), "--source-region"),
+        (global.destination_region.is_some(), "--destination-region"),
+        (global.source_endpoint_url.is_some(), "--source-endpoint-url"),
+        (global.destination_endpoint_url.is_some(), "--destination-endpoint-url"),
+    ];
+    given.into_iter().filter(|(on, _)| *on).map(|(_, flag)| flag).collect()
+}
+
 /// Attempts to run the (src,dst) pairs on the io_uring fast path. Each pair is
 /// mapped independently to upload / download / server-side copy, so mixed sets
 /// are supported. Returns `Ok(Some(result))` if handled, or `Ok(None)` if the
@@ -1001,6 +1290,130 @@ mod tests {
             Some(Command::Cp(args)) => args,
             other => panic!("not cp: {other:?}"),
         }
+    }
+
+    /// #10: the flags `--fast` cannot honour are named, in a fixed order; those it honours are not.
+    #[cfg(feature = "fast")]
+    #[test]
+    fn fast_names_the_flags_it_does_not_honour() {
+        let unsupported = |argv: &[&str]| {
+            let cli = Cli::try_parse_from(argv).unwrap();
+            match cli.command {
+                Some(Command::Cp(args)) | Some(Command::Mv(args)) => {
+                    super::fast_unsupported(&cli.global, &args)
+                }
+                other => panic!("not cp or mv: {other:?}"),
+            }
+        };
+        let honoured = [
+            "rs5cmd", "--endpoint-url", "http://h:9000", "--numworkers", "4", "--retry-count", "3",
+            "--dry-run", "--json", "cp", "--fast", "--part-size", "16", "--exclude", "*.log",
+            "--force-glacier-transfer", "--concurrency", "5", "--flatten", "--raw",
+            "--no-follow-symlinks", "--ignore-glacier-warnings", "a/*", "s3://b/p/",
+        ];
+        assert_eq!(unsupported(&honoured), Vec::<&str>::new());
+        let per_object = ["rs5cmd", "cp", "--fast", "-n", "-s", "-u", "--sp", "a", "s3://b/a"];
+        assert_eq!(
+            unsupported(&per_object),
+            ["--no-clobber", "--if-size-differ", "--if-source-newer", "--show-progress"]
+        );
+        let mv = [
+            "rs5cmd", "--proxy", "http://p:3128", "--no-sign-request", "mv", "--fast",
+            "--storage-class", "STANDARD_IA", "--acl", "private", "--concurrency", "2", "a",
+            "s3://b/a",
+        ];
+        assert_eq!(
+            unsupported(&mv),
+            ["--storage-class", "--acl", "--concurrency", "--no-sign-request", "--proxy"]
+        );
+        // #34: what the new object gets.
+        let properties = [
+            "rs5cmd", "cp", "--fast", "--cache-control", "no-cache", "--expires",
+            "2030-01-02T03:04:05Z", "--content-encoding", "gzip", "--content-disposition", "inline",
+            "--metadata", "a=b", "--metadata-directive", "REPLACE", "--sse", "aws:kms",
+            "--sse-kms-key-id", "k", "a", "s3://b/a",
+        ];
+        assert_eq!(
+            unsupported(&properties),
+            [
+                "--cache-control", "--expires", "--content-encoding", "--content-disposition",
+                "--metadata", "--metadata-directive", "--sse", "--sse-kms-key-id",
+            ]
+        );
+    }
+
+    #[test]
+    fn overwrite_flags_decide_as_s5cmds_should_override() {
+        use crate::storage::Object;
+        use std::time::{Duration, UNIX_EPOCH};
+        let obj = |size: i64, secs: u64| Object {
+            size,
+            mod_time: Some(UNIX_EPOCH + Duration::from_secs(secs)),
+            ..Default::default()
+        };
+        let o = |n, s, u| super::Overwrite { no_clobber: n, if_size_differ: s, if_source_newer: u };
+        let (small_old, big_new) = (obj(1, 10), obj(2, 20));
+        // (flags, source, destination, overwritten)
+        let cases = [
+            (o(false, false, false), &small_old, &big_new, true),
+            (o(true, false, false), &big_new, &small_old, false),
+            (o(false, true, false), &small_old, &obj(1, 30), false),
+            (o(true, true, false), &small_old, &big_new, true),
+            (o(false, false, true), &big_new, &small_old, true),
+            (o(false, false, true), &small_old, &big_new, false),
+            (o(false, false, true), &obj(1, 20), &obj(1, 20), false),
+            // --if-source-newer overrides --if-size-differ: sizes differ, but the source is older.
+            (o(false, true, true), &small_old, &big_new, false),
+            (o(true, true, true), &big_new, &small_old, true),
+        ];
+        for (i, (flags, from, to, want)) in cases.into_iter().enumerate() {
+            assert_eq!(flags.verdict(from, to), want, "case {i}: {flags:?}");
+        }
+    }
+
+    #[test]
+    fn s5cmds_short_flags_are_accepted() {
+        let args = cp_args(&["rs5cmd", "cp", "-n", "-s", "-u", "-f", "--raw", "a", "b"]);
+        assert!(args.no_clobber && args.if_size_differ && args.if_source_newer);
+        assert!(args.flatten && args.raw);
+    }
+
+    #[test]
+    fn metadata_pairs_split_at_the_first_equals_sign() {
+        let m = super::parse_metadata(&["a=b".into(), "c=d=e".into(), "f=".into()]).unwrap();
+        assert_eq!(m.get("a").map(String::as_str), Some("b"));
+        assert_eq!(m.get("c").map(String::as_str), Some("d=e"));
+        assert_eq!(m.get("f").map(String::as_str), Some(""));
+        for bad in [vec!["".to_string()], vec!["a".into()], vec!["a=1".into(), "a=2".into()]] {
+            assert!(super::parse_metadata(&bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn the_flags_become_the_new_objects_metadata() {
+        let args = cp_args(&[
+            "rs5cmd", "cp", "--cache-control", "no-cache", "--expires", "2030-01-02T03:04:05Z",
+            "--content-encoding", "gzip", "--content-disposition", "inline", "--metadata", "a=b",
+            "--metadata-directive", "replace", "--sse", "aws:kms", "--sse-kms-key-id", "k", "a",
+            "s3://b/a",
+        ]);
+        let m = args.metadata().unwrap();
+        assert_eq!(m.cache_control.as_deref(), Some("no-cache"));
+        assert_eq!(m.expires.as_deref(), Some("2030-01-02T03:04:05Z"));
+        assert_eq!(m.content_encoding.as_deref(), Some("gzip"));
+        assert_eq!(m.content_disposition.as_deref(), Some("inline"));
+        assert_eq!(m.encryption_method.as_deref(), Some("aws:kms"));
+        assert_eq!(m.encryption_key_id.as_deref(), Some("k"));
+        assert_eq!(m.directive.as_deref(), Some("REPLACE"));
+        assert!(super::sets_object_metadata(&m));
+        let plain = ["rs5cmd", "cp", "--storage-class", "GLACIER", "--sse", "AES256", "a", "b"];
+        let plain = cp_args(&plain);
+        assert!(!super::sets_object_metadata(&plain.metadata().unwrap()));
+        let bad = cp_args(&["rs5cmd", "cp", "--expires", "2030-01-02", "a", "b"]);
+        assert!(bad.metadata().is_err());
+        let keep = ["rs5cmd", "cp", "--metadata-directive", "KEEP", "a", "b"];
+        let directive = Cli::try_parse_from(keep);
+        assert!(directive.is_err());
     }
 
     #[test]

@@ -465,11 +465,23 @@ pub async fn run(global: &GlobalOpts, args: PipeArgs) -> anyhow::Result<()> {
     // Stream stdin in parts: a single PUT for small inputs, otherwise a
     // concurrent multipart upload that bounds memory regardless of input size.
     let mut stdin = tokio::io::stdin();
-    s3.put_multipart_reader(&mut stdin, &dst, &metadata, part_size, concurrency)
-        .await?;
-
-    crate::outln!("pipe {dst}");
-    Ok(())
+    let res = s3
+        .put_multipart_reader(&mut stdin, &dst, &metadata, part_size, concurrency)
+        .await;
+    // The result as an operation line, a JSON object with --json, like cp's (#8).
+    match res {
+        Ok(()) => {
+            crate::output::op_result_to("pipe", &dst.to_string(), None);
+            Ok(())
+        }
+        // With --json the failure is a record on stdout too; the text error is unchanged.
+        Err(e) if crate::output::is_json() => {
+            let msg = crate::error::format_error(&e);
+            crate::output::op_result_to("pipe", &dst.to_string(), Some(&msg));
+            anyhow::bail!("pipe failed")
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Guesses a content type from the destination's file extension, falling back

@@ -63,8 +63,8 @@ rs5cmd uses the AWS SDK default credential chain, in this order:
 Keys found in a `--s3cfg` file or in `~/.rs5cmd` are used only when the three environment
 variables in step 1 are not already set.
 
-There is no flag that takes a key directly, and anonymous access does not work in v0.1.0:
-`--no-sign-request` is accepted but requests are still signed.
+There is no flag that takes a key directly. For anonymous access to a public bucket, give
+`--no-sign-request`: no credentials are looked up and requests go unsigned.
 
 ## Endpoint and addressing
 
@@ -82,12 +82,10 @@ There is no flag that takes a key directly, and anonymous access does not work i
 
 ## Region
 
-`--region` or `AWS_REGION`, else the region of the active profile, else `us-east-1`.
-
-Set it explicitly. When nothing provides a region, the SDK asks the instance metadata service
-first. Away from a cloud instance that costs a few seconds per run and prints warnings before
-the fallback to `us-east-1`. rs5cmd does not detect the region of a bucket by itself: for AWS,
-pass the region the bucket lives in.
+`--region` or `AWS_REGION`, else the region of the active profile. With none of these, rs5cmd
+asks the bucket: one `HeadBucket` request (once per bucket and endpoint in a run), whose
+`x-amz-bucket-region` answer it uses, else `us-east-1`, as s5cmd does. The instance metadata
+service is not asked for a region. Setting the region saves the extra request.
 
 ## TLS
 
@@ -96,20 +94,21 @@ pass the region the bucket lives in.
 - `--no-verify-ssl` disables certificate and host name verification. With it,
   `--ca-certs-file` is ignored. Use it only for a test endpoint you trust on a network you trust.
 - With an `http://` endpoint nothing is encrypted in transit.
-- `cp --fast` trusts only the public CA set. It honours `--no-verify-ssl` but not
-  `--ca-certs-file`, so it cannot verify an endpoint that uses a private CA.
+- `cp --fast` trusts only the public CA set. It honours `--no-verify-ssl`; with
+  `--ca-certs-file` the command runs on the default engine.
 
 ## Proxy
 
 `--proxy URL` (short `-x`) accepts `socks5://`, `socks5h://`, `http://` and `https://`, with
 optional `user:pass@`. Without the flag, the first of `ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`
-that is set is used (upper or lower case). `cp --fast` ignores the proxy.
+that is set is used (upper or lower case). `cp --fast` with `--proxy` runs on the default
+engine; the fast engine does not use the proxy environment variables.
 
 ## Bandwidth
 
 `--limit-upload RATE` and `--limit-download RATE` cap the total rate of one command in bytes per
-second (`512KB`, `10MB`, `1GB`). `--limitrate RATE` caps both directions. `cp --fast` ignores
-all three.
+second (`512KB`, `10MB`, `1GB`). `--limitrate RATE` caps both directions. With any of the
+three, `cp --fast` runs on the default engine.
 
 ## Using an s3cmd configuration
 

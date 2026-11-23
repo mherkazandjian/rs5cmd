@@ -16,10 +16,9 @@
 //! (`options_per_side_*` tests) and `src/command/mod.rs`. These e2e tests add
 //! the live MinIO round-trip.
 //!
-//! Gated the same way as `e2e.rs`: only meaningful inside the compose `test`
-//! service where MinIO is up. The harness always passes `--endpoint-url`, so a
-//! plain build (no MinIO) would fail to connect — which is why these run only
-//! under docker compose.
+//! Skipped like the other e2e files when no endpoint is configured
+//! (`RS5CMD_TEST_ENDPOINT`, `AWS_ENDPOINT_URL` or `S3_ENDPOINT_URL`; see `tests/common`), so
+//! `cargo test` passes on a host without MinIO (#13).
 
 #![allow(clippy::all)]
 
@@ -37,8 +36,24 @@ fn unique_bucket() -> String {
     format!("rs5cmd-region-{}-{}", std::process::id(), n)
 }
 
+mod common;
+
+/// `RS5CMD_TEST_ENDPOINT`, else the endpoint the other e2e files use.
+fn configured_endpoint() -> Option<String> {
+    std::env::var("RS5CMD_TEST_ENDPOINT").ok().or_else(common::endpoint)
+}
+
 fn endpoint() -> String {
-    std::env::var("RS5CMD_TEST_ENDPOINT").unwrap_or_else(|_| "http://minio:9000".to_string())
+    configured_endpoint().expect("each test skips itself without an endpoint")
+}
+
+/// True, after saying so, when there is no endpoint to test against.
+fn no_endpoint() -> bool {
+    if configured_endpoint().is_some() {
+        return false;
+    }
+    eprintln!("skipping: no S3 endpoint configured");
+    true
 }
 
 /// Runs the binary with MinIO credentials and the SHARED `--endpoint-url`, plus
@@ -90,6 +105,9 @@ fn make_bucket() -> String {
 /// which never actually splits into two clients but proves clap wiring).
 #[test]
 fn test_per_side_flags_parse() {
+    if no_endpoint() {
+        return;
+    }
     // No bucket needed: just prove the global flags are accepted on a command.
     // `ls` of all buckets must still succeed with the extra (unused-for-ls)
     // per-side flags present.
@@ -113,6 +131,9 @@ fn test_per_side_flags_parse() {
 /// plumbing — NOT a true cross-region copy (MinIO can't do that).
 #[test]
 fn test_cp_s3_to_s3_two_client_same_endpoint() {
+    if no_endpoint() {
+        return;
+    }
     let bucket = make_bucket();
     let dir = tempdir();
     let src = dir.join("payload.txt");
@@ -154,6 +175,9 @@ fn test_cp_s3_to_s3_two_client_same_endpoint() {
 /// the single-client server-side `CopyObject` fast path and succeed unchanged.
 #[test]
 fn test_cp_s3_to_s3_single_client_fast_path_unchanged() {
+    if no_endpoint() {
+        return;
+    }
     let bucket = make_bucket();
     let dir = tempdir();
     let src = dir.join("fast.txt");
@@ -180,6 +204,9 @@ fn test_cp_s3_to_s3_single_client_fast_path_unchanged() {
 /// (same endpoint, so single-region exercise only).
 #[test]
 fn test_sync_s3_to_s3_two_client_same_endpoint() {
+    if no_endpoint() {
+        return;
+    }
     let src_bucket = make_bucket();
     let dst_bucket = make_bucket();
     let dir = tempdir();
@@ -220,6 +247,9 @@ fn test_sync_s3_to_s3_two_client_same_endpoint() {
 /// s3->s3 `mv` (copy + delete source) STILL works through the two-client path.
 #[test]
 fn test_mv_s3_to_s3_two_client_same_endpoint() {
+    if no_endpoint() {
+        return;
+    }
     let bucket = make_bucket();
     let dir = tempdir();
     let src = dir.join("movable.txt");

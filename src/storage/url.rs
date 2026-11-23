@@ -287,7 +287,7 @@ impl Url {
         true
     }
 
-    /// Percent-escapes each path element (used when building source keys).
+    /// `bucket/key` with each path element percent-encoded, for `x-amz-copy-source`.
     pub fn escaped_path(&self) -> String {
         let source_key = self
             .absolute()
@@ -296,7 +296,7 @@ impl Url {
             .unwrap_or_else(|| self.absolute());
         source_key
             .split('/')
-            .map(query_escape)
+            .map(escape_element)
             .collect::<Vec<_>>()
             .join("/")
     }
@@ -491,15 +491,18 @@ fn rel_path(base: &Path, target: &Path) -> Option<PathBuf> {
     }
 }
 
-/// Mirrors Go's `url.QueryEscape`.
-fn query_escape(s: &str) -> String {
+/// Percent-encodes one path element: everything but the unreserved characters becomes `%XX`, a
+/// space included. s5cmd uses Go's `url.QueryEscape`, which writes a space as `+`; servers that
+/// read `x-amz-copy-source` as a URL path (MinIO) keep that `+`, so a server-side copy of a key
+/// with a space failed with NoSuchKey, in s5cmd v2.3.0 too (#31). `%20` reads as a space
+/// whichever way the server decodes, and is what botocore and the AWS Java SDK send.
+fn escape_element(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for &b in s.as_bytes() {
         match b {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 out.push(b as char)
             }
-            b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
     }
@@ -509,6 +512,14 @@ fn query_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escaped_path_encodes_a_space_as_percent_20() {
+        let u = Url::parse("s3://b/s/a b+c%d.txt").unwrap();
+        assert_eq!(u.escaped_path(), "b/s/a%20b%2Bc%25d.txt");
+        let u = Url::parse("s3://b/sub dir/x~y_z-1.txt").unwrap();
+        assert_eq!(u.escaped_path(), "b/sub%20dir/x~y_z-1.txt");
+    }
 
     #[test]
     fn parses_local() {

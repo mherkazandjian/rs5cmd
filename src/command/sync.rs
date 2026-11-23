@@ -30,7 +30,7 @@ use super::filters::Filters;
 use super::GlobalOpts;
 use crate::storage::s3::S3;
 use crate::storage::url::Url;
-use crate::storage::{new_client, Metadata, Object, Options};
+use crate::storage::{new_client, Metadata, NoMatchFound, NoObjectFound, Object, Options};
 
 #[derive(Args, Debug)]
 pub struct SyncArgs {
@@ -631,9 +631,10 @@ async fn collect_dest_objects(
     let mut rx = client.list(&listing_url, false);
     while let Some(obj) = rx.recv().await {
         if let Some(err) = &obj.err {
-            // A non-existent destination simply has no objects to compare.
+            // A missing or empty destination simply has no objects to compare: an empty S3
+            // prefix lists NoObjectFound, a missing or empty local directory NoMatchFound (#4).
             let msg = err.to_string();
-            if msg.contains("no object found") || msg.contains("not found") {
+            if err.is::<NoObjectFound>() || err.is::<NoMatchFound>() || msg.contains("not found") {
                 continue;
             }
             // Propagate other listing errors. Fatal AWS errors (AccessDenied /
@@ -747,6 +748,17 @@ use crate::storage::Storage as _;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_empty_or_missing_local_destination_has_no_objects() {
+        let dir = tempfile::tempdir().unwrap();
+        let filters = Filters::new(&[], &[]).unwrap();
+        for dst in [dir.path().to_path_buf(), dir.path().join("missing").join("sub")] {
+            let url = Url::parse(&format!("{}/", dst.display())).unwrap();
+            let got = collect_dest_objects(&url, &Options::default(), &filters).await;
+            assert!(got.as_ref().is_ok_and(|m| m.is_empty()), "{}: {:?}", dst.display(), got.err());
+        }
+    }
 
     #[test]
     fn dest_url_batch_remote_prefix() {

@@ -45,26 +45,39 @@ rs5cmd mv --fast 's3://bucket/in/*' s3://bucket/done/
 
 - Upload, download, and S3→S3 copy (server-side), also mixed in one command, and `mv`.
 - If any pair in the command is local→local, the whole command uses the default engine.
-- Honours `--dry-run`, `--json`, `--retry-count`, `--numworkers`, `--no-verify-ssl`, and the
-  `--include` / `--exclude` filters.
+- Honours `--dry-run`, `--json`, `--retry-count`, `--numworkers`, `--no-verify-ssl`,
+  `--tls-post-quantum`, `--region`, `--profile`, `--part-size`, the `--include` /
+  `--exclude` filters, and `--flatten`, `--raw` and `--no-follow-symlinks` (they shape the list
+  of transfers before the engine takes it). A file larger than the part (8 MiB unless
+  `--part-size` is given) goes to the default engine; a download is fetched in ranges of the
+  part.
 - Retries network errors and the status codes 5xx, 408 and 429 with a growing delay. Other 4xx
   answers fail at once.
 - A failed transfer prints `ERROR cp <src> <dst>: <reason>`; the command then ends with
   `error: one or more fast-path transfers failed` and exit code 1.
 
-### What it silently ignores
+### Flags it hands to the default engine
 
-No warning is printed for any of these. If you need one of them, drop `--fast`.
+With any of these the whole command runs on the default engine, so the flag takes effect, and
+rs5cmd prints `warning: --fast does not support <flags>; using the default path`, naming them
+in this order:
 
-- Object properties: `--storage-class`, `--acl`, `--content-type`.
-- Copy behaviour: `--if-none-match`, `--preserve-timestamps`, `--links`, `--client-copy`,
-  `--remove-empty-dirs`, `--version-id`, `--all-versions`.
-- Sizing: `--part-size`, `--concurrency`. There is no multipart: every object is read fully
-  into memory and sent or fetched with one request.
-- Network: `--proxy` and the proxy environment variables, `--limit-upload`, `--limit-download`,
-  `--limitrate`, `--ca-certs-file`, `--addressing-style`, `--request-payer`,
+- Object properties: `--storage-class`, `--acl`, `--content-type`, `--cache-control`,
+  `--expires`, `--content-encoding`, `--content-disposition`, `--metadata`,
+  `--metadata-directive`, `--sse`, `--sse-kms-key-id`.
+- Copy behaviour: `--no-clobber`, `--if-size-differ`, `--if-source-newer`, `--show-progress`,
+  `--preserve-timestamps`, `--if-none-match`, `--links`, `--version-id`, `--all-versions`,
+  `--client-copy`, `--remove-empty-dirs`.
+- Requests: `--concurrency` other than the default 5, `--no-sign-request` (the engine signs
+  every request), `--proxy`, `--ca-certs-file`, `--request-payer`,
+  `--addressing-style virtual`, `--limit-upload`, `--limit-download`, `--limitrate`,
   `--source-region` / `--destination-region`, `--source-endpoint-url` /
-  `--destination-endpoint-url`, `--use-dualstack-endpoint`, `--use-fips-endpoint`.
+  `--destination-endpoint-url`.
+
+The proxy environment variables (`ALL_PROXY`, `HTTPS_PROXY`, `HTTP_PROXY`) are not used by the
+engine: with one of them needed, give `--proxy` or drop `--fast`. `--use-dualstack-endpoint` and
+`--use-fips-endpoint` do not apply with an explicit endpoint, which `--fast` needs, on either
+engine.
 
 Expanding a remote wildcard into a list of keys still uses the default engine, so listing does
 follow the proxy and TLS settings even when the transfers do not.
@@ -73,7 +86,6 @@ follow the proxy and TLS settings even when the transfers do not.
 
 - Memory is roughly (objects in flight) × (object size). Keep `--fast` for objects of a few
   megabytes at most, and lower `--numworkers` if memory is tight.
-- Objects above the service's single-request limit (5 GiB on AWS S3) cannot be uploaded.
 - `--numworkers` is divided among the cores. The number of cores used defaults to the number
   available, capped at 16; set `RS5CMD_FAST_CORES=N` to change it.
 - `sync` has no `--fast`.

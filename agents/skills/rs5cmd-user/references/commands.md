@@ -45,9 +45,9 @@ Accepted before or after the command name.
 | `--ca-certs-file PEM` | Trust extra CA certificates; ignored with `--no-verify-ssl` |
 | `-x`, `--proxy URL` | `socks5://`, `socks5h://`, `http://` or `https://[user:pass@]host:port` |
 | `--request-payer requester` | For requester-pays buckets |
-| `--no-sign-request` | Accepted, but has no effect in v0.1.0 (requests are still signed) |
+| `--no-sign-request` | Send requests unsigned, without credentials: anonymous access to public buckets. `cp --fast` then uses the default path |
 | `--numworkers N` | Parallel operations. Default 256 |
-| `--retry-count N` | Retries for transient errors. Default 10 |
+| `--retry-count N` | Retries for transient errors: network errors, 500, 502, 503 and 504, throttling (`503 SlowDown`, `429 TooManyRequests`), with a growing delay. Default 10 |
 | `--limit-upload RATE`, `--limit-download RATE` | Bandwidth cap in bytes per second: `512KB`, `100MB`, `1GB`. One budget shared by all workers of a command |
 | `--limitrate RATE` | Caps both directions; the two flags above override it per direction |
 | `--use-list-objects-v1` | Use ListObjects v1 (for providers without v2) |
@@ -98,8 +98,8 @@ JSON record: `{"key","size","type","etag","storage_class","last_modified"}`; buc
 
 `rs5cmd du [OPTIONS] [TARGET]` prints the total size and count.
 
-Flags: `-H/--humanize`, `-g/--group` (one line per storage class), `--exclude GLOB`,
-`--all-versions`, `--version-id ID`.
+Flags: `-H/--humanize` (as s5cmd: `1.2K bytes`, a bare number below 1 KiB), `-g/--group` (one
+line per storage class), `--exclude GLOB`, `--all-versions`, `--version-id ID`.
 
 ```bash
 rs5cmd du 's3://bucket/data/*'      # 16 bytes in 3 objects: s3://bucket/data/*
@@ -114,7 +114,7 @@ A prefix ending in `/` counts only that level; add `*` for the whole subtree. JS
 `rs5cmd tree [OPTIONS] <TARGET>` draws the hierarchy under an S3 prefix or a local directory.
 
 Flags: `--depth N` (levels to descend), `--limit N` (stop after N keys), `--size` (append each
-object's size). Output is always text, also with `--json`.
+object's size). Output is text only: with `--json`, `tree` fails (use `ls --json`).
 
 ## head
 
@@ -142,7 +142,18 @@ destination must be a bucket, a prefix ending in `/`, or a local directory.
 | `--storage-class CLASS` | For example `STANDARD_IA`, `GLACIER` |
 | `--acl ACL` | Canned ACL, for example `bucket-owner-full-control` |
 | `--content-type TYPE` | Default for uploads is `application/octet-stream` |
+| `--cache-control`, `--content-encoding`, `--content-disposition` VALUE | That header on the new objects |
+| `--expires TIME` | `Expires` header, an RFC 3339 time such as `2030-01-02T03:04:05Z` |
+| `--metadata KEY=VALUE` | User metadata (`x-amz-meta-KEY`); repeat it for several keys. The key ends at the first `=` |
+| `--metadata-directive COPY\|REPLACE` | S3→S3 copies only (refused for uploads and downloads). Without it, a copy given `--content-type`, one of the headers above or `--metadata` replaces the source's metadata; any other copy keeps it |
+| `--sse AES256\|aws:kms`, `--sse-kms-key-id ID` | Server-side encryption |
 | `--if-none-match` | Write only when the destination does not exist; an existing one is skipped |
+| `-n`, `--no-clobber` | Keep a destination that exists |
+| `-s`, `--if-size-differ` | Overwrite a destination that exists only when the sizes differ |
+| `-u`, `--if-source-newer` | Overwrite a destination that exists only when the source is newer. With several of `-n`, `-s`, `-u`, the last given in this order decides, as in s5cmd. A kept destination prints nothing |
+| `-f`, `--flatten` | Put each matched object directly under the destination, by its base name |
+| `--raw` | No wildcards: `*` and `?` in the sources and the destination are part of the name |
+| `--show-progress`, `--sp` | Progress bar (on a terminal, without `--json`) and no line per copied object; errors still print |
 | `--preserve-timestamps` | Store the local mtime as object metadata on upload; restore it on download |
 | `--links` | Store local symlinks as small `.s5cmdlink` placeholder objects, and recreate them on download (Unix) |
 | `--client-copy` | S3→S3 through the client (download then upload) instead of a server-side copy |
@@ -150,8 +161,10 @@ destination must be a bucket, a prefix ending in `/`, or a local directory.
 | `--all-versions` | Copy every version of one remote key; each lands at `<destination>_<versionid>` |
 | `--remove-empty-dirs` | `mv` local→S3 only: remove source directories that became empty |
 | `--fast` | io_uring engine for small objects; see `fast-path-and-mount.md` |
-| `--follow-symlinks` | Always on; it cannot be turned off |
+| `--follow-symlinks` | On by default |
+| `--no-follow-symlinks` | Skip symbolic links: inside a directory source, and a source that is a link. A link a wildcard matches is still copied when it points to a file, as in s5cmd |
 | `--force-glacier-transfer` | Accepted for compatibility; `cp` copies every storage class anyway |
+| `--ignore-glacier-warnings` | Accepted for compatibility; no effect, for the same reason |
 | filter flags | see top |
 
 ```bash
@@ -162,19 +175,26 @@ rs5cmd cp 'data/*' s3://bucket/data/                # recursive upload
 rs5cmd cp 's3://bucket/data/*' ./data/              # recursive download
 rs5cmd cp 's3://a/x/*' s3://b/x/                    # server-side copy
 rs5cmd cp --if-none-match 'data/*' s3://bucket/data/
+rs5cmd cp -n 'data/*' s3://bucket/data/             # keep the objects that exist
+rs5cmd cp --flatten 'logs/*/*.gz' s3://bucket/all/  # logs/a/x.gz -> all/x.gz
+rs5cmd cp --sse aws:kms --sse-kms-key-id KEY --metadata team=ops f.bin s3://bucket/f.bin
+rs5cmd cp --raw 's3://bucket/what?.txt' out.txt     # a key with a literal `?`
 rs5cmd --source-endpoint-url https://old.example.com \
        --destination-endpoint-url https://new.example.com \
        cp 's3://bucket/*' s3://bucket/              # between two endpoints, via the client
 rs5cmd mv 'outbox/*' s3://bucket/sent/
 ```
 
-Never give a bare relative directory (`data`, `./data`) as the source. See `known-issues.md`.
+A directory source without a trailing slash (`data`, `./data`, `/abs/data`) keeps its name: its
+files land under `<dst>/data/`. `data/` or `'data/*'` copies only what is inside.
 
 ## sync
 
 `rs5cmd sync [OPTIONS] <SOURCE> <DESTINATION>` copies objects that are missing at the
 destination or differ from it. By default an object is copied when the source is newer or the
-sizes differ.
+sizes differ. Object times are used as the server returns them: MinIO and others return
+milliseconds, AWS S3 whole seconds, so on AWS a file changed in the same second as its upload is
+copied again by the next `sync`, as with s5cmd. `--size-only` makes repeat runs exact no-ops.
 
 | Flag | Meaning |
 |---|---|
@@ -199,27 +219,35 @@ rs5cmd sync --exclude '*.tmp' 's3://a/data/*' s3://b/data/
 ```
 
 The summary (`# synced N objects, deleted M`) goes to stderr and is omitted with `--json`.
-Use a wildcard source. The local destination must already hold at least one file. Both points
-are explained in `known-issues.md`.
+Use a wildcard source (`'s3://bucket/p/*'`) for a whole tree: a prefix ending in `/` lists one
+level only.
 
 ## rm
 
-`rs5cmd rm [OPTIONS] <TARGET>...` deletes objects or local files. Remote wildcards and prefixes
-are deleted in batches of 1000 keys.
+`rs5cmd rm [OPTIONS] <TARGET>...` deletes objects or local files. Remote wildcards are deleted
+in batches of 1000 keys. A bucket or a prefix ending in `/` is refused, as in s5cmd: `ERROR rm
+s3://bucket/p/: s3 bucket/prefix cannot be used for delete operations (forgot wildcard
+character?)`, exit 1, and nothing is deleted, also when other targets were fine. Write
+`'s3://bucket/p/*'` to delete everything under a prefix.
 
-Flags: `--version-id ID` (one version), `--raw` (treat each target as a literal key: no wildcard
-or trailing-slash expansion, so a key ending in `/` or containing `*` can be removed), filter
-flags.
+Flags: `--version-id ID` (one version), `--all-versions` (every version of each target, delete
+markers included: of one key, or of every key a wildcard matches; not with `--version-id`),
+`--raw` (treat each target as a literal key: no wildcard expansion, so a key ending in `/`, a
+directory marker, or containing `*` can be removed), filter flags.
+
+A deleted version is printed as s5cmd prints it, `rm <url> <version id>` with the URL padded to
+50 columns, and its JSON result has `"version_id"`.
 
 ```bash
 rs5cmd rm s3://bucket/a.txt s3://bucket/b.txt
 rs5cmd rm 's3://bucket/tmp/*'
+rs5cmd rm --all-versions 's3://bucket/tmp/*'        # versioned bucket: every version
 rs5cmd rm --exclude '*.keep' 's3://bucket/tmp/*'
 rs5cmd rm --raw 's3://bucket/weird*name'
 ```
 
-`--dry-run rm` prints nothing for a remote wildcard in v0.1.0. Preview with `ls` and the same
-pattern and filters.
+`--dry-run rm` prints a `(dry-run) rm` line for each object a wildcard would delete, and deletes
+nothing. It refuses a bucket or a bare prefix the same way.
 
 ## cat
 
@@ -231,6 +259,8 @@ is concatenated in key order. A local source must be a single file. Flag: `--ver
 
 `rs5cmd pipe [OPTIONS] <s3://bucket/key>` uploads stdin, as a multipart upload when the input
 fills at least one part. Without `--content-type`, the type is guessed from the key's extension.
+It prints `pipe s3://bucket/key`, or with `--json`
+`{"destination":"s3://bucket/key","operation":"pipe","success":true}`.
 
 Flags: `-p/--part-size MiB` (default 50), `-c/--concurrency N` (default 5), `--storage-class`,
 `--acl`, `--content-type`, `--content-encoding`, `--content-disposition`, `--cache-control`,
@@ -308,10 +338,8 @@ them.
 - Order is not kept. Do not rely on one line finishing before the next starts.
 - A failing line prints `ERROR <line>: <reason>` to stderr. The others still run, and the exit
   code is 1.
-- These outer flags are passed to every line: `--endpoint-url`, `--region`, `--profile`,
-  `--addressing-style`, `--proxy`, `--no-verify-ssl`, `--no-sign-request`, `--ca-certs-file`,
-  `--request-payer`, `--use-list-objects-v1`, `--numworkers`, `--retry-count`, `--limitrate`,
-  `--dry-run`, `--json`.
+- Every global flag given before `run` is passed to every line, except `--s3cfg` (its settings
+  are already applied to the others) and `--install-completion`.
 - These are **not** passed on: `--limit-upload`, `--limit-download`, `--source-region`,
   `--destination-region`, `--source-endpoint-url`, `--destination-endpoint-url`,
   `--use-dualstack-endpoint`, `--use-fips-endpoint`, `--color`. Write them in each line that
