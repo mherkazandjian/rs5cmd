@@ -64,6 +64,10 @@ or `--dry-run` therefore changes the output mode for lines running at the same t
 `list` returns an `mpsc::Receiver<Object>`; an entry with `err` set is an error in the stream,
 not a panic. Consumers must check `obj.err`.
 
+S3 listings are requested with `encoding-type=url` (keys with XML-illegal characters), so every
+echoed key, prefix and key marker goes through `percent_decode`: form encoding, a space comes as
+`+` and a real `+` as `%2B`. A version id marker is not encoded and is used as it comes.
+
 ## `src/fastpath/` (feature `fast`)
 
 | File | Notes |

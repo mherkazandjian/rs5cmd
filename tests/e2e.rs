@@ -2363,6 +2363,63 @@ fn rm_refuses_a_bucket_or_a_bare_prefix() {
 }
 
 #[test]
+fn keys_with_spaces_and_plus_are_listed_as_they_are() {
+    // #31: listings come URL-encoded (a space as '+', a real '+' as %2B) and '+' was not
+    // decoded: `ls` showed "a+b.txt", wildcard cp and mv failed with NoSuchKey, wildcard rm
+    // reported a delete and left the object.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let names = ["a b.txt", "c+d.txt", "e f+g.txt", "plain.txt", "sub dir/x+y z.txt"];
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("sub dir")).unwrap();
+    for n in names {
+        std::fs::write(src.join(n), n.as_bytes()).unwrap();
+    }
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", src.to_str().unwrap());
+    rs5cmd().args(["cp", &pattern, &s3("/s/")]).assert().success();
+
+    let ls = rs5cmd().args(["ls", &s3("/s/*")]).output().unwrap();
+    assert!(ls.status.success());
+    let listed = String::from_utf8_lossy(&ls.stdout);
+    for n in names {
+        assert!(listed.contains(n), "{n:?} missing from ls: {listed}");
+    }
+    assert!(!listed.contains("a+b") && !listed.contains("x+y+z"), "{listed}");
+    // The common prefix is decoded too.
+    rs5cmd()
+        .args(["ls", &s3("/s/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sub dir/"));
+
+    let dl = tmp.path().join("dl");
+    let dst = format!("{}/", dl.to_str().unwrap());
+    rs5cmd().args(["cp", &s3("/s/*"), &dst]).assert().success();
+    for n in names {
+        assert_eq!(std::fs::read(dl.join(n)).unwrap(), n.as_bytes(), "{n}");
+    }
+
+    rs5cmd().args(["mv", &s3("/s/*"), &s3("/t/")]).assert().success();
+    rs5cmd().args(["ls", &s3("/s/*")]).assert().failure();
+    let out = rs5cmd().args(["rm", &s3("/t/*")]).output().unwrap();
+    assert!(out.status.success());
+    let removed = String::from_utf8_lossy(&out.stdout);
+    for n in names {
+        let line = format!("rm {}", s3(&format!("/t/{n}")));
+        assert!(removed.contains(&line), "missing {line:?} in {removed}");
+    }
+    // Nothing is left: before the fix the keys with a space stayed.
+    rs5cmd().args(["ls", &s3("/*")]).assert().failure();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
 fn sync_delete_bare_prefix_keeps_subdirectories() {
     // #3: a bare S3 prefix source is listed one level deep; --delete deleted every destination
     // file in a subdirectory although its counterpart existed in the source.

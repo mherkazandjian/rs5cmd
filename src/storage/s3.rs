@@ -150,9 +150,12 @@ fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
 /// XML-illegal control characters (e.g. ESC `0x1b`) can be represented in the
 /// XML response and deserialized at all (upstream s5cmd #677); the echoed keys,
 /// prefixes and pagination markers then have to be decoded back to their raw
-/// bytes before use. `%XX` sequences are decoded as bytes and the result is
-/// interpreted as UTF-8 (lossily, to never panic on malformed input); a lone or
-/// malformed `%` is left verbatim.
+/// bytes before use. The encoding is the form encoding: a space comes as `+` and a
+/// real `+` as `%2B` (#31), so `+` decodes to a space, as botocore's `unquote_plus`
+/// does. `%XX` sequences are decoded as bytes and the result is interpreted as UTF-8
+/// (lossily, to never panic on malformed input); a lone or malformed `%` is left
+/// verbatim. Only keys, prefixes and key markers are encoded: a version id marker
+/// comes as it is and must not go through here (AWS version ids can contain `+`).
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -166,7 +169,7 @@ fn percent_decode(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -2225,7 +2228,8 @@ impl S3 {
                     break;
                 }
                 key_marker = page.next_key_marker().map(percent_decode);
-                version_marker = page.next_version_id_marker().map(percent_decode);
+                // Not URL-encoded by S3 (only keys, prefixes and key markers are).
+                version_marker = page.next_version_id_marker().map(str::to_string);
                 if key_marker.is_none() && version_marker.is_none() {
                     break;
                 }
@@ -2914,6 +2918,14 @@ mod tests {
     }
 
     #[test]
+    fn copy_source_encodes_the_key_and_keeps_the_version_id() {
+        use crate::storage::url::{Url, UrlOptions};
+        let opts = UrlOptions { version_id: Some("3/L4k+q".to_string()), ..Default::default() };
+        let u = Url::new("s3://b/s/a b+c.txt", opts).unwrap();
+        assert_eq!(super::S3::copy_source_header(&u), "b/s/a%20b%2Bc.txt?versionId=3/L4k+q");
+    }
+
+    #[test]
     fn percent_decode_passthrough_plain() {
         assert_eq!(percent_decode("hello/world.txt"), "hello/world.txt");
     }
@@ -2933,6 +2945,11 @@ mod tests {
         // URL-encoding of keys.
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(percent_decode("a%2Bb"), "a+b");
+        // #31: the form encoding sends a space as '+'; a real '+' always comes as %2B.
+        assert_eq!(percent_decode("s/a+b.txt"), "s/a b.txt");
+        assert_eq!(percent_decode("s/c%2Bd.txt"), "s/c+d.txt");
+        assert_eq!(percent_decode("s/e+f%2Bg++h.txt"), "s/e f+g  h.txt");
+        assert_eq!(percent_decode("+"), " ");
         assert_eq!(percent_decode("a%25b"), "a%b");
         // The encoded forward slash must round-trip to a real path separator.
         assert_eq!(percent_decode("a%2Fb"), "a/b");
