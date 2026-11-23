@@ -1,0 +1,2 @@
+c5 b-stage: c5   cat <local 1 GiB file>                 exit 0 wall   0.26s maxrss  1033.9 MB ''
+c5 b-cat-stream: c5   cat <local 1 GiB file>                 exit 0 wall   0.07s maxrss    20.9 MB ''

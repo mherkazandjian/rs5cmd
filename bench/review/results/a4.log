@@ -1,0 +1,257 @@
+#### step fp start 2026-11-19T19:20:05Z
+== 2026-11-19T19:20:05Z profile fp W1.dn.10k,W1.up.10k,W2.dn,W4.ls.100k,W6.rm.10k,W8.run.dn,W3.dn.4x1g,W3.up.4x1g,W3.dn.32x128m,W5.up.warm stub rs5cmd-prof,s5cmd-prof
+== W1.up.10k on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.1s
+  W1.up.10k            rs5cmd-prof        r0  wall    1.525s cpu    2.95s rss   174.1MB ok
+  W1.up.10k            s5cmd-prof         r0  wall    1.382s cpu    3.12s rss    42.3MB ok
+== W1.dn.10k on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd-prof        r0  wall    1.250s cpu    2.72s rss    89.5MB ok
+  W1.dn.10k            s5cmd-prof         r0  wall    1.434s cpu    3.34s rss    47.5MB ok
+== W2.dn on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W2.dn                rs5cmd-prof        r0  wall    2.310s cpu    6.88s rss   488.8MB ok
+  W2.dn                s5cmd-prof         r0  wall    2.058s cpu    5.67s rss    55.8MB ok
+== W3.up.4x1g on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 1.2s
+  W3.up.4x1g           rs5cmd-prof        r0  wall    3.445s cpu   10.86s rss    47.1MB ok
+  W3.up.4x1g           s5cmd-prof         r0  wall    2.899s cpu    9.07s rss    44.4MB ok
+== W3.dn.4x1g on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd-prof        r0  wall    2.178s cpu    6.42s rss   358.5MB ok
+  W3.dn.4x1g           s5cmd-prof         r0  wall    1.482s cpu    3.72s rss    42.7MB ok
+== W3.dn.32x128m on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd-prof        r0  wall    2.387s cpu    6.68s rss  1378.4MB ok
+  W3.dn.32x128m        s5cmd-prof         r0  wall    1.425s cpu    3.52s rss    42.9MB ok
+== W4.ls.100k on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W4.ls.100k           rs5cmd-prof        r0  wall    1.145s cpu    1.34s rss    41.3MB ok
+  W4.ls.100k           s5cmd-prof         r0  wall    1.569s cpu    2.04s rss    41.0MB ok
+== W5.up.warm on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 1.3s
+  W5.up.warm           rs5cmd-prof        r0  wall    5.416s cpu    5.92s rss  1401.3MB ok
+  W5.up.warm           s5cmd-prof         r0  wall    4.498s cpu   10.91s rss  1306.8MB ok
+== W6.rm.10k on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W6.rm.10k            rs5cmd-prof        r0  wall    0.873s cpu    0.95s rss    41.1MB ok
+  W6.rm.10k            s5cmd-prof         r0  wall    0.753s cpu    1.01s rss    41.2MB ok
+== W8.run.dn on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W8.run.dn            rs5cmd-prof        r0  wall   10.399s cpu   15.01s rss   110.3MB ok
+  W8.run.dn            s5cmd-prof         r0  wall    3.221s cpu   10.16s rss    64.8MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/fp
+== 2026-11-19T19:21:44Z exit=0
+== 2026-11-19T19:21:44Z profile fp W1.dn.10k,W1.up.10k,W3.dn.4x1g stub rs5cmd-prof-fast
+== W1.up.10k on stub: rs5cmd-prof-fast; 1 rounds + 0 warm-up
+   prepared in 0.1s
+  W1.up.10k            rs5cmd-fast-epoll  r0  wall    1.197s cpu    1.48s rss   205.8MB ok
+== W1.dn.10k on stub: rs5cmd-prof-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd-fast-epoll  r0  wall    0.870s cpu    1.14s rss    82.8MB ok
+== W3.dn.4x1g on stub: rs5cmd-prof-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd-fast-epoll  r0  wall    2.002s cpu    5.31s rss  4116.4MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/fp
+== 2026-11-19T19:21:55Z exit=0
+== 2026-11-19T19:21:55Z profile fp W1.dn.10k,W3.dn.4x1g stub-tls rs5cmd-prof,s5cmd-prof
+== W1.dn.10k on stub-tls: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd-prof        r0  wall    1.375s cpu    2.99s rss    96.7MB ok
+  W1.dn.10k            s5cmd-prof         r0  wall    2.260s cpu    6.11s rss   118.4MB ok
+== W3.dn.4x1g on stub-tls: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd-prof        r0  wall    2.546s cpu    7.83s rss   479.5MB ok
+  W3.dn.4x1g           s5cmd-prof         r0  wall    1.731s cpu    4.64s rss    43.5MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/fp
+== 2026-11-19T19:22:14Z exit=0
+#### step fp end 2026-11-19T19:22:14Z
+#### step dwarf start 2026-11-19T19:22:14Z
+== 2026-11-19T19:22:14Z profile dwarf W1.dn.10k,W3.dn.4x1g stub rs5cmd-prof
+== W1.dn.10k on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd-prof        r0  wall    1.264s cpu    2.72s rss    88.8MB ok
+== W3.dn.4x1g on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd-prof        r0  wall    2.149s cpu    6.40s rss   370.3MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/dwarf
+== 2026-11-19T19:22:53Z exit=0
+#### step dwarf end 2026-11-19T19:22:53Z
+#### step stat start 2026-11-19T19:22:53Z
+== 2026-11-19T19:22:53Z profile stat W1.dn.10k,W1.up.10k,W2.dn,W4.ls.100k,W6.rm.10k,W8.run.dn,W3.dn.4x1g,W3.up.4x1g,W3.dn.32x128m stub rs5cmd,s5cmd,rs5cmd-fast
+== W1.up.10k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.1s
+  W1.up.10k            rs5cmd             r0  wall    0.963s cpu    2.36s rss   176.5MB ok
+  W1.up.10k            s5cmd              r0  wall    0.736s cpu    2.41s rss    40.2MB ok
+  W1.up.10k            rs5cmd-fast-epoll  r0  wall    0.601s cpu    0.90s rss   174.2MB ok
+== W1.dn.10k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd             r0  wall    0.673s cpu    2.13s rss    89.8MB ok
+  W1.dn.10k            s5cmd              r0  wall    0.777s cpu    2.61s rss    44.2MB ok
+  W1.dn.10k            rs5cmd-fast-epoll  r0  wall    0.256s cpu    0.54s rss    82.6MB ok
+== W2.dn on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W2.dn                rs5cmd             r0  wall    1.689s cpu    6.12s rss   506.2MB ok
+  W2.dn                s5cmd              r0  wall    1.356s cpu    4.70s rss    56.3MB ok
+  W2.dn                rs5cmd-fast-epoll  r0  wall    1.628s cpu    5.86s rss   612.7MB ok
+== W3.up.4x1g on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W3.up.4x1g           rs5cmd             r0  wall    3.132s cpu   11.39s rss    25.7MB ok
+  W3.up.4x1g           s5cmd              r0  wall    2.215s cpu    8.22s rss    27.3MB ok
+  W3.up.4x1g           rs5cmd-fast-epoll  r0  wall    0.918s cpu    2.96s rss  4112.9MB ok
+== W3.dn.4x1g on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd             r0  wall    1.482s cpu    5.48s rss   365.1MB ok
+  W3.dn.4x1g           s5cmd              r0  wall    0.870s cpu    2.98s rss    22.9MB ok
+  W3.dn.4x1g           rs5cmd-fast-epoll  r0  wall    1.293s cpu    4.34s rss  4115.8MB ok
+== W3.dn.32x128m on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd             r0  wall    1.717s cpu    5.95s rss  1544.3MB ok
+  W3.dn.32x128m        s5cmd              r0  wall    0.786s cpu    2.75s rss    27.4MB ok
+  W3.dn.32x128m        rs5cmd-fast-epoll  r0  wall    1.358s cpu    4.49s rss  4117.2MB ok
+== W4.ls.100k on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W4.ls.100k           rs5cmd             r0  wall    0.557s cpu    0.76s rss    22.6MB ok
+  W4.ls.100k           s5cmd              r0  wall    0.961s cpu    1.41s rss    35.9MB ok
+== W6.rm.10k on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W6.rm.10k            rs5cmd             r0  wall    0.273s cpu    0.37s rss    30.3MB ok
+  W6.rm.10k            s5cmd              r0  wall    0.176s cpu    0.41s rss    42.1MB ok
+== W8.run.dn on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W8.run.dn            rs5cmd             r0  wall    9.501s cpu   13.85s rss   110.6MB ok
+  W8.run.dn            s5cmd              r0  wall    2.572s cpu    9.44s rss    56.7MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/stat
+== 2026-11-19T19:24:16Z exit=0
+#### step stat end 2026-11-19T19:24:16Z
+#### step strace start 2026-11-19T19:24:16Z
+== 2026-11-19T19:24:16Z profile strace W1.dn.10k,W1.up.10k,W2.dn,W4.ls.100k,W6.rm.10k,W8.run.dn,W3.dn.4x1g,W3.up.4x1g,W3.dn.32x128m stub rs5cmd,s5cmd,rs5cmd-fast
+== W1.up.10k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.1s
+  W1.up.10k            rs5cmd             r0  wall    2.148s cpu    4.65s rss   176.3MB ok
+  W1.up.10k            s5cmd              r0  wall    1.954s cpu    4.96s rss    27.9MB ok
+  W1.up.10k            rs5cmd-fast-epoll  r0  wall    1.595s cpu    2.26s rss   166.6MB ok
+== W1.dn.10k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd             r0  wall    1.856s cpu    4.32s rss    87.5MB ok
+  W1.dn.10k            s5cmd              r0  wall    1.909s cpu    4.91s rss    36.2MB ok
+  W1.dn.10k            rs5cmd-fast-epoll  r0  wall    1.116s cpu    1.80s rss   106.9MB ok
+== W2.dn on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W2.dn                rs5cmd             r0  wall    2.331s cpu    6.63s rss   455.7MB ok
+  W2.dn                s5cmd              r0  wall    3.486s cpu    9.25s rss    58.5MB ok
+  W2.dn                rs5cmd-fast-epoll  r0  wall    2.028s cpu    6.63s rss   597.1MB ok
+== W3.up.4x1g on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W3.up.4x1g           rs5cmd             r0  wall   24.560s cpu   45.94s rss    24.3MB ok
+  W3.up.4x1g           s5cmd              r0  wall    4.376s cpu   12.72s rss    28.8MB ok
+  W3.up.4x1g           rs5cmd-fast-epoll  r0  wall    0.953s cpu    3.06s rss  4113.1MB ok
+== W3.dn.4x1g on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd             r0  wall    1.587s cpu    5.23s rss   334.7MB ok
+  W3.dn.4x1g           s5cmd              r0  wall    1.990s cpu    5.35s rss    23.4MB ok
+  W3.dn.4x1g           rs5cmd-fast-epoll  r0  wall    1.310s cpu    4.34s rss  4116.1MB ok
+== W3.dn.32x128m on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd             r0  wall    1.864s cpu    5.97s rss  1395.4MB ok
+  W3.dn.32x128m        s5cmd              r0  wall    2.017s cpu    5.34s rss    27.6MB ok
+  W3.dn.32x128m        rs5cmd-fast-epoll  r0  wall    1.372s cpu    4.57s rss  4116.8MB ok
+== W4.ls.100k on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W4.ls.100k           rs5cmd             r0  wall    2.256s cpu    3.57s rss    21.4MB ok
+  W4.ls.100k           s5cmd              r0  wall    1.449s cpu    3.05s rss    37.8MB ok
+== W6.rm.10k on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W6.rm.10k            rs5cmd             r0  wall    0.550s cpu    0.87s rss    30.8MB ok
+  W6.rm.10k            s5cmd              r0  wall    0.240s cpu    0.60s rss    46.1MB ok
+== W8.run.dn on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W8.run.dn            rs5cmd             r0  wall   11.965s cpu   21.40s rss   108.9MB ok
+  W8.run.dn            s5cmd              r0  wall    5.132s cpu   14.56s rss    72.9MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/strace
+== 2026-11-19T19:26:21Z exit=0
+#### step strace end 2026-11-19T19:26:21Z
+#### step heap start 2026-11-19T19:26:21Z
+== 2026-11-19T19:26:21Z profile heap W1.up.100k,W1.dn.100k,W3.dn.32x128m,W5.up.warm stub rs5cmd-prof
+== W1.up.100k on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W1.up.100k           rs5cmd-prof        r0  wall    0.011s cpu    0.00s rss     1.8MB FAIL {"error": "nonzero exit", "stderr": ""}
+== W1.dn.100k on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.100k           rs5cmd-prof        r0  wall    0.003s cpu    0.00s rss     1.6MB FAIL {"error": "nonzero exit", "stderr": ""}
+== W3.dn.32x128m on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd-prof        r0  wall    0.002s cpu    0.00s rss     1.6MB FAIL {"error": "nonzero exit", "stderr": ""}
+== W5.up.warm on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 1.3s
+  W5.up.warm           rs5cmd-prof        r0  wall    0.002s cpu    0.00s rss     1.6MB FAIL {"error": "nonzero exit", "stderr": ""}
+profile outputs: /src/rs5cmd/bench/review/prof/heap
+== 2026-11-19T19:26:27Z exit=0
+#### step heap end 2026-11-19T19:26:27Z
+#### step smaps start 2026-11-19T19:26:27Z
+== 2026-11-19T19:26:27Z profile smaps W1.up.100k,W1.dn.100k,W3.dn.32x128m,W5.up.warm stub rs5cmd,s5cmd,rs5cmd-fast
+== W1.up.100k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W1.up.100k           rs5cmd             r0  wall    9.572s cpu   25.03s rss  1376.0MB ok
+  W1.up.100k           s5cmd              r0  wall    6.344s cpu   22.25s rss    51.4MB ok
+  W1.up.100k           rs5cmd-fast-epoll  r0  wall    6.325s cpu    9.83s rss  1417.8MB ok
+== W1.dn.100k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.100k           rs5cmd             r0  wall    6.168s cpu   21.47s rss   535.9MB ok
+  W1.dn.100k           s5cmd              r0  wall    7.793s cpu   26.82s rss    56.9MB ok
+  W1.dn.100k           rs5cmd-fast-epoll  r0  wall    2.189s cpu    5.29s rss   543.9MB ok
+== W3.dn.32x128m on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd             r0  wall    1.926s cpu    6.14s rss  1683.5MB ok
+  W3.dn.32x128m        s5cmd              r0  wall    0.800s cpu    2.75s rss    27.3MB ok
+  W3.dn.32x128m        rs5cmd-fast-epoll  r0  wall    1.589s cpu    4.84s rss  4044.9MB ok
+== W5.up.warm on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 1.3s
+  W5.up.warm           rs5cmd             r0  wall    6.000s cpu    7.14s rss  1402.1MB ok
+  W5.up.warm           s5cmd              r0  wall    4.122s cpu   10.75s rss  1293.5MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/smaps
+== 2026-11-19T19:27:43Z exit=0
+#### step smaps end 2026-11-19T19:27:43Z
+#### step fault start 2026-11-19T19:27:43Z
+== 2026-11-19T19:27:43Z fault
+== W3.up.4x1g on stub: s5cmd, rs5cmd; 2 rounds + 0 warm-up
+   prepared in 1.1s
+  W3.up.4x1g           s5cmd              r0  wall   12.345s cpu    8.67s rss    25.7MB ok
+  W3.up.4x1g           rs5cmd             r0  wall    9.099s cpu   14.48s rss    25.3MB FAIL {"error": "nonzero exit", "stderr": "message: \"Please reduce your request rate.\", aws_request_id: \"stub\" }\nERROR cp /mnt/tmpfs/corpus-W3.up.4x1g/obj_0000002.dat s3://bench/up-W3.up.4x1g-rs5cmd-r0/obj_0000002.dat: service error: unhandled error (SlowDown): Error { code: \"SlowDown\", message: \"
+  W3.up.4x1g           rs5cmd             r1  wall    6.988s cpu   10.85s rss    24.6MB FAIL {"error": "nonzero exit", "stderr": "message: \"Please reduce your request rate.\", aws_request_id: \"stub\" }\nERROR cp /mnt/tmpfs/corpus-W3.up.4x1g/obj_0000001.dat s3://bench/up-W3.up.4x1g-rs5cmd-r1/obj_0000001.dat: service error: unhandled error (SlowDown): Error { code: \"SlowDown\", message: \"
+  W3.up.4x1g           s5cmd              r1  wall   13.136s cpu    8.67s rss    27.1MB ok
+== W3.dn.4x1g on stub: s5cmd, rs5cmd; 2 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           s5cmd              r0  wall    6.349s cpu    2.85s rss    23.3MB ok
+  W3.dn.4x1g           rs5cmd             r0  wall    5.311s cpu    3.32s rss   213.9MB FAIL {"error": "nonzero exit", "stderr": "led error (SlowDown): Error { code: \"SlowDown\", message: \"Please reduce your request rate.\", aws_request_id: \"stub\" }\nERROR cp s3://bench/dn-W3.dn.4x1g/obj_0000000.dat /mnt/tmpfs/out/obj_0000000.dat: service error: unhandled error (SlowDown): Error { code:
+  W3.dn.4x1g           rs5cmd             r1  wall    5.866s cpu    3.24s rss   202.2MB FAIL {"error": "nonzero exit", "stderr": "led error (SlowDown): Error { code: \"SlowDown\", message: \"Please reduce your request rate.\", aws_request_id: \"stub\" }\nERROR cp s3://bench/dn-W3.dn.4x1g/obj_0000001.dat /mnt/tmpfs/out/obj_0000001.dat: service error: unhandled error (SlowDown): Error { code:
+  W3.dn.4x1g           s5cmd              r1  wall    6.530s cpu    2.63s rss    23.4MB ok
+== 2026-11-19T19:29:02Z exit=0
+#### step fault end 2026-11-19T19:29:02Z
+#### step heap start 2026-11-19T19:29:34Z
+== 2026-11-19T19:29:34Z profile heap W1.up.100k,W1.dn.100k,W3.dn.32x128m,W5.up.warm stub rs5cmd-prof
+== W1.up.100k on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W1.up.100k           rs5cmd-prof        r0  wall   56.068s cpu  160.70s rss  1389.8MB ok
+== W1.dn.100k on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.100k           rs5cmd-prof        r0  wall   43.986s cpu  141.01s rss  1102.6MB ok
+== W3.dn.32x128m on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd-prof        r0  wall    2.870s cpu    7.19s rss  1379.3MB ok
+== W5.up.warm on stub: rs5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 1.3s
+  W5.up.warm           rs5cmd-prof        r0  wall   13.632s cpu   20.94s rss  1407.0MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/heap
+== 2026-11-19T19:31:59Z exit=0
+#### step heap end 2026-11-19T19:31:59Z
+== 2026-11-19T19:44:42Z profile fp W1.dn.10k,W3.dn.4x1g stub (rerun: the TLS runs had overwritten these names)
+== W1.dn.10k on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd-prof        r0  wall    1.266s cpu    2.69s rss    88.9MB ok
+  W1.dn.10k            s5cmd-prof         r0  wall    1.404s cpu    3.26s rss    46.2MB ok
+== W3.dn.4x1g on stub: rs5cmd-prof, s5cmd-prof; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd-prof        r0  wall    2.084s cpu    6.12s rss   348.9MB ok
+  W3.dn.4x1g           s5cmd-prof         r0  wall    1.412s cpu    3.50s rss    42.8MB ok
+profile outputs: /src/rs5cmd/bench/review/prof/fp

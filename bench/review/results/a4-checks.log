@@ -1,0 +1,21 @@
+c5   cat <local 1 GiB file>                 exit 0 wall   0.48s maxrss  1036.1 MB ''
+c5   cat s3://bench/c5/<1 GiB object>      exit 0 wall   0.02s maxrss    21.6 MB
+f47  1 concurrent run(s), run 0: exit 0, pinned threads to ['6 7 14 15'] (client cpuset 6,7,14,15)
+f47  2 concurrent run(s), run 0: exit 0, pinned threads to ['6 7 14 15'] (client cpuset 6,7,14,15)
+f47  2 concurrent run(s), run 1: exit 0, pinned threads to ['6 7 14 15'] (client cpuset 6,7,14,15)
+sig  s5cmd          running at signal: True; exit 1  0.00s after SIGTERM; total   1.0s; stderr tail ''
+sig  rs5cmd         running at signal: True; exit 130  0.00s after SIGTERM; total   1.0s; stderr tail 'interrupted'
+sig  rs5cmd --fast  running at signal: True; exit 0  0.06s after SIGTERM; total   1.1s; stderr tail ''
+== 2026-11-19T19:45:52Z rerun after fixing the checks
+c5   cat <local 1 GiB file>                 exit 0 wall   0.48s maxrss  1036.1 MB ''
+c5   cat s3://bench/c5/<1 GiB object>      exit 0 wall   0.02s maxrss    21.9 MB
+f47  1 concurrent run(s), run 0: exit 0, pinned threads to ['6 7 14 15'] (client cpuset 6,7,14,15)
+f47  2 concurrent run(s), run 0: exit 0, pinned threads to ['6 7 14 15'] (client cpuset 6,7,14,15)
+f47  2 concurrent run(s), run 1: exit 0, pinned threads to ['6 7 14 15'] (client cpuset 6,7,14,15)
+sig  s5cmd          running at signal: True; exit 1  0.00s after SIGTERM; total   1.0s; stderr tail ''
+sig  rs5cmd         running at signal: True; exit 130  0.00s after SIGTERM; total   1.0s; stderr tail 'interrupted'
+sig  rs5cmd --fast  running at signal: True; exit 0 15.04s after SIGTERM; total  16.0s; stderr tail ''
+== 2026-11-19T19:46:48Z f47 rerun (regex fixed: strace pads before '= 0'); the c5 remote line above used a wrong key and is dropped
+f47  1 concurrent run(s), run 0: exit 0, threads pinned to CPUs ['6', '7', '14', '15'] (process mask 6,7,14,15; taskset's own call excluded)
+f47  2 concurrent run(s), run 0: exit 0, threads pinned to CPUs ['6', '14', '15'] (process mask 6,7,14,15; taskset's own call excluded)
+f47  2 concurrent run(s), run 1: exit 0, threads pinned to CPUs ['6', '7', '14', '15'] (process mask 6,7,14,15; taskset's own call excluded)

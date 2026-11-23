@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Host-side wrapper: docker compose for the soak project. It sets
+#   IO_DEVICE       the block device behind the docker root (the whole disk if that is a
+#                   partition), which compose.yml caps with io.max; found as bench/review/dc does
+#   HOST_UID/GID    so results written by the (root) container can be handed back
+# and adds compose.creds.yml when the credentials directory exists
+# (SOAK_CREDS_DIR, default ~/.config/rs5cmd-soak).
+set -euo pipefail
+here="$(cd "$(dirname "$0")" && pwd)"
+# The compose subcommand is the first argument that is not an option (or an option's value).
+sub=""; skip=0
+for a in "$@"; do
+    if [ "$skip" = 1 ]; then skip=0; continue; fi
+    case "$a" in
+        --profile|-f|--file|-p|--project-name|--env-file) skip=1 ;;
+        -*) ;;
+        *) sub="$a"; break ;;
+    esac
+done
+if [ "$sub" = run ]; then
+    echo "dc: 'run' is not allowed (a one-off container adds its memory limit to the total);" \
+         "use 'up -d' and 'exec'" >&2
+    exit 2
+fi
+if [ -z "${IO_DEVICE:-}" ]; then
+    root="$(sudo docker info -f '{{.DockerRootDir}}')"
+    dev="$(df --output=source "$root" | tail -1)"
+    dev="$(readlink -f "$dev")"
+    if [ "$(lsblk -dno TYPE "$dev")" = "part" ]; then
+        dev="/dev/$(lsblk -dno PKNAME "$dev")"
+    fi
+    IO_DEVICE="$dev"
+fi
+mkdir -p "$here/results" "$here/.run"
+files=(-f "$here/compose.yml")
+creds="${SOAK_CREDS_DIR:-$HOME/.config/rs5cmd-soak}"
+if [ -d "$creds" ]; then
+    files+=(-f "$here/compose.creds.yml")
+fi
+exec sudo env HOST_UID="$(id -u)" HOST_GID="$(id -g)" IO_DEVICE="$IO_DEVICE" \
+    SOAK_CREDS_DIR="$creds" SOAK_IMAGE="${SOAK_IMAGE:-rs5cmd-optreview-bench}" \
+    REVIEW_BINS_VOLUME="${REVIEW_BINS_VOLUME:-rs5cmd-optreview_bins}" \
+    docker compose "${files[@]}" "$@"

@@ -1,0 +1,76 @@
+#### step sched start 2026-11-20T23:45:58Z
+== 2026-11-20T23:45:58Z profile sched W1.dn.10k,W1.up.10k,W2.dn,W4.ls.100k,W6.rm.10k,W8.run.dn,W3.dn.4x1g,W3.up.4x1g,W3.dn.32x128m,W5.up.warm stub rs5cmd,s5cmd,rs5cmd-fast
+== W1.up.10k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.1s
+  W1.up.10k            rs5cmd             r0  wall    0.566s cpu    1.71s rss    49.7MB ok
+  W1.up.10k            s5cmd              r0  wall    0.744s cpu    2.46s rss    30.3MB ok
+  W1.up.10k            rs5cmd-fast-epoll  r0  wall    0.244s cpu    0.48s rss    45.6MB ok
+== W1.dn.10k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.10k            rs5cmd             r0  wall    0.600s cpu    1.84s rss    65.1MB ok
+  W1.dn.10k            s5cmd              r0  wall    0.786s cpu    2.61s rss    44.3MB ok
+  W1.dn.10k            rs5cmd-fast-epoll  r0  wall    0.253s cpu    0.48s rss    58.8MB ok
+== W2.dn on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W2.dn                rs5cmd             r0  wall    1.682s cpu    6.16s rss   502.7MB ok
+  W2.dn                s5cmd              r0  wall    1.359s cpu    4.83s rss    52.4MB ok
+  W2.dn                rs5cmd-fast-epoll  r0  wall    1.610s cpu    5.88s rss   591.4MB ok
+== W3.up.4x1g on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W3.up.4x1g           rs5cmd             r0  wall    0.767s cpu    2.62s rss    31.5MB ok
+  W3.up.4x1g           s5cmd              r0  wall    2.264s cpu    8.32s rss    27.8MB ok
+  W3.up.4x1g           rs5cmd-fast-epoll  r0  wall    0.995s cpu    3.44s rss  4109.2MB ok
+== W3.dn.4x1g on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.4x1g           rs5cmd             r0  wall    1.494s cpu    5.54s rss   334.3MB ok
+  W3.dn.4x1g           s5cmd              r0  wall    0.866s cpu    3.02s rss    23.4MB ok
+  W3.dn.4x1g           rs5cmd-fast-epoll  r0  wall    1.300s cpu    4.46s rss  4111.3MB ok
+== W3.dn.32x128m on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd             r0  wall    1.640s cpu    5.60s rss  1729.5MB ok
+  W3.dn.32x128m        s5cmd              r0  wall    0.806s cpu    2.79s rss    25.7MB ok
+  W3.dn.32x128m        rs5cmd-fast-epoll  r0  wall    1.299s cpu    4.44s rss  4117.5MB ok
+== W4.ls.100k on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W4.ls.100k           rs5cmd             r0  wall    0.373s cpu    0.45s rss    16.7MB ok
+  W4.ls.100k           s5cmd              r0  wall    0.987s cpu    1.48s rss    35.7MB ok
+== W5.up.warm on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 1.3s
+  W5.up.warm           rs5cmd             r0  wall    1.340s cpu    1.68s rss   395.3MB ok
+  W5.up.warm           s5cmd              r0  wall    3.566s cpu    9.44s rss  1349.4MB ok
+== W6.rm.10k on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W6.rm.10k            rs5cmd             r0  wall    0.077s cpu    0.09s rss    25.4MB ok
+  W6.rm.10k            s5cmd              r0  wall    0.161s cpu    0.40s rss    40.6MB ok
+== W8.run.dn on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W8.run.dn            rs5cmd             r0  wall    2.497s cpu    7.75s rss    27.8MB ok
+  W8.run.dn            s5cmd              r0  wall    2.636s cpu    9.64s rss    58.9MB ok
+profile outputs: /src/rs5cmd/bench/review/prof-w1/sched
+== 2026-11-20T23:47:16Z exit=0
+#### step sched end 2026-11-20T23:47:16Z
+#### step smaps start 2026-11-20T23:47:16Z
+== 2026-11-20T23:47:16Z profile smaps W1.up.100k,W1.dn.100k,W3.dn.32x128m,W5.up.warm stub rs5cmd,s5cmd,rs5cmd-fast
+== W1.up.100k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 1.1s
+  W1.up.100k           rs5cmd             r0  wall    4.655s cpu   15.73s rss   147.1MB ok
+  W1.up.100k           s5cmd              r0  wall    6.718s cpu   23.74s rss    52.4MB ok
+  W1.up.100k           rs5cmd-fast-epoll  r0  wall    1.890s cpu    4.73s rss   185.8MB ok
+== W1.dn.100k on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W1.dn.100k           rs5cmd             r0  wall    5.167s cpu   17.89s rss   342.5MB ok
+  W1.dn.100k           s5cmd              r0  wall    8.205s cpu   28.25s rss    56.3MB ok
+  W1.dn.100k           rs5cmd-fast-epoll  r0  wall    1.928s cpu    4.89s rss   348.5MB ok
+== W3.dn.32x128m on stub: rs5cmd, s5cmd, rs5cmd-fast; 1 rounds + 0 warm-up
+   prepared in 0.0s
+  W3.dn.32x128m        rs5cmd             r0  wall    1.844s cpu    5.93s rss  1678.7MB ok
+  W3.dn.32x128m        s5cmd              r0  wall    0.845s cpu    2.90s rss    27.7MB ok
+  W3.dn.32x128m        rs5cmd-fast-epoll  r0  wall    1.600s cpu    5.04s rss  4102.0MB ok
+== W5.up.warm on stub: rs5cmd, s5cmd; 1 rounds + 0 warm-up
+   prepared in 1.3s
+  W5.up.warm           rs5cmd             r0  wall    1.389s cpu    1.99s rss   395.1MB ok
+  W5.up.warm           s5cmd              r0  wall    3.774s cpu   10.53s rss  1346.2MB ok
+profile outputs: /src/rs5cmd/bench/review/prof-w1/smaps
+== 2026-11-20T23:48:18Z exit=0
+#### step smaps end 2026-11-20T23:48:18Z
+== a4 exit=0

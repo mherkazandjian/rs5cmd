@@ -1,0 +1,404 @@
+block-buffer v0.10.4
+└── digest v0.10.7
+    ├── crc-fast v1.10.0
+    │   └── aws-smithy-checksums v0.64.8
+    │       └── aws-sdk-s3 v1.134.0
+    │           └── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── ecdsa v0.16.9
+    │   └── p256 v0.13.2
+    │       └── aws-sigv4 v1.4.4
+    │           ├── aws-runtime v1.7.4
+    │           │   ├── aws-config v1.8.17
+    │           │   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    │           │   ├── aws-sdk-s3 v1.134.0 (*)
+    │           │   ├── aws-sdk-sso v1.100.0
+    │           │   │   └── aws-config v1.8.17 (*)
+    │           │   ├── aws-sdk-ssooidc v1.102.0
+    │           │   │   └── aws-config v1.8.17 (*)
+    │           │   └── aws-sdk-sts v1.105.0
+    │           │       └── aws-config v1.8.17 (*)
+    │           ├── aws-sdk-s3 v1.134.0 (*)
+    │           └── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── elliptic-curve v0.13.8
+    │   ├── ecdsa v0.16.9 (*)
+    │   ├── p256 v0.13.2 (*)
+    │   └── primeorder v0.13.6
+    │       └── p256 v0.13.2 (*)
+    ├── hmac v0.12.1
+    │   └── rfc6979 v0.4.0
+    │       └── ecdsa v0.16.9 (*)
+    ├── md-5 v0.10.6
+    │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── sha1 v0.10.6
+    │   └── aws-config v1.8.17 (*)
+    ├── sha2 v0.10.9
+    │   ├── p256 v0.13.2 (*)
+    │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    └── signature v2.2.0
+        └── ecdsa v0.16.9 (*)
+
+block-buffer v0.12.0
+└── digest v0.11.3
+    ├── hmac v0.13.0
+    │   ├── aws-sdk-s3 v1.134.0 (*)
+    │   └── aws-sigv4 v1.4.4 (*)
+    ├── md-5 v0.11.0
+    │   └── aws-smithy-checksums v0.64.8 (*)
+    ├── sha1 v0.11.0
+    │   └── aws-smithy-checksums v0.64.8 (*)
+    └── sha2 v0.11.0
+        ├── aws-sdk-s3 v1.134.0 (*)
+        ├── aws-sigv4 v1.4.4 (*)
+        └── aws-smithy-checksums v0.64.8 (*)
+
+const-oid v0.9.6
+├── der v0.7.10
+│   ├── ecdsa v0.16.9 (*)
+│   ├── pkcs8 v0.10.2
+│   │   ├── elliptic-curve v0.13.8 (*)
+│   │   └── sec1 v0.7.3
+│   │       └── elliptic-curve v0.13.8 (*)
+│   ├── sec1 v0.7.3 (*)
+│   └── spki v0.7.3
+│       ├── ecdsa v0.16.9 (*)
+│       └── pkcs8 v0.10.2 (*)
+└── digest v0.10.7 (*)
+
+const-oid v0.10.2
+└── digest v0.11.3 (*)
+
+cpufeatures v0.2.17
+├── sha1 v0.10.6 (*)
+└── sha2 v0.10.9 (*)
+
+cpufeatures v0.3.0
+├── sha1 v0.11.0 (*)
+└── sha2 v0.11.0 (*)
+
+crypto-common v0.1.7
+└── digest v0.10.7 (*)
+
+crypto-common v0.2.2
+└── digest v0.11.3 (*)
+
+digest v0.10.7 (*)
+
+digest v0.11.3 (*)
+
+h2 v0.3.27
+├── aws-smithy-http-client v1.1.12
+│   └── aws-smithy-runtime v1.11.3
+│       ├── aws-config v1.8.17 (*)
+│       ├── aws-runtime v1.7.4 (*)
+│       ├── aws-sdk-s3 v1.134.0 (*)
+│       ├── aws-sdk-sso v1.100.0 (*)
+│       ├── aws-sdk-ssooidc v1.102.0 (*)
+│       └── aws-sdk-sts v1.105.0 (*)
+└── hyper v0.14.32
+    ├── aws-smithy-http-client v1.1.12 (*)
+    └── hyper-rustls v0.24.2
+        └── aws-smithy-http-client v1.1.12 (*)
+
+h2 v0.4.14
+├── aws-smithy-http-client v1.1.12 (*)
+└── hyper v1.10.0
+    ├── aws-smithy-http-client v1.1.12 (*)
+    ├── hyper-rustls v0.27.9
+    │   ├── aws-smithy-http-client v1.1.12 (*)
+    │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── hyper-util v0.1.20
+    │   ├── aws-smithy-http-client v1.1.12 (*)
+    │   ├── hyper-rustls v0.27.9 (*)
+    │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    └── rs5cmd v0.1.0 (/src/rs5cmd)
+
+hashbrown v0.12.3
+└── indexmap v1.9.3
+    └── monoio-http v0.3.12
+        ├── monoio-transports v0.5.3
+        │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+        └── rs5cmd v0.1.0 (/src/rs5cmd)
+
+hashbrown v0.16.1
+└── lru v0.16.4
+    └── aws-sdk-s3 v1.134.0 (*)
+
+hashbrown v0.17.1
+└── indexmap v2.14.0
+    ├── h2 v0.3.27 (*)
+    └── h2 v0.4.14 (*)
+
+hmac v0.12.1 (*)
+
+hmac v0.13.0 (*)
+
+http v0.2.12
+├── aws-runtime v1.7.4 (*)
+├── aws-sdk-s3 v1.134.0 (*)
+├── aws-sdk-sso v1.100.0 (*)
+├── aws-sdk-ssooidc v1.102.0 (*)
+├── aws-sdk-sts v1.105.0 (*)
+├── aws-sigv4 v1.4.4 (*)
+├── aws-smithy-http-client v1.1.12 (*)
+├── aws-smithy-runtime v1.11.3 (*)
+├── aws-smithy-runtime-api v1.12.1
+│   ├── aws-config v1.8.17 (*)
+│   ├── aws-credential-types v1.2.14
+│   │   ├── aws-config v1.8.17 (*)
+│   │   ├── aws-runtime v1.7.4 (*)
+│   │   ├── aws-sdk-s3 v1.134.0 (*)
+│   │   ├── aws-sdk-sso v1.100.0 (*)
+│   │   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   │   ├── aws-sdk-sts v1.105.0 (*)
+│   │   ├── aws-sigv4 v1.4.4 (*)
+│   │   ├── aws-types v1.3.16
+│   │   │   ├── aws-config v1.8.17 (*)
+│   │   │   ├── aws-runtime v1.7.4 (*)
+│   │   │   ├── aws-sdk-s3 v1.134.0 (*)
+│   │   │   ├── aws-sdk-sso v1.100.0 (*)
+│   │   │   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   │   │   └── aws-sdk-sts v1.105.0 (*)
+│   │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+│   ├── aws-runtime v1.7.4 (*)
+│   ├── aws-sdk-s3 v1.134.0 (*)
+│   ├── aws-sdk-sso v1.100.0 (*)
+│   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   ├── aws-sdk-sts v1.105.0 (*)
+│   ├── aws-sigv4 v1.4.4 (*)
+│   ├── aws-smithy-http v0.63.6
+│   │   ├── aws-config v1.8.17 (*)
+│   │   ├── aws-runtime v1.7.4 (*)
+│   │   ├── aws-sdk-s3 v1.134.0 (*)
+│   │   ├── aws-sdk-sso v1.100.0 (*)
+│   │   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   │   ├── aws-sdk-sts v1.105.0 (*)
+│   │   ├── aws-sigv4 v1.4.4 (*)
+│   │   ├── aws-smithy-checksums v0.64.8 (*)
+│   │   └── aws-smithy-runtime v1.11.3 (*)
+│   ├── aws-smithy-http-client v1.1.12 (*)
+│   ├── aws-smithy-json v0.62.6
+│   │   ├── aws-config v1.8.17 (*)
+│   │   ├── aws-sdk-s3 v1.134.0 (*)
+│   │   ├── aws-sdk-sso v1.100.0 (*)
+│   │   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   │   └── aws-sdk-sts v1.105.0 (*)
+│   ├── aws-smithy-observability v0.2.6
+│   │   ├── aws-sdk-s3 v1.134.0 (*)
+│   │   ├── aws-sdk-sso v1.100.0 (*)
+│   │   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   │   ├── aws-sdk-sts v1.105.0 (*)
+│   │   └── aws-smithy-runtime v1.11.3 (*)
+│   ├── aws-smithy-runtime v1.11.3 (*)
+│   ├── aws-smithy-schema v0.1.0
+│   │   ├── aws-config v1.8.17 (*)
+│   │   ├── aws-smithy-json v0.62.6 (*)
+│   │   ├── aws-smithy-runtime v1.11.3 (*)
+│   │   └── aws-types v1.3.16 (*)
+│   ├── aws-types v1.3.16 (*)
+│   └── rs5cmd v0.1.0 (/src/rs5cmd)
+├── aws-smithy-types v1.4.8
+│   ├── aws-config v1.8.17 (*)
+│   ├── aws-credential-types v1.2.14 (*)
+│   ├── aws-runtime v1.7.4 (*)
+│   ├── aws-sdk-s3 v1.134.0 (*)
+│   ├── aws-sdk-sso v1.100.0 (*)
+│   ├── aws-sdk-ssooidc v1.102.0 (*)
+│   ├── aws-sdk-sts v1.105.0 (*)
+│   ├── aws-sigv4 v1.4.4 (*)
+│   ├── aws-smithy-checksums v0.64.8 (*)
+│   ├── aws-smithy-eventstream v0.60.20
+│   │   ├── aws-runtime v1.7.4 (*)
+│   │   ├── aws-sdk-s3 v1.134.0 (*)
+│   │   ├── aws-sigv4 v1.4.4 (*)
+│   │   └── aws-smithy-http v0.63.6 (*)
+│   ├── aws-smithy-http v0.63.6 (*)
+│   ├── aws-smithy-http-client v1.1.12 (*)
+│   ├── aws-smithy-json v0.62.6 (*)
+│   ├── aws-smithy-query v0.60.15
+│   │   └── aws-sdk-sts v1.105.0 (*)
+│   ├── aws-smithy-runtime v1.11.3 (*)
+│   ├── aws-smithy-runtime-api v1.12.1 (*)
+│   ├── aws-smithy-schema v0.1.0 (*)
+│   ├── aws-types v1.3.16 (*)
+│   └── rs5cmd v0.1.0 (/src/rs5cmd)
+├── h2 v0.3.27 (*)
+├── http-body v0.4.6
+│   ├── aws-runtime v1.7.4 (*)
+│   ├── aws-smithy-http-client v1.1.12 (*)
+│   ├── aws-smithy-runtime v1.11.3 (*)
+│   ├── aws-smithy-types v1.4.8 (*)
+│   └── hyper v0.14.32 (*)
+├── hyper v0.14.32 (*)
+└── hyper-rustls v0.24.2 (*)
+
+http v1.4.1
+├── aws-config v1.8.17 (*)
+├── aws-runtime v1.7.4 (*)
+├── aws-sdk-s3 v1.134.0 (*)
+├── aws-sdk-sso v1.100.0 (*)
+├── aws-sdk-ssooidc v1.102.0 (*)
+├── aws-sdk-sts v1.105.0 (*)
+├── aws-sigv4 v1.4.4 (*)
+├── aws-smithy-checksums v0.64.8 (*)
+├── aws-smithy-http v0.63.6 (*)
+├── aws-smithy-http-client v1.1.12 (*)
+├── aws-smithy-runtime v1.11.3 (*)
+├── aws-smithy-runtime-api v1.12.1 (*)
+├── aws-smithy-schema v0.1.0 (*)
+├── aws-smithy-types v1.4.8 (*)
+├── h2 v0.4.14 (*)
+├── http-body v1.0.1
+│   ├── aws-runtime v1.7.4 (*)
+│   ├── aws-sdk-s3 v1.134.0 (*)
+│   ├── aws-smithy-checksums v0.64.8 (*)
+│   ├── aws-smithy-http v0.63.6 (*)
+│   ├── aws-smithy-runtime v1.11.3 (*)
+│   ├── aws-smithy-types v1.4.8 (*)
+│   ├── http-body-util v0.1.3
+│   │   ├── aws-smithy-checksums v0.64.8 (*)
+│   │   ├── aws-smithy-http v0.63.6 (*)
+│   │   ├── aws-smithy-runtime v1.11.3 (*)
+│   │   └── aws-smithy-types v1.4.8 (*)
+│   ├── hyper v1.10.0 (*)
+│   └── hyper-util v0.1.20 (*)
+├── http-body-util v0.1.3 (*)
+├── hyper v1.10.0 (*)
+├── hyper-rustls v0.27.9 (*)
+├── hyper-util v0.1.20 (*)
+├── monoio-http v0.3.12 (*)
+├── monoio-transports v0.5.3 (*)
+└── rs5cmd v0.1.0 (/src/rs5cmd)
+
+http-body v0.4.6 (*)
+
+http-body v1.0.1 (*)
+
+hyper v0.14.32 (*)
+
+hyper v1.10.0 (*)
+
+hyper-rustls v0.24.2 (*)
+
+hyper-rustls v0.27.9 (*)
+
+indexmap v1.9.3 (*)
+
+indexmap v2.14.0 (*)
+
+md-5 v0.10.6 (*)
+
+md-5 v0.11.0 (*)
+
+mio v0.8.11
+└── monoio v0.2.4
+    ├── monoio-codec v0.3.4
+    │   ├── monoio-http v0.3.12 (*)
+    │   └── monoio-transports v0.5.3 (*)
+    ├── monoio-compat v0.2.2
+    │   ├── monoio-http v0.3.12 (*)
+    │   └── monoio-transports v0.5.3 (*)
+    ├── monoio-http v0.3.12 (*)
+    ├── monoio-io-wrapper v0.1.1
+    │   ├── monoio-rustls v0.3.0
+    │   │   └── monoio-http v0.3.12 (*)
+    │   └── monoio-rustls v0.4.0
+    │       ├── monoio-transports v0.5.3 (*)
+    │       └── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── monoio-rustls v0.3.0 (*)
+    ├── monoio-rustls v0.4.0 (*)
+    ├── monoio-transports v0.5.3 (*)
+    └── rs5cmd v0.1.0 (/src/rs5cmd)
+
+mio v1.2.1
+└── tokio v1.52.3
+    ├── aws-config v1.8.17 (*)
+    ├── aws-smithy-async v1.2.14
+    │   ├── aws-config v1.8.17 (*)
+    │   ├── aws-credential-types v1.2.14 (*)
+    │   ├── aws-runtime v1.7.4 (*)
+    │   ├── aws-sdk-s3 v1.134.0 (*)
+    │   ├── aws-sdk-sso v1.100.0 (*)
+    │   ├── aws-sdk-ssooidc v1.102.0 (*)
+    │   ├── aws-sdk-sts v1.105.0 (*)
+    │   ├── aws-smithy-http-client v1.1.12 (*)
+    │   ├── aws-smithy-runtime v1.11.3 (*)
+    │   ├── aws-smithy-runtime-api v1.12.1 (*)
+    │   └── aws-types v1.3.16 (*)
+    ├── aws-smithy-http-client v1.1.12 (*)
+    ├── aws-smithy-runtime v1.11.3 (*)
+    ├── aws-smithy-runtime-api v1.12.1 (*)
+    ├── aws-smithy-types v1.4.8 (*)
+    ├── h2 v0.3.27 (*)
+    ├── h2 v0.4.14 (*)
+    ├── hyper v0.14.32 (*)
+    ├── hyper v1.10.0 (*)
+    ├── hyper-rustls v0.24.2 (*)
+    ├── hyper-rustls v0.27.9 (*)
+    ├── hyper-util v0.1.20 (*)
+    ├── monoio-compat v0.2.2 (*)
+    ├── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── tokio-rustls v0.24.1
+    │   └── hyper-rustls v0.24.2 (*)
+    ├── tokio-rustls v0.26.4
+    │   ├── aws-smithy-http-client v1.1.12 (*)
+    │   └── hyper-rustls v0.27.9 (*)
+    ├── tokio-socks v0.5.3
+    │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    ├── tokio-stream v0.1.18
+    │   └── rs5cmd v0.1.0 (/src/rs5cmd)
+    └── tokio-util v0.7.18
+        ├── aws-smithy-types v1.4.8 (*)
+        ├── h2 v0.3.27 (*)
+        ├── h2 v0.4.14 (*)
+        └── monoio-codec v0.3.4 (*)
+
+monoio-rustls v0.3.0 (*)
+
+monoio-rustls v0.4.0 (*)
+
+rustls v0.21.12
+├── aws-smithy-http-client v1.1.12 (*)
+├── hyper-rustls v0.24.2 (*)
+├── monoio-rustls v0.3.0 (*)
+└── tokio-rustls v0.24.1 (*)
+
+rustls v0.23.40
+├── aws-smithy-http-client v1.1.12 (*)
+├── hyper-rustls v0.27.9 (*)
+├── monoio-rustls v0.4.0 (*)
+├── monoio-transports v0.5.3 (*)
+├── rs5cmd v0.1.0 (/src/rs5cmd)
+└── tokio-rustls v0.26.4 (*)
+
+rustls-webpki v0.101.7
+└── rustls v0.21.12 (*)
+
+rustls-webpki v0.103.13
+└── rustls v0.23.40 (*)
+
+sha1 v0.10.6 (*)
+
+sha1 v0.11.0 (*)
+
+sha2 v0.10.9 (*)
+
+sha2 v0.11.0 (*)
+
+socket2 v0.5.10
+├── hyper v0.14.32 (*)
+└── monoio v0.2.4 (*)
+
+socket2 v0.6.4
+├── hyper-util v0.1.20 (*)
+└── tokio v1.52.3 (*)
+
+tokio-rustls v0.24.1 (*)
+
+tokio-rustls v0.26.4 (*)
+
+webpki-roots v0.26.11
+├── monoio-transports v0.5.3 (*)
+└── rs5cmd v0.1.0 (/src/rs5cmd)
+
+webpki-roots v1.0.7
+└── webpki-roots v0.26.11 (*)

@@ -1,0 +1,12 @@
+# Overlay added by bench/soak/dc when the credentials directory exists. The env files in it are
+# mounted read-only and parsed by the runner. They are never passed through `environment` or
+# `env_file`, which would show them in `docker inspect`.
+services:
+  soak:
+    volumes:
+      - type: bind
+        source: "${SOAK_CREDS_DIR:?set by bench/soak/dc}"
+        target: /run/soak-creds
+        read_only: true
+        bind:
+          create_host_path: false

@@ -1,0 +1,123 @@
+ File  .text     Size           Crate Name
+ 0.9%   2.4% 406.9KiB      aws_sdk_s3 aws_sdk_s3::config::endpoint::internals::resolve_endpoint
+ 0.8%   2.0% 332.0KiB      aws_lc_sys aws_lc_0_41_0_aes_gcm_encrypt_avx512
+ 0.8%   2.0% 332.0KiB      aws_lc_sys aws_lc_0_41_0_aes_gcm_decrypt_avx512
+ 0.2%   0.5%  80.8KiB          rs5cmd rs5cmd::command::run::{closure#0}
+ 0.2%   0.5%  79.2KiB          rs5cmd rs5cmd::command::run::{closure#0}
+ 0.1%   0.4%  61.9KiB          rs5cmd <rs5cmd::fastpath::client::FastClient>::send::{closure#0}
+ 0.1%   0.2%  33.5KiB          rs5cmd <rs5cmd::command::GlobalOpts as clap_builder::derive::Args>::augment_args
+ 0.1%   0.2%  30.6KiB      aws_config <aws_config::loader::ConfigLoader>::load::{closure#0}
+ 0.1%   0.2%  30.6KiB      aws_config <aws_config::loader::ConfigLoader>::load::{closure#0}
+ 0.1%   0.2%  30.6KiB      aws_config <aws_config::loader::ConfigLoader>::load::{closure#0}
+ 0.1%   0.2%  28.0KiB      aws_lc_sys aws_lc_0_41_0_edwards25519_scalarmuldouble_alt
+ 0.1%   0.2%  27.5KiB      aws_lc_sys aws_lc_0_41_0_edwards25519_scalarmuldouble
+ 0.1%   0.2%  26.4KiB          rs5cmd rs5cmd::command::pipe::run::{closure#0}
+ 0.1%   0.2%  25.9KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_attempt::{closure#0}
+ 0.1%   0.2%  25.8KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_attempt::{closure#0}
+ 0.1%   0.2%  25.8KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_attempt::{closure#0}
+ 0.1%   0.2%  25.7KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_attempt::{closure#0}
+ 0.1%   0.2%  25.6KiB          rs5cmd <rs5cmd::storage::s3::S3>::multipart_upload::<tokio::io::stdin::Stdin>::{closure#0}
+ 0.1%   0.1%  24.5KiB          rs5cmd <rs5cmd::command::cp::CpArgs as clap_builder::derive::Args>::augment_args
+ 0.1%   0.1%  24.5KiB     aws_sdk_sts aws_sdk_sts::config::endpoint::internals::resolve_endpoint
+ 0.1%   0.1%  23.6KiB          rs5cmd <rs5cmd::storage::s3::S3>::copy_multipart::{closure#0}
+ 0.1%   0.1%  22.6KiB          rs5cmd rs5cmd::fastpath::runtime::do_one::{closure#0}
+ 0.1%   0.1%  22.5KiB          rs5cmd <rs5cmd::storage::s3::S3>::upload_multipart::{closure#0}
+ 0.1%   0.1%  22.3KiB       [Unknown] Lp384_montjscalarmul_alt_p384_montjadd
+ 0.0%   0.1%  21.5KiB       [Unknown] Lp384_montjscalarmul_p384_montjadd
+ 0.0%   0.1%  21.4KiB          rs5cmd <rs5cmd::command::sync::SyncArgs as clap_builder::derive::Args>::augment_args
+ 0.0%   0.1%  21.3KiB    clap_builder <clap_builder::parser::parser::Parser>::get_matches_with
+ 0.0%   0.1%  21.3KiB      aws_lc_sys aws_lc_0_41_0_curve25519_x25519_byte_alt
+ 0.0%   0.1%  21.0KiB      aws_config <aws_config::sso::token::SsoTokenProvider>::resolve_token::{closure#0}::{closure#0}::{closure#0}
+ 0.0%   0.1%  20.6KiB          rs5cmd rs5cmd::command::sync::run::{closure#0}
+ 0.0%   0.1%  20.6KiB          rs5cmd rs5cmd::command::sync::run::{closure#0}
+ 0.0%   0.1%  20.5KiB      aws_lc_sys aws_lc_0_41_0_curve25519_x25519_byte
+ 0.0%   0.1%  19.2KiB            ring ring_core_0_17_14__x25519_ge_frombytes_vartime
+ 0.0%   0.1%  18.9KiB      aws_config <aws_config::sso::token::SsoTokenProvider>::resolve_token::{closure#0}::{closure#0}::{closure#0}
+ 0.0%   0.1%  18.8KiB          rs5cmd <rs5cmd::command::ls::LsArgs as clap_builder::derive::Args>::augment_args
+ 0.0%   0.1%  18.2KiB       [Unknown] fe_loose_invert
+ 0.0%   0.1%  18.1KiB          rs5cmd rs5cmd::command::cp::run::{closure#0}
+ 0.0%   0.1%  18.1KiB          rs5cmd rs5cmd::command::cp::run::{closure#0}
+ 0.0%   0.1%  18.0KiB aws_sdk_ssooidc aws_sdk_ssooidc::protocol_serde::shape_create_token::de_create_token_http_error
+ 0.0%   0.1%  17.2KiB      aws_sdk_s3 aws_sdk_s3::protocol_serde::shape_get_object::de_get_object_http_response
+ 0.0%   0.1%  16.9KiB    clap_builder <clap_builder::builder::command::Command>::_build_self
+ 0.0%   0.1%  16.6KiB      aws_lc_sys aws_lc_0_41_0_p521_jdouble_alt
+ 0.0%   0.1%  16.5KiB      aws_sdk_s3 aws_sdk_s3::protocol_serde::shape_head_object::de_head_object_http_response
+ 0.0%   0.1%  16.3KiB aws_sdk_ssooidc <tracing::instrument::Instrumented<aws_smithy_runtime::client::orchestrator::invoke_with_stop_point::{closure#0}> as core::future::future::Future>::poll
+ 0.0%   0.1%  16.2KiB          rs5cmd rs5cmd::command::cp::copy_one::{closure#0}
+ 0.0%   0.1%  16.1KiB          rustls <rustls::client::tls13::ExpectFinished as rustls::common_state::State<rustls::client::client_conn::ClientConnectionData>>::handle
+ 0.0%   0.1%  16.1KiB      hyper_util <hyper_util::client::legacy::client::Client<hyper_rustls::connector::HttpsConnector<rs5cmd::storage::s3::ProxyConnector>, aws_smithy_types::body::SdkBody>>::send_request::{closure#0}
+ 0.0%   0.1%  16.1KiB      hyper_util <hyper_util::client::legacy::client::Client<hyper_rustls::connector::HttpsConnector<hyper_util::client::legacy::connect::http::HttpConnector>, aws_smithy_types::body::SdkBody>>::send_request::{closure#0}
+ 0.0%   0.1%  16.1KiB      aws_config <aws_config::ecs::EcsCredentialsProvider>::credentials::{closure#0}
+ 0.0%   0.1%  16.0KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.7KiB          rs5cmd rs5cmd::command::head::run::{closure#0}
+ 0.0%   0.1%  15.7KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.7KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.7KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.7KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.7KiB          rs5cmd <rs5cmd::storage::s3::S3>::download::{closure#0}
+ 0.0%   0.1%  15.6KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.6KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.5KiB      aws_lc_sys aws_lc_0_41_0_p521_jdouble
+ 0.0%   0.1%  15.5KiB          rs5cmd core::ptr::drop_glue::<rs5cmd::command::run::{closure#0}>
+ 0.0%   0.1%  15.4KiB             std <std::backtrace_rs::symbolize::gimli::Cache>::with_global::<std::backtrace_rs::symbolize::gimli::resolve::{closure#1}>
+ 0.0%   0.1%  15.1KiB      aws_config <aws_config::sso::credentials::SsoCredentialsProvider>::credentials::{closure#0}
+ 0.0%   0.1%  14.6KiB       aws_sigv4 <aws_sigv4::http_request::canonical_request::CanonicalRequest>::from
+ 0.0%   0.1%  14.5KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.5KiB      hyper_util <hyper_util::client::legacy::client::Client<aws_smithy_http_client::client::timeout::ConnectTimeout<aws_smithy_http_client::client::tls::rustls_provider::connect::RustTlsConnector<hyper_util::client::legacy::connect::dns::GaiResolver>>, aws_smithy_types::body::SdkBody>>::send_request::{closure#0}
+ 0.0%   0.1%  14.4KiB          rs5cmd <rs5cmd::command::select::SelectArgs as clap_builder::derive::Args>::augment_args
+ 0.0%   0.1%  14.4KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  14.1KiB      aws_sdk_s3 aws_sdk_s3::protocol_serde::shape_upload_part_copy::de_upload_part_copy_http_response
+ 0.0%   0.1%  14.0KiB          rs5cmd <rs5cmd::command::pipe::PipeArgs as clap_builder::derive::Args>::augment_args
+ 0.0%   0.1%  13.9KiB            ring ring_core_0_17_14__x25519_ge_scalarmult_base
+ 0.0%   0.1%  13.8KiB      aws_sdk_s3 aws_sdk_s3::protocol_serde::shape_put_object::ser_put_object_headers
+ 0.0%   0.1%  13.7KiB aws_sdk_ssooidc aws_smithy_runtime::client::orchestrator::try_op::{closure#0}::{closure#0}
+ 0.0%   0.1%  13.7KiB          rs5cmd <core::pin::Pin<alloc::boxed::Box<<hyper_util::client::legacy::client::Client<hyper_rustls::connector::HttpsConnector<rs5cmd::storage::s3::ProxyConnector>, aws_smithy_types::body::SdkBody>>::connect_to::{closure#0}::{closure#1}::{closure#0}>> as core::future::future::Future>::poll
+ 0.0%   0.1%  13.7KiB          rs5cmd <core::pin::Pin<alloc::boxed::Box<<hyper_util::client::legacy::client::Client<hyper_rustls::connector::HttpsConnector<hyper_util::client::legacy::connect::http::HttpConnector>, aws_smithy_types::body::SdkBody>>::connect_to::{closure#0}::{closure#1}::{closure#0}>> as core::future::future::Future>::poll
+ 0.0%   0.1%  13.6KiB      aws_sdk_s3 aws_sdk_s3::protocol_serde::shape_copy_object::ser_copy_object_headers
+ 0.0%   0.1%  13.5KiB          rs5cmd <rs5cmd::storage::s3::S3 as rs5cmd::storage::Storage>::copy::{closure#0}
+ 0.0%   0.1%  13.5KiB aws_sdk_ssooidc <tracing::instrument::Instrumented<aws_smithy_runtime::client::orchestrator::invoke_with_stop_point::{closure#0}> as core::future::future::Future>::poll
+ 0.0%   0.1%  13.5KiB      regex_lite <regex_lite::hir::parse::Parser>::parse_inner
+ 0.0%   0.1%  13.2KiB    futures_util <futures_util::stream::futures_unordered::FuturesUnordered<<rs5cmd::storage::s3::S3>::upload_parts::{closure#0}::{closure#0}::{closure#0}> as futures_core::stream::Stream>::poll_next
+ 0.0%   0.1%  13.1KiB          rs5cmd <rs5cmd::storage::s3::S3>::list_object_versions::{closure#0}
+ 0.0%   0.1%  13.1KiB          rs5cmd <rs5cmd::storage::s3::S3>::download_remaining_parts::{closure#0}::{closure#0}::{closure#0}
+ 0.0%   0.1%  13.0KiB              h2 h2::codec::framed_read::decode_frame
+ 0.0%   0.1%  12.9KiB              h2 h2::codec::framed_read::decode_frame
+ 0.0%   0.1%  12.8KiB          rs5cmd rs5cmd::command::ls::run::{closure#0}
+ 0.0%   0.1%  12.8KiB          rs5cmd rs5cmd::command::ls::run::{closure#0}
+ 0.0%   0.1%  12.8KiB  regex_automata regex_automata::meta::strategy::new
+ 0.0%   0.1%  12.7KiB  regex_automata <regex_automata::dfa::dense::Builder>::build_from_nfa
+ 0.0%   0.1%  12.7KiB      aws_sdk_s3 <aws_sdk_s3::s3_express::identity_provider::DefaultS3ExpressIdentityProvider as aws_smithy_runtime_api::client::identity::ResolveIdentity>::resolve_identity::{closure#0}
+ 0.0%   0.1%  12.6KiB             std <std::backtrace_rs::symbolize::gimli::Context>::new
+ 0.0%   0.1%  12.6KiB          rustls rustls::client::hs::emit_client_hello_for_retry
+ 0.0%   0.1%  12.6KiB      aws_sdk_s3 aws_sdk_s3::protocol_serde::shape_complete_multipart_upload::de_complete_multipart_upload_http_response
+ 0.0%   0.1%  12.5KiB      aws_config <aws_config::profile::credentials::ProfileFileCredentialsProvider>::load_credentials::{closure#0}
+ 0.0%   0.1%  12.5KiB     monoio_http monoio_http::h2::codec::framed_read::decode_frame
+ 0.0%   0.1%  12.4KiB      aws_lc_sys aws_lc_0_41_0_edwards25519_scalarmulbase_alt
+ 0.0%   0.1%  12.1KiB      aws_lc_sys aws_lc_0_41_0_edwards25519_scalarmulbase
+ 0.0%   0.1%  12.0KiB      aws_config aws_config::sso::cache::parse_cached_token
+ 0.0%   0.1%  12.0KiB            ring ring_core_0_17_14__chacha20_poly1305_seal_avx2
+ 0.0%   0.1%  11.9KiB      aws_config <aws_config::web_identity_token::WebIdentityTokenCredentialsProvider>::credentials::{closure#0}
+ 0.0%   0.1%  11.9KiB       [Unknown] chacha20_poly1305_seal_avx2
+ 0.0%   0.1%  11.8KiB      aws_lc_sys aws_lc_0_41_0_curve25519_x25519base_alt
+ 0.0%   0.1%  11.8KiB     aws_runtime <aws_runtime::auth::sigv4::SigV4Signer as aws_smithy_runtime_api::client::auth::Sign>::sign_http_request
+ 0.0%   0.1%  11.6KiB      aws_lc_sys aws_lc_0_41_0_curve25519_x25519base
+ 0.0%   0.1%  11.6KiB          rs5cmd <rs5cmd::storage::s3::S3>::select::<tokio::io::stdout::Stdout>::{closure#0}
+ 0.0%   0.1%  11.6KiB          rs5cmd <rs5cmd::storage::s3::S3>::select::<tokio::io::stdout::Stdout>::{closure#0}
+ 0.0%   0.1%  11.4KiB      aws_config <aws_config::imds::credentials::ImdsCredentialsProvider>::credentials::{closure#0}
+ 0.0%   0.1%  11.4KiB      aws_lc_sys aws_lc_0_41_0_p384_montjdouble_alt
+ 0.0%   0.1%  11.4KiB       [Unknown] Lp384_montjscalarmul_alt_p384_montjdouble
+ 0.0%   0.1%  11.3KiB      aws_lc_sys aws_lc_0_41_0_p384_montjdouble
+ 0.0%   0.1%  11.3KiB       [Unknown] Lp384_montjscalarmul_p384_montjdouble
+ 0.0%   0.1%  11.3KiB       [Unknown] ec_GFp_nistp224_point_get_affine_coordinates.part.0
+ 0.0%   0.1%  11.3KiB    regex_syntax <regex_syntax::hir::translate::TranslatorI as regex_syntax::ast::visitor::Visitor>::visit_post
+ 0.0%   0.1%  11.3KiB          rs5cmd <rs5cmd::storage::s3::S3>::delete_chunk::{closure#0}
+ 0.0%   0.1%  11.2KiB          rs5cmd <rs5cmd::storage::s3::S3>::list_objects_v1::{closure#0}
+ 0.0%   0.1%  11.0KiB            sha2 sha2::sha256::compress256
+30.8%  78.6%  13.1MiB                 And 39575 smaller methods. Use -n N to show more.
+39.1% 100.0%  16.6MiB                 .text section size, the file size is 42.5MiB

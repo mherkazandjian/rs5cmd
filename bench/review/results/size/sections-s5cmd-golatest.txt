@@ -1,0 +1,19 @@
+/opt/bins/s5cmd-golatest  :
+section                  size       addr
+.note.go.buildid          100    4198264
+.note.gnu.build-id         36    4198364
+.text                 7722161    4198400
+.rodata               1199385   11923456
+.gopclntab            7694477   13122848
+.go.type              1507120   20817328
+.go.func                 6920   22324448
+.go.buildinfo            2016   22331392
+.go.fipsinfo              120   22333408
+.go.module                568   22333536
+.noptrdata             352513   22334112
+.data                  110370   22686656
+.bss                   147576   22797056
+.noptrbss            33685208   22944640
+Total                52428570
+
+
