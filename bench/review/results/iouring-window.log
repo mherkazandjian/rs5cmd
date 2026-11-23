@@ -107,3 +107,8 @@
 2026-11-22T03:16:43Z running the batch (pid 3449718)
 2026-11-22T03:16:57Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
 2026-11-22T03:16:57Z host probe (after close, ordinary user): io_uring: Operation not permitted
+2026-11-23T18:04:36Z window OPEN: io_uring_disabled=1 io_uring_group=59900 (was 2 / -1)
+2026-11-23T18:04:36Z host probe (while open, ordinary user): io_uring: Operation not permitted
+2026-11-23T18:04:36Z running the batch (pid 344585)
+2026-11-23T18:05:01Z window CLOSED: io_uring_disabled=2 io_uring_group=-1
+2026-11-23T18:05:01Z host probe (after close, ordinary user): io_uring: Operation not permitted

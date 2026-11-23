@@ -1,0 +1,356 @@
+   Compiling rs5cmd v0.1.0 (/src/wt/lean-path)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.64s
+     Running unittests src/lib.rs (/target/test-b/debug/build/rs5cmd/aa1fc734aebe780c/out/rs5cmd-aa1fc734aebe780c)
+
+running 162 tests
+test command::du::tests::annotate_fatal_wraps_known_aws_errors ... ok
+test command::du::tests::empty_storage_class_has_no_suffix ... ok
+test command::du::tests::formats_with_storage_class ... ok
+test command::du::tests::formats_plain_size ... ok
+test command::du::tests::humanizes_size ... ok
+test command::du::tests::no_exclude_globs_skips_nothing ... ok
+test command::filters::tests::filters_empty_keeps_everything ... ok
+test command::head::tests::object_json_includes_present_fields_only ... ok
+test command::head::tests::object_json_emits_full_field_set ... ok
+test command::head::tests::object_json_omits_empty_etag_and_storage_class ... ok
+test command::import_s3cfg::tests::replaces_existing_section_preserving_others ... ok
+test command::import_s3cfg::tests::appends_section_when_absent ... ok
+test command::import_s3cfg::tests::writes_into_empty_file ... ok
+test command::ls::tests::format_object_delete_marker_text ... ok
+test command::ls::tests::format_summary_humanized ... ok
+test command::ls::tests::format_summary_raw ... ok
+test command::ls::tests::format_summary_zero_raw ... ok
+test command::ls::tests::format_time_utc_is_unchanged ... ok
+test command::ls::tests::local_utc_offset_does_not_panic ... ok
+test command::ls::tests::format_time_local_appends_offset_token ... ok
+test command::ls::tests::object_json_delete_marker ... ok
+test command::ls::tests::parse_relative_duration_non_duration_is_none ... ok
+test command::ls::tests::object_json_regular_file_unchanged ... ok
+test command::ls::tests::parse_relative_duration_units ... ok
+test command::ls::tests::parse_time_bound_rejects_garbage ... ok
+test command::ls::tests::parse_time_bound_relative_is_in_past ... ok
+test command::ls::tests::parse_time_bound_rfc3339 ... ok
+test command::pipe::tests::concurrency_at_least_one ... ok
+test command::pipe::tests::falls_back_to_octet_stream ... ok
+test command::pipe::tests::guesses_known_extension ... ok
+test command::pipe::tests::guesses_html ... ok
+test command::pipe::tests::metadata_guesses_content_type_when_absent ... ok
+test command::pipe::tests::metadata_uses_explicit_content_type ... ok
+test command::pipe::tests::metadata_maps_sse_flags ... ok
+test command::pipe::tests::part_size_clamped_to_minimum ... ok
+test command::pipe::tests::read_part_short_read_signals_small_input ... ok
+test command::pipe::tests::read_part_fills_to_cap_then_drains ... ok
+test command::presign::tests::parses_bare_seconds ... ok
+test command::presign::tests::parses_units ... ok
+test command::presign::tests::parses_combined ... ok
+test command::presign::tests::rejects_invalid ... ok
+test command::rm::tests::raw_routes_dir_marker_to_single_delete ... ok
+test command::run::tests::argv_prefixes_program_and_numworkers ... ok
+test command::run::tests::argv_reconstructs_flags ... ok
+test command::select::tests::csv_output_builds ... ok
+test command::select::tests::csv_input_with_gzip_builds ... ok
+test command::filters::tests::filters_exclude_wins ... ok
+test command::filters::tests::filters_include_requires_match ... ok
+test command::select::tests::invalid_input_format_errors ... ok
+test command::select::tests::from_args_defaults_output_and_structure ... ok
+test command::select::tests::json_document_input_builds ... ok
+test command::select::tests::json_lines_input_builds ... ok
+test command::select::tests::parquet_input_ignores_compression ... ok
+test command::select::tests::matched_objects_sort_deterministically ... ok
+test command::select::tests::matched_objects_sort_by_version_id ... ok
+test command::sync::sync_strategy::tests::checksum_compares_etags ... ok
+test command::sync::sync_strategy::tests::default_skips_when_same_size_and_not_newer ... ok
+test command::sync::sync_strategy::tests::default_syncs_when_source_newer ... ok
+test command::sync::sync_strategy::tests::default_syncs_when_sizes_differ ... ok
+test command::sync::sync_strategy::tests::size_only_syncs_on_size_difference ... ok
+test command::sync::tests::dest_url_non_batch_uses_base ... ok
+test command::sync::tests::dest_url_batch_remote_prefix ... ok
+test command::sync::tests::dest_url_remote_exact_object_clones ... ok
+test command::sync::tests::glacier_not_skipped_when_forced ... ok
+test command::cat::tests::source_classification ... ok
+test command::sync::tests::glacier_skipped_by_default ... ok
+test command::sync::tests::is_fatal_matches_known_aws_errors ... ok
+test command::sync::tests::non_glacier_never_skipped ... ok
+test command::tree::tests::directory_prefix_creates_dir_node ... ok
+test command::tree::tests::builds_nested_tree_with_connectors ... ok
+test command::tree::tests::intermediate_segments_become_directories ... ok
+test command::tree::tests::last_child_uses_corner_connector ... ok
+test command::tree::tests::size_is_shown_for_leaves_when_requested ... ok
+test error::tests::an_sso_profile_without_the_feature_gets_the_next_step ... ok
+test error::tests::full_command_formats_operands ... ok
+test error::tests::warning_messages ... ok
+test progress::tests::json_mode_is_noop ... ok
+test command::filters::tests::filters_exclude_beats_include ... ok
+test ratelimit::tests::zero_is_noop ... ok
+test rlimit::tests::above_threshold_returns_none ... ok
+test rlimit::tests::at_threshold_returns_none ... ok
+test command::du::tests::exclude_glob_matches_relative_keys ... ok
+test rlimit::tests::below_threshold_returns_warning ... ok
+test rlimit::tests::defaults_below_typical_1024_limit_warn ... ok
+test rlimit::tests::estimate_does_not_overflow ... ok
+test rlimit::tests::estimate_scales_with_workers_and_concurrency ... ok
+test s3cfg::tests::parse_byte_rate_accepts_plain_and_suffixed ... ok
+test s3cfg::tests::parses_ini_ignoring_comments_and_sections ... ok
+test s3cfg::tests::rs5cmd_ini_round_trips ... ok
+test s3cfg::tests::translates_path_style_https_endpoint ... ok
+test s3cfg::tests::translates_proxy_region_retries_and_rate ... ok
+test storage::dualstack_tests::options_default_dualstack_and_fips_off ... ok
+test s3cfg::tests::translates_virtual_host_and_http ... ok
+test storage::dualstack_tests::options_per_side_defaults_to_shared ... ok
+test storage::dualstack_tests::options_per_side_only_region_differs ... ok
+test storage::dualstack_tests::options_per_side_overrides_resolve_and_differ ... ok
+test command::cp::tests::multipart_defaults_are_s5cmds ... ok
+test command::select::tests::source_classification ... ok
+test storage::fs::tests::list_directory_walks_files ... ok
+test storage::fs::tests::stat_missing_returns_not_found ... ok
+test storage::lean::tests::a_crc32c_header_is_the_big_endian_value_in_base64 ... ok
+test storage::lean::tests::a_429_is_throttling_and_only_a_listed_code_brings_a_retry_after ... ok
+test storage::lean::tests::a_listing_page_becomes_the_sdks_output ... ok
+test storage::fs::tests::stat_and_copy_roundtrip ... ok
+test storage::lean::tests::a_versions_page_and_a_delete_result_become_the_sdks_outputs ... ok
+test storage::lean::tests::backoff_is_full_jitter_capped_at_20_s ... ok
+test storage::lean::tests::complete_lists_every_part_with_its_checksum ... ok
+test storage::lean::tests::delete_sends_the_keys_with_a_crc32 ... ok
+test storage::fs::tests::list_glob_matches ... ok
+test storage::lean::tests::error_bodies_parse_as_s3_writes_them ... ok
+test storage::lean::tests::keys_are_encoded_as_the_sdk_encodes_labels ... ok
+test storage::lean::tests::errors_are_the_sdks_modeled_errors ... ok
+test storage::lean::tests::statuses_and_codes_are_classified_as_the_sdk_does ... ok
+test storage::lean::tests::upload_errors_are_the_sdks_modeled_errors ... ok
+test storage::lean::tests::upload_ids_and_error_documents_are_read_from_the_body ... ok
+test command::sync::tests::filters_exclude_and_include ... ok
+test storage::partial::tests::create_registers_until_commit_or_drop ... ok
+test command::select::tests::exclude_filter_matches_globs ... ok
+test storage::partial::tests::drop_without_commit_removes_temp_and_keeps_destination ... ok
+test storage::partial::tests::commit_replaces_destination ... ok
+test storage::partial::tests::long_names_fit ... ok
+test storage::s3::tests::map_conditional_write_error_converts_412_to_typed_skip ... ok
+test storage::s3::tests::map_conditional_write_error_passes_through_unrelated_errors ... ok
+test storage::s3::tests::percent_decode_common_encodings ... ok
+test storage::lean::tests::endpoints_come_from_the_sdks_resolver ... ok
+test storage::s3::tests::part_budget_bounds_parts_and_grows_to_the_concurrency_asked ... ok
+test storage::s3::tests::percent_decode_control_char ... ok
+test storage::s3::tests::percent_decode_malformed_is_verbatim ... ok
+test storage::s3::tests::percent_decode_multibyte_utf8 ... ok
+test storage::s3::tests::percent_decode_passthrough_plain ... ok
+test storage::s3::tests::plain_reads_share_their_budget_over_the_connections_open ... ok
+test storage::s3::tests::precondition_failed_is_detected_case_insensitively ... ok
+test storage::upload_body::tests::data_starts_a_lead_into_its_buffer ... ok
+test storage::upload_body::tests::chunks_hold_budget_until_dropped ... ok
+test storage::upload_body::tests::short_file_is_an_error ... ok
+test storage::url::tests::bucket_only ... ok
+test storage::url::tests::join_local_cleans ... ok
+test storage::url::tests::join_remote_keeps_slashes ... ok
+test storage::upload_body::tests::reads_the_range_in_chunks ... ok
+test storage::url::tests::match_wildcard_key ... ok
+test storage::url::tests::non_wildcard_url_matches_by_prefix ... ok
+test storage::url::tests::parse_non_batch_relativizes_key_equal_to_prefix ... ok
+test storage::url::tests::parses_local ... ok
+test storage::url::tests::parses_remote ... ok
+test storage::url::tests::prefix_and_delimiter_for_plain_key ... ok
+test storage::url::tests::rejects_empty_bucket ... ok
+test storage::url::tests::rejects_non_s3_scheme ... ok
+test storage::url::tests::rejects_wildcard_bucket ... ok
+test storage::url::tests::set_relative_against_bare_relative_dir ... ok
+test storage::url::tests::set_relative_against_dir_base ... ok
+test storage::url::tests::wildcard_sets_filter ... ok
+test strutil::tests::capitalize ... ok
+test strutil::tests::wildcard_conversion ... ok
+test tls::tests::classic_by_default_and_post_quantum_first_on_request ... ok
+test storage::url::tests::set_relative_against_wildcard_base ... ok
+test storage::s3::tests::filling_reads_gathers_what_is_ready ... ok
+test storage::lean::tests::a_streamed_body_goes_in_64_kib_aws_chunks_and_its_crc32c_trailer ... ok
+test tls::tests::the_client_hello_offers_post_quantum_only_on_request ... ok
+test storage::s3::tests::filling_reads_stop_at_their_limits_and_read_plain_connections_once ... ok
+test storage::upload_body::tests::next_read_waits_while_the_budget_is_spent ... ok
+test ratelimit::tests::acquire_sleeps_proportional_to_size_over_rate ... ok
+test ratelimit::tests::aggregate_cap_across_concurrent_tasks ... ok
+
+test result: ok. 162 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.75s
+
+     Running unittests src/main.rs (/target/test-b/debug/build/rs5cmd/7fd7e353a22a0bdd/out/rs5cmd-7fd7e353a22a0bdd)
+
+running 1 test
+test tests::interrupt_exit_code_is_130 ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cat_limit.rs (/target/test-b/debug/build/rs5cmd/b5863438f3ff003a/out/cat_limit-b5863438f3ff003a)
+
+running 1 test
+test remote_cat_is_paced_by_limit_download ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.97s
+
+     Running tests/cli_local.rs (/target/test-b/debug/build/rs5cmd/ba9c4fc4186c4b2c/out/cli_local-ba9c4fc4186c4b2c)
+
+running 4 tests
+test mv_bare_relative_dir_moves_the_files ... ok
+test copying_a_file_onto_itself_fails_and_keeps_it ... ok
+test cp_bare_relative_dir_keeps_dir_name_and_source ... ok
+test sso_profile_without_the_sso_feature_names_the_feature ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.04s
+
+     Running tests/cli_pipe.rs (/target/test-b/debug/build/rs5cmd/f3eb2beed267ec89/out/cli_pipe-f3eb2beed267ec89)
+
+running 3 tests
+test cat_into_closed_pipe_ends_by_sigpipe ... ok
+test cat_local_file_streams_exact_bytes ... ok
+test result_lines_into_closed_pipe_end_by_sigpipe ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.16s
+
+     Running tests/download_atomic.rs (/target/test-b/debug/build/rs5cmd/3f2735fa66570be9/out/download_atomic-3f2735fa66570be9)
+
+running 2 tests
+test failed_part_leaves_no_file ... ok
+test failed_part_keeps_existing_destination ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.06s
+
+     Running tests/e2e.rs (/target/test-b/debug/build/rs5cmd/f91d1ddfa4c97d94/out/e2e-f91d1ddfa4c97d94)
+
+running 51 tests
+test cp_multiple_local_sources_to_local_dir ... ok
+test color_flag_in_help ... ok
+test completion_script_generates ... ok
+test cp_multiple_sources_to_non_dir_dest_errors ... ok
+test addressing_style_path_works ... ok
+test cp_multiple_local_sources_to_s3_prefix ... ok
+test cp_preserve_timestamps_roundtrip ... ok
+test cp_skips_broken_symlink_and_transfers_rest ... ok
+test cp_skips_non_regular_files ... ok
+test cp_links_symlink_roundtrip ... ok
+test dir_marker_object_is_a_file_not_a_dir ... ok
+test cp_client_copy_remote_to_remote ... ok
+test cp_if_none_match_does_not_overwrite_existing ... ok
+test du_counts_objects_with_wildcard ... ok
+test json_output_mode ... ok
+test list_key_with_xml_illegal_control_char ... ok
+test head_and_presign_json ... ok
+test ls_help_mentions_local_time ... ok
+test full_object_lifecycle ... ok
+test list_objects_v1_fallback ... ok
+test large_object_multipart_roundtrip ... ok
+test dry_run_output_is_marked ... ok
+test ls_color_always_has_escape ... ok
+test ls_auto_color_has_no_escape_when_piped ... ok
+test ls_color_never_has_no_escape ... ok
+test ls_json_suppresses_color ... ok
+test ls_local_time_appends_offset_token ... ok
+test ls_include_exclude_filters ... ok
+test ls_newer_than_and_older_than_filter ... ok
+test move_local_to_s3_deletes_source ... ok
+test proxy_socks5_transfer ... ok
+test mv_remove_empty_dirs_prunes_emptied_source_dirs ... ok
+test ls_prefix_with_object_equal_to_prefix ... ok
+test ls_show_fullpath_and_start_after ... ok
+test no_region_configured_skips_instance_metadata ... ok
+test mv_exclude_skips_during_wildcard_move ... ok
+test pipe_multipart_large_stdin ... ok
+test rb_force_dry_run_deletes_nothing ... ok
+test run_batch_from_file ... ok
+test rb_force_deletes_nonempty_bucket ... ok
+test rm_dry_run_lists_objects ... ok
+test s3_to_s3_multipart_copy_for_large_source ... ok
+test sync_exclude_from_file ... ok
+test select_multi_object_wildcard ... ok
+test object_versioning_roundtrip ... ok
+test sync_checksum_detects_same_size_content_change ... ok
+test sync_delete_bare_prefix_keeps_subdirectories ... ok
+test sync_size_only_is_idempotent_and_deletes ... ok
+test wildcard_upload_and_prefix_delete ... ok
+test sync_max_delete_aborts_without_touching_anything ... ok
+test tree_renders_hierarchy_with_connectors ... ok
+
+test result: ok. 51 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.72s
+
+     Running tests/e2e_cp_all_versions.rs (/target/test-b/debug/build/rs5cmd/dec47eb708dd66d6/out/e2e_cp_all_versions-dec47eb708dd66d6)
+
+running 1 test
+test cp_all_versions_of_single_key ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.47s
+
+     Running tests/e2e_fast.rs (/target/test-b/debug/build/rs5cmd/3c2b762254c99ca4/out/e2e_fast-3c2b762254c99ca4)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e_mount.rs (/target/test-b/debug/build/rs5cmd/bf69ac112658715a/out/e2e_mount-bf69ac112658715a)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/e2e_region.rs (/target/test-b/debug/build/rs5cmd/545278c6833a7dbe/out/e2e_region-545278c6833a7dbe)
+
+running 5 tests
+test test_per_side_flags_parse ... ok
+test test_mv_s3_to_s3_two_client_same_endpoint ... ok
+test test_cp_s3_to_s3_single_client_fast_path_unchanged ... ok
+test test_cp_s3_to_s3_two_client_same_endpoint ... ok
+test test_sync_s3_to_s3_two_client_same_endpoint ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.33s
+
+     Running tests/e2e_s3cmd_compat.rs (/target/test-b/debug/build/rs5cmd/9078857cb28111bf/out/e2e_s3cmd_compat-9078857cb28111bf)
+
+running 4 tests
+test credentials_file_is_used ... ok
+test import_s3cfg_then_use_without_flag ... ok
+test s3cfg_translation_connects ... ok
+test limitrate_throttles_download ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.31s
+
+     Running tests/http_client.rs (/target/test-b/debug/build/rs5cmd/ffad7748ee0d0951/out/http_client-ffad7748ee0d0951)
+
+running 6 tests
+test untrusted_server_is_refused ... ok
+test platform_roots_and_no_http2 ... ok
+test ca_certs_file_and_no_http2 ... ok
+test dropped_connection_is_retried ... ok
+test tls_post_quantum_negotiates_x25519mlkem768_and_says_so_once ... ok
+test dropped_connection_is_retried_without_verification ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.66s
+
+     Running tests/lean_list.rs (/target/test-b/debug/build/rs5cmd/958e0b2fefdc4ac3/out/lean_list-958e0b2fefdc4ac3)
+
+running 2 tests
+test rm_sends_the_sdks_delete_objects ... ok
+test listings_page_and_print_as_on_the_sdk_path ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.38s
+
+     Running tests/lean_path.rs (/target/test-b/debug/build/rs5cmd/dd897908a7043617/out/lean_path-dd897908a7043617)
+
+running 5 tests
+test a_missing_key_fails_with_the_sdks_message ... ok
+test a_ranged_download_sends_the_sdks_requests_signed ... ok
+test head_object_matches_the_sdk ... ok
+test a_429_is_retried_on_lean_and_each_retry_is_logged ... ok
+test a_throttled_request_is_retried_as_the_sdk_retries_it ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.05s
+
+     Running tests/lean_upload.rs (/target/test-b/debug/build/rs5cmd/e11721ab52ee7a80/out/lean_upload-e11721ab52ee7a80)
+
+running 5 tests
+test a_refused_upload_fails_with_the_sdks_message ... ok
+test a_small_upload_sends_the_sdks_request_with_a_crc32c_header ... ok
+test checksum_trailers_frame_streamed_uploads_as_aws_chunked ... ok
+test a_multipart_upload_sends_the_sdks_requests ... ok
+test pipe_parts_carry_their_crc32c_in_a_header ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.79s
+
+   Doc-tests rs5cmd
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

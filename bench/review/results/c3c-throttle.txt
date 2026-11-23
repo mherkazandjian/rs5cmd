@@ -1,0 +1,20 @@
+throttle check 2026-11-23T18:07:03Z: before=f-older.93e7cfd after=f-older after-fast=f-older:--fast lean-before=l-p3:--data-path=lean lean-after=l-429:--data-path=lean lean-path-sdk=l-429
+before       f-older.93e7cfd            up=1 ls=0(40 lines) dn=1 stored=40/60 downloaded=26/60 ERROR=34 wall=0.1s {"requests": 102, "injected": 34, "signed": 102}
+    ERROR cp /mnt/tmpfs/thr/src/f37.bin s3://thr-before-2319525/up/f37.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rate.", 
+    ERROR cp /mnt/tmpfs/thr/src/f38.bin s3://thr-before-2319525/up/f38.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rate.", 
+    ERROR cp s3://thr-before-2319525/up/f03.bin /mnt/tmpfs/thr/dl/f03.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rate.", a
+    ERROR cp s3://thr-before-2319525/up/f54.bin /mnt/tmpfs/thr/dl/f54.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rate.", a
+after        f-older                    up=0 ls=0(60 lines) dn=0 stored=60/60 downloaded=60/60 ERROR=0 wall=10.1s {"requests": 182, "injected": 60, "signed": 182}
+after-fast   f-older:--fast             up=0 ls=0(60 lines) dn=0 stored=60/60 downloaded=60/60 ERROR=0 wall=2.0s {"requests": 182, "injected": 60, "signed": 182}
+lean-before  l-p3:--data-path=lean      up=1 ls=0(40 lines) dn=1 stored=40/60 downloaded=26/60 ERROR=34 wall=0.1s {"requests": 102, "injected": 34, "signed": 102}
+    ERROR cp /mnt/tmpfs/thr/src/f02.bin s3://thr-lean-before-2319525/up/f02.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rat
+    ERROR cp /mnt/tmpfs/thr/src/f15.bin s3://thr-lean-before-2319525/up/f15.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rat
+    ERROR cp s3://thr-lean-before-2319525/up/f12.bin /mnt/tmpfs/thr/dl/f12.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rate
+    ERROR cp s3://thr-lean-before-2319525/up/f40.bin /mnt/tmpfs/thr/dl/f40.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request rate
+lean-after   l-429:--data-path=lean     up=0 ls=0(60 lines) dn=0 stored=60/60 downloaded=60/60 ERROR=0 wall=12.6s {"requests": 182, "injected": 60, "signed": 182}
+lean-path-sdk l-429                      up=1 ls=0(40 lines) dn=1 stored=40/60 downloaded=26/60 ERROR=34 wall=0.1s {"requests": 102, "injected": 34, "signed": 102}
+    ERROR cp /mnt/tmpfs/thr/src/f02.bin s3://thr-lean-path-sdk-2319525/up/f02.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request r
+    ERROR cp /mnt/tmpfs/thr/src/f14.bin s3://thr-lean-path-sdk-2319525/up/f14.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request r
+    ERROR cp s3://thr-lean-path-sdk-2319525/up/f06.bin /mnt/tmpfs/thr/dl/f06.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request ra
+    ERROR cp s3://thr-lean-path-sdk-2319525/up/f30.bin /mnt/tmpfs/thr/dl/f30.bin: service error: unhandled error (TooManyRequests): Error { code: "TooManyRequests", message: "Please reduce your request ra
+done 2026-11-23T18:07:34Z

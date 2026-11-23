@@ -376,3 +376,55 @@ bench/review/build.sh: line 218: t_c-mem: command not found
   l-p3: 17,159,104 bytes
 ==> done: l-p3
 2026-11-22T03:45:43Z l-p3 built /opt/bins/l-p3
+2026-11-23T16:57:29Z f-30 rebased onto fix/older-bugs: d1d1f10 (1 commits)
+2026-11-23T16:57:32Z f-30 TESTS FAILED (exit 101; 0 passed, 0 failed): see results/f-30-tests.log
+2026-11-23T16:57:40Z f-30 rebased onto fix/older-bugs: 5b2a9df (1 commits)
+2026-11-23T16:58:07Z f-30 tests ok (236 passed, 0 failed) 
+2026-11-23T16:58:07Z f-30 not built (NO_BUILD)
+2026-11-23T17:00:07Z f-31 rebased onto fix/older-bugs: eb01311 (1 commits)
+2026-11-23T17:00:22Z f-31 TESTS FAILED (exit 101; 218 passed, 1 failed): see results/f-31-tests.log
+2026-11-23T17:01:52Z f-31 rebased onto fix/older-bugs: d3bc30f (2 commits)
+2026-11-23T17:02:12Z f-31 tests ok (237 passed, 0 failed) 
+==> zigbuild f-31 from /src/wt/f-31 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 12s
+  f-31: 16,954,624 bytes
+==> done: f-31
+2026-11-23T17:03:25Z f-31 built /opt/bins/f-31
+2026-11-23T17:03:57Z f-older rebased onto fix/older-bugs: 93e7cfd (0 commits)
+2026-11-23T17:04:17Z f-older tests ok (234 passed, 0 failed) 
+==> zigbuild f-older from /src/wt/f-older (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 12s
+  f-older: 16,954,624 bytes
+==> done: f-older
+2026-11-23T17:05:29Z f-older built /opt/bins/f-older
+2026-11-23T17:15:19Z f-32 rebased onto fix/older-bugs: de7d04c (1 commits)
+2026-11-23T17:15:46Z f-32 tests ok (237 passed, 0 failed) 
+2026-11-23T17:15:46Z f-32 not built (NO_BUILD)
+2026-11-23T17:15:52Z f-33 rebased onto fix/older-bugs: 11384a2 (1 commits)
+2026-11-23T17:16:20Z f-33 tests ok (236 passed, 0 failed) 
+==> zigbuild f-33 from /src/wt/f-33 (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 14s
+  f-33: 16,955,328 bytes
+==> done: f-33
+2026-11-23T17:17:35Z f-33 built /opt/bins/f-33
+2026-11-23T18:00:05Z f-34 rebased onto fix/older-bugs: e7734b5 (6 commits)
+2026-11-23T18:00:07Z f-34 TESTS FAILED (exit 101; 0 passed, 0 failed): see results/f-34-tests.log
+2026-11-23T18:01:03Z f-34 rebased onto fix/older-bugs: 79f6d72 (6 commits)
+2026-11-23T18:01:31Z f-34 tests ok (253 passed, 0 failed) 
+2026-11-23T18:01:31Z f-34 not built (NO_BUILD)
+2026-11-23T18:02:33Z f-older rebased onto fix/older-bugs: 3fe8f03 (0 commits)
+2026-11-23T18:03:02Z f-older tests ok (261 passed, 0 failed) 
+==> zigbuild f-older from /src/wt/f-older (features: fast)
+    Finished `release` profile [optimized] target(s) in 1m 13s
+  f-older: 17,013,248 bytes
+==> done: f-older
+2026-11-23T18:04:16Z f-older built /opt/bins/f-older
+2026-11-23T18:05:01Z f-older 3fe8f03 fast suite (D1 window): 275 passed, 0 failed
+2026-11-23T18:05:01Z lean-path rebased onto perf/lean-path: ae0817f (0 commits)
+2026-11-23T18:05:25Z lean-path tests ok (251 passed, 0 failed) 
+bench/review/build.sh: line 219: t_lean-path: command not found
+2026-11-23T18:05:25Z lean-path BUILD FAILED
+2026-11-23T18:06:58Z l-429 (perf/lean-path ae0817f, tests 251 / 0 as lean-path) built /opt/bins/l-429
+2026-11-23T18:12:30Z lean-path rebased onto perf/lean-path: 609c45a (0 commits)
+2026-11-23T18:12:54Z lean-path tests ok (252 passed, 0 failed) 
+2026-11-23T18:12:54Z lean-path not built (NO_BUILD)
