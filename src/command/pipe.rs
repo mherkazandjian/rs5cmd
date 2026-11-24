@@ -52,6 +52,11 @@ impl S3 {
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
+        if let Some(lean) = self.lean_for(&dst.bucket).await {
+            let headers = lean_headers(content_type, metadata);
+            return lean.put_object(dst, body.into_inner(), headers).await;
+        }
+
         let mut req = self
             .client
             .put_object()
@@ -165,6 +170,29 @@ impl S3 {
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
+        if let Some(lean) = self.lean_for(&dst.bucket).await {
+            // The parts are in memory: every one carries its CRC32C in a header.
+            let headers = lean_headers(content_type, metadata);
+            let upload_id = lean
+                .create_multipart_upload(dst, headers, true)
+                .await?
+                .ok_or_else(|| anyhow::anyhow!("CreateMultipartUpload returned no upload id"))?;
+            return match self
+                .upload_parts_from_reader(reader, first, dst, &upload_id, part_size, concurrency)
+                .await
+            {
+                Ok(parts) => {
+                    lean.complete_multipart_upload(dst, &upload_id, &parts, Vec::new())
+                        .await
+                }
+                Err(e) => {
+                    // Best-effort abort so we don't leak an incomplete upload.
+                    let _ = lean.abort_multipart_upload(dst, &upload_id).await;
+                    Err(e)
+                }
+            };
+        }
+
         let mut create = self
             .client
             .create_multipart_upload()
@@ -275,6 +303,7 @@ impl S3 {
 
         let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
         let mut join_set: JoinSet<anyhow::Result<CompletedPart>> = JoinSet::new();
+        let lean = self.lean_for(&dst.bucket).await;
 
         let mut part_number: i32 = 1;
         let mut next = Some(first);
@@ -294,8 +323,14 @@ impl S3 {
             let upload_id = upload_id.to_string();
             let pn = part_number;
             let rp = self.request_payer();
+            let lean = lean.clone();
+            let dst = dst.clone();
             join_set.spawn(async move {
                 let _permit = permit;
+                if let Some(lean) = lean {
+                    let body = aws_smithy_types::body::SdkBody::from(buf);
+                    return lean.upload_part(&dst, &upload_id, pn, body).await;
+                }
                 let resp = client
                     .upload_part()
                     .bucket(bucket)
@@ -422,6 +457,19 @@ impl PipeArgs {
             ..Default::default()
         }
     }
+}
+
+/// The lean data path's headers for pipe's requests: `object_headers`, and the KMS key id also
+/// without `--sse`, as pipe's SDK requests send it (cp sends it only with a method, as s5cmd).
+fn lean_headers(content_type: String, metadata: &Metadata) -> Vec<(String, String)> {
+    let mut h = crate::storage::s3::object_headers(Some(content_type), metadata);
+    let method = metadata.encryption_method.as_deref().is_some_and(|m| !m.is_empty());
+    let key = metadata.encryption_key_id.as_deref().filter(|k| !k.is_empty());
+    if let Some(key) = key.filter(|_| !method) {
+        let name = "x-amz-server-side-encryption-aws-kms-key-id";
+        h.push((name.to_string(), key.to_string()));
+    }
+    h
 }
 
 /// Resolves the effective part size in bytes from a user-supplied value in MiB.

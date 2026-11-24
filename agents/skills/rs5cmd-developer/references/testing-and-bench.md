@@ -68,6 +68,7 @@ private key.
 | `RS5CMD_TLS_ENDPOINT` | Enables the HTTPS fast-path unit test |
 | `RS5CMD_TEST_ENDPOINT` | Endpoint for `tests/e2e_region.rs`, before `AWS_ENDPOINT_URL` / `S3_ENDPOINT_URL` |
 | `RS5CMD_TEST_TMP` | Scratch directory for `tests/e2e_region.rs` (default `/tmp`) |
+| `RS5CMD_DATA_PATH=lean` | Every `rs5cmd` the tests start uses the lean data path (`--data-path`'s variable): run the e2e suite once with it and once without. `tests/lean_path.rs` (downloads), `tests/lean_upload.rs` (uploads, checksums, aws-chunked) and `tests/lean_list.rs` (listings, deletes) compare the two paths themselves, on in-test servers, whatever it is set to |
 
 ## What the test suite is
 

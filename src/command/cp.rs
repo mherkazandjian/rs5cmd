@@ -1088,6 +1088,8 @@ const FAST_DEFAULT_PART_SIZE: u64 = 8 * 1024 * 1024;
 /// `--no-verify-ssl`, `--tls-post-quantum`, `--retry-count`, `--numworkers`, `--dry-run`,
 /// `--json` and `--color`. Dual-stack and FIPS endpoints do not apply with `--endpoint-url`, on
 /// either path. `--no-sign-request` is here because the fast path signs every request (#6).
+/// `--data-path` and `--checksum-trailers` are not here either: they shape how the default path
+/// sends what `--fast` leaves to it (files larger than a part).
 #[cfg(feature = "fast")]
 fn fast_unsupported(global: &GlobalOpts, args: &CpArgs) -> Vec<&'static str> {
     let given = [

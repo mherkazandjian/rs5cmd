@@ -169,6 +169,13 @@ fn build_argv(global: &GlobalOpts, tokens: &[String]) -> Vec<String> {
         argv.push("--limitrate".to_string());
         argv.push(rate.clone());
     }
+    if global.checksum_trailers {
+        argv.push("--checksum-trailers".to_string());
+    }
+    if global.data_path != super::DataPath::Sdk {
+        argv.push("--data-path".to_string());
+        argv.push(global.data_path.to_string());
+    }
     // These were lost for every line (#11).
     let valued = [
         ("--limit-upload", &global.limit_upload),
@@ -241,6 +248,8 @@ mod tests {
             limitrate: None,
             ca_certs_file: None,
             tls_post_quantum: false,
+            data_path: crate::command::DataPath::Sdk,
+            checksum_trailers: false,
             request_payer: None,
             credentials_file: None,
             s3cfg: None,
@@ -290,6 +299,8 @@ mod tests {
             tls_post_quantum: true,
             request_payer: s("requester"),
             credentials_file: s("/creds"),
+            data_path: crate::command::DataPath::Lean,
+            checksum_trailers: true,
             // Not forwarded: applied to the fields above before the lines run.
             s3cfg: None,
             // Not forwarded: exits before `run`.
@@ -310,5 +321,14 @@ mod tests {
         assert_eq!(argv[i + 1], "http://h:9000");
         assert!(argv.iter().any(|a| a == "--dry-run"));
         assert!(!argv.iter().any(|a| a == "--no-sign-request"));
+        assert!(!argv.iter().any(|a| a == "--data-path"));
+        g.data_path = crate::command::DataPath::Lean;
+        let argv = build_argv(&g, &["ls".to_string()]);
+        let i = argv.iter().position(|a| a == "--data-path").unwrap();
+        assert_eq!(argv[i + 1], "lean");
+        assert!(!argv.iter().any(|a| a == "--checksum-trailers"));
+        g.checksum_trailers = true;
+        let argv = build_argv(&g, &["ls".to_string()]);
+        assert!(argv.iter().any(|a| a == "--checksum-trailers"));
     }
 }

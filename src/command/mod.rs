@@ -62,6 +62,29 @@ pub struct GlobalOpts {
     #[arg(long, global = true)]
     pub tls_post_quantum: bool,
 
+    /// How object requests are sent on the default engine: `sdk`, through the AWS SDK (the
+    /// default), or `lean`, by rs5cmd itself on the SDK's connections, credentials and endpoint
+    /// rules, which costs less CPU per request. `lean` covers object requests: downloads,
+    /// uploads (`cp`, `sync`, `pipe`), `cat`, object metadata, listings (`ls`, `du`, the `sync`
+    /// listing; not `--use-list-objects-v1`) and deletes (`rm`); bucket operations, server-side
+    /// copies and the rest go through the SDK either way. Its uploads carry a CRC32C checksum
+    /// (see `--checksum-trailers`). `--fast` is separate.
+    #[arg(
+        long,
+        global = true,
+        value_enum,
+        default_value_t = DataPath::Sdk,
+        env = "RS5CMD_DATA_PATH"
+    )]
+    pub data_path: DataPath,
+
+    /// With `--data-path lean`: streamed uploads (files over 256 KiB, multipart parts of files)
+    /// carry a CRC32C checksum too, as an aws-chunked trailer, as in-memory ones carry it in a
+    /// header. Some S3-compatible servers refuse aws-chunked bodies. No effect on the SDK path,
+    /// which sends no checksums.
+    #[arg(long, global = true)]
+    pub checksum_trailers: bool,
+
     /// Print what would be done without actually doing it.
     #[arg(long, global = true)]
     pub dry_run: bool,
@@ -178,6 +201,23 @@ pub struct GlobalOpts {
     pub install_completion: bool,
 }
 
+/// `--data-path`: who sends object requests on the default engine (see `storage::lean`).
+#[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataPath {
+    Sdk,
+    Lean,
+}
+
+// clap's `default_value_t` requires `Display`.
+impl std::fmt::Display for DataPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            DataPath::Sdk => "sdk",
+            DataPath::Lean => "lean",
+        })
+    }
+}
+
 /// User-facing `--color` choice. Mirrors [`ColorChoice`] but lives on the CLI
 /// surface so `output` stays free of clap.
 #[derive(ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
@@ -238,6 +278,8 @@ impl GlobalOpts {
             max_retries: self.retry_count,
             upload_limiter,
             download_limiter,
+            lean: self.data_path == DataPath::Lean,
+            checksum_trailers: self.checksum_trailers,
             ..Default::default()
         }
     }
