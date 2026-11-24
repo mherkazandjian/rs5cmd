@@ -31,6 +31,11 @@ host); the suite runs against a MinIO S3-compatible server via docker-compose.
   `--links` (round-trip a symlink as a placeholder object, Unix),
   `--if-none-match` (conditional write — skip if the object already exists), and
   `mv --remove-empty-dirs` (prune now-empty local source dirs after a move).
+  s5cmd's `cp` flags: object properties (`--cache-control`, `--expires`,
+  `--content-encoding`, `--content-disposition`, `--metadata KEY=VALUE`,
+  `--metadata-directive`, `--sse`, `--sse-kms-key-id`), when to overwrite (`-n`,
+  `-s`, `-u`), `--flatten`, `--raw`, `--no-follow-symlinks` and `--show-progress`;
+  `rm --all-versions`.
 - **Bandwidth caps** — `--limit-upload`/`--limit-download` accept size strings
   (e.g. `10MB`) and throttle aggregate throughput across the worker pool via a
   shared token bucket.
@@ -396,17 +401,23 @@ self-contained alternative engine for the small-object hot loop; both share the
 
 - `sync`'s default (size + modtime) strategy matches s5cmd exactly: a file is
   re-copied if its source mtime is after the destination's or sizes differ.
-  Because S3 `LastModified` is truncated to whole seconds, a file modified in the
-  same second it is uploaded can be re-copied on the next run (same as upstream
-  s5cmd; use `--size-only` for deterministic comparison).
+  Object times are used as the server returns them: AWS S3 keeps whole seconds,
+  so there a file modified in the same second it is uploaded can be re-copied on
+  the next run (same as upstream s5cmd; use `--size-only` for deterministic
+  comparison); servers that return milliseconds (MinIO, for one) do not have it.
+- **Intended difference:** an S3→S3 `cp` keeps the source object's metadata
+  (content type, headers, user metadata) unless a flag sets new values
+  (`--content-type`, `--cache-control`, `--expires`, `--content-encoding`,
+  `--content-disposition`, `--metadata`) or `--metadata-directive REPLACE` is
+  given: the AWS CLI's behaviour. s5cmd v2.3 sends `REPLACE` on every S3→S3 copy
+  (its issue #813), so a plain copy there drops the source's metadata.
 - `du`/`sync` on a bare prefix list non-recursively (S3 delimiter), matching
   s5cmd; pass a wildcard (`s3://bucket/prefix/*`) to recurse.
 
 ## Not in scope
 
-Real-AWS test coverage, byte-level progress bars, bucket policy/tagging/lifecycle
-commands, and `cp` arbitrary-metadata flags (`--metadata` map, `--expires`,
-`--content-language`) are intentionally out of scope for this port.
+Real-AWS test coverage, byte-level progress bars, and bucket policy/tagging/lifecycle
+commands are intentionally out of scope for this port.
 
 ## License
 

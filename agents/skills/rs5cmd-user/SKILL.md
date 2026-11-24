@@ -274,8 +274,10 @@ comparison follow s5cmd. Main differences between rs5cmd v0.1.0 and s5cmd v2.3:
   command (use `--version`; set `RUST_LOG=debug` for logs).
 - Different: `select` takes `--input-format csv|json|parquet` instead of subcommands. Region
   and endpoint per side are global flags. `cp --fast` uses 8 MiB parts unless `--part-size` is
-  given (the default path uses s5cmd's 50). An S3→S3 `cp` keeps the source's metadata unless
-  a flag sets the new object's (s5cmd v2.3 replaces it on every such copy).
+  given (the default path uses s5cmd's 50).
+- Intended difference: an S3→S3 `cp` keeps the source's metadata (content type, headers, user
+  metadata) unless a flag sets new values or `--metadata-directive REPLACE` is given, as the
+  AWS CLI does. s5cmd v2.3 sends `REPLACE` on every S3→S3 copy, so a plain copy there drops it.
 - Added: `tree`, `mount`, `import-s3cfg` and `--s3cfg`, `cp --fast`, several sources in one
   `cp`, `--if-none-match`, `--links`, `--client-copy`, `--preserve-timestamps`, `sync --checksum`
   and `--max-delete`, `rb --force`, `ls --newer-than` / `--older-than` / `--summarize`,
