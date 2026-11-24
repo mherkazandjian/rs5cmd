@@ -8,9 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 
-fn endpoint_configured() -> bool {
-    std::env::var("AWS_ENDPOINT_URL").is_ok() || std::env::var("S3_ENDPOINT_URL").is_ok()
-}
+mod common;
+use common::endpoint_configured;
 
 fn unique_bucket() -> String {
     let nanos = SystemTime::now()
@@ -22,6 +21,106 @@ fn unique_bucket() -> String {
 
 fn rs5cmd() -> Command {
     Command::cargo_bin("rs5cmd").unwrap()
+}
+
+/// Gives anonymous callers read access to a bucket (a public-read bucket policy), through the
+/// SDK with the test's own credentials.
+fn allow_anonymous_reads(bucket: &str) {
+    let endpoint = std::env::var("AWS_ENDPOINT_URL")
+        .or_else(|_| std::env::var("S3_ENDPOINT_URL"))
+        .unwrap();
+    let policy = format!(
+        concat!(
+            r#"{{"Version":"2012-10-17","Statement":[{{"#,
+            r#""Effect":"Allow","Principal":{{"AWS":["*"]}},"#,
+            r#""Action":["s3:GetObject","s3:ListBucket","s3:GetBucketLocation"],"#,
+            r#""Resource":["arn:aws:s3:::{bucket}","arn:aws:s3:::{bucket}/*"]}}]}}"#,
+        ),
+        bucket = bucket,
+    );
+    tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+            .region(aws_sdk_s3::config::Region::new("us-east-1"))
+            .endpoint_url(endpoint)
+            .load()
+            .await;
+        let conf = aws_sdk_s3::config::Builder::from(&conf).force_path_style(true).build();
+        aws_sdk_s3::Client::from_conf(conf)
+            .put_bucket_policy()
+            .bucket(bucket)
+            .policy(policy)
+            .send()
+            .await
+            .unwrap();
+    });
+}
+
+/// #6: --no-sign-request sends unsigned requests: a public bucket can be read with no
+/// credentials at all, and a private one refuses the anonymous caller even when credentials
+/// are set. `--fast` hands the transfer to the default path.
+#[test]
+fn no_sign_request_reads_a_public_bucket_anonymously() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let public = unique_bucket();
+    let private = format!("{public}-p");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("o.txt");
+    std::fs::write(&f, b"open").unwrap();
+    for b in [&public, &private] {
+        rs5cmd().args(["mb", &format!("s3://{b}")]).assert().success();
+        rs5cmd()
+            .args(["cp", f.to_str().unwrap(), &format!("s3://{b}/o.txt")])
+            .assert()
+            .success();
+    }
+    allow_anonymous_reads(&public);
+
+    let anonymous = || {
+        let mut c = rs5cmd();
+        c.arg("--no-sign-request");
+        for v in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"] {
+            c.env_remove(v);
+        }
+        c.env_remove("AWS_PROFILE")
+            .env("AWS_CONFIG_FILE", "/nonexistent")
+            .env("AWS_SHARED_CREDENTIALS_FILE", "/nonexistent");
+        c
+    };
+    anonymous()
+        .args(["ls", &format!("s3://{public}/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("o.txt"));
+    anonymous()
+        .args(["cat", &format!("s3://{public}/o.txt")])
+        .assert()
+        .success()
+        .stdout("open");
+    if cfg!(feature = "fast") {
+        let dl = tmp.path().join("dl");
+        anonymous()
+            .args(["cp", "--fast", &format!("s3://{public}/o.txt"), &format!("{}/", dl.display())])
+            .assert()
+            .success()
+            .stderr(predicate::str::contains("--fast does not support --no-sign-request").count(1));
+        assert_eq!(std::fs::read(dl.join("o.txt")).unwrap(), b"open");
+    }
+
+    // Unsigned even with credentials in the environment: the private bucket refuses.
+    rs5cmd()
+        .args(["--no-sign-request", "ls", &format!("s3://{private}/")])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("credential").not());
+    rs5cmd().args(["ls", &format!("s3://{private}/")]).assert().success();
+
+    for b in [&public, &private] {
+        rs5cmd().args(["rm", &format!("s3://{b}/*")]).assert().success();
+        rs5cmd().args(["rb", &format!("s3://{b}")]).assert().success();
+    }
 }
 
 #[test]
@@ -160,6 +259,43 @@ fn sync_size_only_is_idempotent_and_deletes() {
 
     rs5cmd().args(["rm", &s3("/m/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// #4: an empty or a missing local destination is an empty destination, as an empty S3 prefix
+/// is: everything is copied, and the missing directory is created.
+#[test]
+fn sync_into_an_empty_or_missing_local_directory() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("sub")).unwrap();
+    std::fs::write(src.join("top.txt"), b"top").unwrap();
+    std::fs::write(src.join("sub").join("deep.txt"), b"deep").unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", &format!("{}/*", src.display()), &s3("/p/")])
+        .assert()
+        .success();
+
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    let missing = tmp.path().join("missing").join("dir");
+    for dst in [&empty, &missing] {
+        rs5cmd()
+            .args(["sync", &s3("/p/*"), &format!("{}/", dst.display())])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("cp ").count(2));
+        assert_eq!(std::fs::read(dst.join("top.txt")).unwrap(), b"top");
+        assert_eq!(std::fs::read(dst.join("sub").join("deep.txt")).unwrap(), b"deep");
+    }
 }
 
 #[test]
@@ -518,6 +654,49 @@ fn json_output_mode() {
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
+/// #8: `pipe` reports its result as s5cmd does, a JSON object with --json; `tree` refuses
+/// --json instead of printing text.
+#[test]
+fn pipe_and_tree_with_json() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+
+    let piped = || assert_cmd::Command::cargo_bin("rs5cmd").unwrap();
+    let out = piped()
+        .args(["--json", "pipe", &s3("/pipe.txt")])
+        .write_stdin("x")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["operation"], "pipe");
+    assert_eq!(v["success"], true);
+    assert_eq!(v["destination"], s3("/pipe.txt"));
+    assert!(v.get("source").is_none(), "{v}");
+
+    piped()
+        .args(["pipe", &s3("/text.txt")])
+        .write_stdin("y")
+        .assert()
+        .success()
+        .stdout(format!("pipe {}\n", s3("/text.txt")));
+
+    rs5cmd()
+        .args(["--json", "tree", &s3("/")])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("ls --json"));
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
 #[test]
 fn list_objects_v1_fallback() {
     if !endpoint_configured() {
@@ -543,6 +722,39 @@ fn list_objects_v1_fallback() {
         .stdout(predicate::str::contains("v.txt"));
 
     rs5cmd().args(["rm", &s3("/v.txt")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+/// #9: a wildcard source walks a symbolic link to a directory, as a directory source does.
+#[cfg(unix)]
+#[test]
+fn wildcard_source_walks_a_link_to_a_directory() {
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let s = tmp.path().join("s");
+    std::fs::create_dir_all(s.join("real")).unwrap();
+    std::fs::write(s.join("real").join("r.txt"), b"y").unwrap();
+    std::fs::write(s.join("plain.txt"), b"z").unwrap();
+    std::os::unix::fs::symlink("real", s.join("link")).unwrap();
+
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    rs5cmd()
+        .args(["cp", &format!("{}/*", s.display()), &s3("/s/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("cp ").count(3));
+    rs5cmd()
+        .args(["cat", &s3("/s/link/r.txt")])
+        .assert()
+        .success()
+        .stdout("y");
+
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }
 
@@ -2097,6 +2309,277 @@ fn rm_dry_run_lists_objects() {
         .success()
         .stdout(predicate::str::contains("x1"))
         .stdout(predicate::str::contains("x3"));
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn rm_refuses_a_bucket_or_a_bare_prefix() {
+    // #30: `rm s3://b/p/` deleted everything under the prefix and exited 0; s5cmd refuses it.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    const MSG: &str =
+        "s3 bucket/prefix cannot be used for delete operations (forgot wildcard character?)";
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    for f in ["x1", "x2", "x3"] {
+        std::fs::write(tmp.path().join(f), b"x").unwrap();
+    }
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", tmp.path().to_str().unwrap());
+    rs5cmd().args(["cp", &pattern, &s3("/d01/")]).assert().success();
+    let refused: [&[&str]; 5] = [
+        &["rm", &s3("/d01/")],
+        &["--dry-run", "rm", &s3("/d01/")],
+        &["rm", &s3("/d01/x1"), &s3("/d01/")],
+        &["rm", &s3("")],
+        &["rm", &s3("/")],
+    ];
+    for args in refused {
+        let out = rs5cmd().args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains(MSG), "{args:?}: {stderr}");
+        assert!(out.stdout.is_empty(), "{args:?}: deleted something");
+    }
+    rs5cmd()
+        .args(["--json", "rm", &s3("/d01/")])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("\"success\":false"))
+        .stdout(predicate::str::contains(MSG));
+    // Nothing was deleted, not even the object named next to the prefix.
+    let ls = rs5cmd().args(["ls", &s3("/d01/*")]).output().unwrap();
+    let listed = String::from_utf8_lossy(&ls.stdout);
+    for f in ["x1", "x2", "x3"] {
+        assert!(listed.contains(f), "{f} missing: {listed}");
+    }
+    // The wildcard is the way to delete everything under a prefix.
+    rs5cmd().args(["rm", &s3("/d01/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn keys_with_spaces_and_plus_are_listed_as_they_are() {
+    // #31: listings come URL-encoded (a space as '+', a real '+' as %2B) and '+' was not
+    // decoded: `ls` showed "a+b.txt", wildcard cp and mv failed with NoSuchKey, wildcard rm
+    // reported a delete and left the object.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let names = ["a b.txt", "c+d.txt", "e f+g.txt", "plain.txt", "sub dir/x+y z.txt"];
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("sub dir")).unwrap();
+    for n in names {
+        std::fs::write(src.join(n), n.as_bytes()).unwrap();
+    }
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", src.to_str().unwrap());
+    rs5cmd().args(["cp", &pattern, &s3("/s/")]).assert().success();
+
+    let ls = rs5cmd().args(["ls", &s3("/s/*")]).output().unwrap();
+    assert!(ls.status.success());
+    let listed = String::from_utf8_lossy(&ls.stdout);
+    for n in names {
+        assert!(listed.contains(n), "{n:?} missing from ls: {listed}");
+    }
+    assert!(!listed.contains("a+b") && !listed.contains("x+y+z"), "{listed}");
+    // The common prefix is decoded too.
+    rs5cmd()
+        .args(["ls", &s3("/s/")])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("sub dir/"));
+
+    let dl = tmp.path().join("dl");
+    let dst = format!("{}/", dl.to_str().unwrap());
+    rs5cmd().args(["cp", &s3("/s/*"), &dst]).assert().success();
+    for n in names {
+        assert_eq!(std::fs::read(dl.join(n)).unwrap(), n.as_bytes(), "{n}");
+    }
+
+    rs5cmd().args(["mv", &s3("/s/*"), &s3("/t/")]).assert().success();
+    rs5cmd().args(["ls", &s3("/s/*")]).assert().failure();
+    let out = rs5cmd().args(["rm", &s3("/t/*")]).output().unwrap();
+    assert!(out.status.success());
+    let removed = String::from_utf8_lossy(&out.stdout);
+    for n in names {
+        let line = format!("rm {}", s3(&format!("/t/{n}")));
+        assert!(removed.contains(&line), "missing {line:?} in {removed}");
+    }
+    // Nothing is left: before the fix the keys with a space stayed.
+    rs5cmd().args(["ls", &s3("/*")]).assert().failure();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn sync_twice_copies_nothing_when_the_server_keeps_milliseconds() {
+    // #33: listed object times were cut to whole seconds, so on a server that returns
+    // milliseconds (MinIO) a file written in the same second as its upload looked newer than its
+    // copy, and the second sync uploaded it again.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let src = format!("{}/", tmp.path().to_str().unwrap());
+    for round in 0..3 {
+        for i in 0..20 {
+            std::fs::write(tmp.path().join(format!("f{i}")), format!("{round} {i}")).unwrap();
+        }
+        let first = rs5cmd().args(["sync", &src, &s3("/p/")]).output().unwrap();
+        assert!(first.status.success());
+        let copied = String::from_utf8_lossy(&first.stdout).lines().count();
+        assert_eq!(copied, 20, "round {round}: every changed file is uploaded");
+        let again = rs5cmd().args(["sync", &src, &s3("/p/")]).output().unwrap();
+        assert!(again.status.success());
+        let stdout = String::from_utf8_lossy(&again.stdout);
+        assert!(stdout.is_empty(), "round {round}: the second sync copied: {stdout}");
+    }
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_sets_metadata_and_a_copy_keeps_or_replaces_it() {
+    // #34: `--metadata` and `--metadata-directive`. A copy keeps the source's metadata unless a
+    // flag sets it (then REPLACE) or the directive says otherwise.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f.txt");
+    std::fs::write(&f, b"meta").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let src = s3("/src.txt");
+    rs5cmd()
+        .args(["cp", "--metadata", "owner=a", "--content-type", "text/plain"])
+        .args([f.to_str().unwrap(), &src])
+        .assert()
+        .success();
+    let head = |key: &str| {
+        let out = rs5cmd().args(["--json", "head", &s3(key)]).output().unwrap();
+        assert!(out.status.success(), "head {key}");
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let owner = v["metadata"]["owner"].as_str().map(str::to_string);
+        (owner, v["content_type"].as_str().map(str::to_string))
+    };
+    assert_eq!(head("/src.txt"), (Some("a".into()), Some("text/plain".into())));
+    // No flag: S3's COPY, the metadata travels with the object.
+    rs5cmd().args(["cp", &src, &s3("/kept.txt")]).assert().success();
+    assert_eq!(head("/kept.txt"), (Some("a".into()), Some("text/plain".into())));
+    // --metadata: REPLACE.
+    rs5cmd()
+        .args(["cp", "--metadata", "owner=b", &src, &s3("/replaced.txt")])
+        .assert()
+        .success();
+    assert_eq!(head("/replaced.txt").0.as_deref(), Some("b"));
+    // --metadata-directive COPY wins over the flag.
+    rs5cmd()
+        .args(["cp", "--metadata-directive", "COPY", "--metadata", "owner=c"])
+        .args([&src, &s3("/copied.txt")])
+        .assert()
+        .success();
+    assert_eq!(head("/copied.txt").0.as_deref(), Some("a"));
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_overwrite_flags_keep_or_replace_the_destination() {
+    // #34: --no-clobber, --if-size-differ, --if-source-newer, as s5cmd decides them.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let f = tmp.path().join("f.txt");
+    let back = tmp.path().join("back.txt");
+    let dst = s3("/k.txt");
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    std::fs::write(&f, b"one").unwrap();
+    rs5cmd().args(["cp", f.to_str().unwrap(), &dst]).assert().success();
+    let remote = || {
+        let _ = std::fs::remove_file(&back);
+        rs5cmd().args(["cp", &dst, back.to_str().unwrap()]).assert().success();
+        std::fs::read(&back).unwrap()
+    };
+    let cp = |flag: &str| {
+        let out = rs5cmd().args(["cp", flag, f.to_str().unwrap(), &dst]).output().unwrap();
+        assert!(out.status.success(), "cp {flag}");
+        !out.stdout.is_empty()
+    };
+    // The local file is older than the object from here on; same size, new content.
+    std::fs::write(&f, b"two").unwrap();
+    let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(past).unwrap();
+    assert!(!cp("--no-clobber"), "-n prints nothing when it keeps the object");
+    assert_eq!(remote(), b"one");
+    assert!(!cp("--if-size-differ"));
+    assert!(!cp("--if-source-newer"));
+    assert_eq!(remote(), b"one");
+    std::fs::write(&f, b"three").unwrap();
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(past).unwrap();
+    assert!(cp("--if-size-differ"), "sizes differ: copied");
+    assert_eq!(remote(), b"three");
+    std::fs::write(&f, b"three").unwrap();
+    let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&f).unwrap().set_modified(future).unwrap();
+    assert!(cp("--if-source-newer"), "newer: copied");
+    // A destination that does not exist is always written.
+    let out = rs5cmd()
+        .args(["cp", "-n", f.to_str().unwrap(), &s3("/new.txt")])
+        .output()
+        .unwrap();
+    assert!(out.status.success() && !out.stdout.is_empty());
+    rs5cmd().args(["rm", &s3("/*")]).assert().success();
+    rs5cmd().args(["rb", &s3("")]).assert().success();
+}
+
+#[test]
+fn cp_flatten_and_raw() {
+    // #34: --flatten drops the source's directories; --raw takes `?` in a key literally.
+    if !endpoint_configured() {
+        eprintln!("skipping: no S3 endpoint configured");
+        return;
+    }
+    let bucket = unique_bucket();
+    let s3 = |suffix: &str| format!("s3://{bucket}{suffix}");
+    let tmp = tempfile::tempdir().unwrap();
+    let src = tmp.path().join("src");
+    std::fs::create_dir_all(src.join("a/b")).unwrap();
+    std::fs::write(src.join("a/b/c.txt"), b"c").unwrap();
+    std::fs::write(src.join("a/d.txt"), b"d").unwrap();
+    rs5cmd().args(["mb", &s3("")]).assert().success();
+    let pattern = format!("{}/*", src.to_str().unwrap());
+    rs5cmd().args(["cp", "--flatten", &pattern, &s3("/flat/")]).assert().success();
+    let ls = rs5cmd().args(["ls", &s3("/flat/*")]).output().unwrap();
+    let listed = String::from_utf8_lossy(&ls.stdout);
+    assert!(listed.contains(" c.txt") && listed.contains(" d.txt"), "{listed}");
+    assert!(!listed.contains("a/"), "{listed}");
+
+    let f = tmp.path().join("q.txt");
+    std::fs::write(&f, b"literal").unwrap();
+    let key = s3("/p/what?.txt");
+    rs5cmd().args(["cp", "--raw", f.to_str().unwrap(), &key]).assert().success();
+    let out = tmp.path().join("out.bin");
+    rs5cmd().args(["cp", "--raw", &key, out.to_str().unwrap()]).assert().success();
+    assert_eq!(std::fs::read(&out).unwrap(), b"literal", "out.bin is the object, not a directory");
     rs5cmd().args(["rm", &s3("/*")]).assert().success();
     rs5cmd().args(["rb", &s3("")]).assert().success();
 }

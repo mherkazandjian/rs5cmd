@@ -38,10 +38,7 @@ impl S3 {
                 let object = Object {
                     url: Some(u.clone()),
                     etag: out.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                    mod_time: out.last_modified().and_then(|t| {
-                        std::time::UNIX_EPOCH
-                            .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                    }),
+                    mod_time: out.last_modified().and_then(crate::storage::s3::system_time),
                     size: out.content_length().unwrap_or(0),
                     typ: ObjectType::File,
                     storage_class: StorageClass(storage_class),

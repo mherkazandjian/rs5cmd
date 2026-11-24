@@ -53,8 +53,7 @@ impl S3 {
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
         if let Some(lean) = self.lean_for(&dst.bucket).await {
-            let headers =
-                crate::storage::s3::object_headers(Some(content_type), metadata, true, true);
+            let headers = lean_headers(content_type, metadata);
             return lean.put_object(dst, body.into_inner(), headers).await;
         }
 
@@ -173,8 +172,7 @@ impl S3 {
 
         if let Some(lean) = self.lean_for(&dst.bucket).await {
             // The parts are in memory: every one carries its CRC32C in a header.
-            let headers =
-                crate::storage::s3::object_headers(Some(content_type), metadata, true, true);
+            let headers = lean_headers(content_type, metadata);
             let upload_id = lean
                 .create_multipart_upload(dst, headers, true)
                 .await?
@@ -461,6 +459,19 @@ impl PipeArgs {
     }
 }
 
+/// The lean data path's headers for pipe's requests: `object_headers`, and the KMS key id also
+/// without `--sse`, as pipe's SDK requests send it (cp sends it only with a method, as s5cmd).
+fn lean_headers(content_type: String, metadata: &Metadata) -> Vec<(String, String)> {
+    let mut h = crate::storage::s3::object_headers(Some(content_type), metadata);
+    let method = metadata.encryption_method.as_deref().is_some_and(|m| !m.is_empty());
+    let key = metadata.encryption_key_id.as_deref().filter(|k| !k.is_empty());
+    if let Some(key) = key.filter(|_| !method) {
+        let name = "x-amz-server-side-encryption-aws-kms-key-id";
+        h.push((name.to_string(), key.to_string()));
+    }
+    h
+}
+
 /// Resolves the effective part size in bytes from a user-supplied value in MiB.
 ///
 /// S3 rejects parts smaller than 5 MiB (except the final part), so any value
@@ -502,11 +513,23 @@ pub async fn run(global: &GlobalOpts, args: PipeArgs) -> anyhow::Result<()> {
     // Stream stdin in parts: a single PUT for small inputs, otherwise a
     // concurrent multipart upload that bounds memory regardless of input size.
     let mut stdin = tokio::io::stdin();
-    s3.put_multipart_reader(&mut stdin, &dst, &metadata, part_size, concurrency)
-        .await?;
-
-    crate::outln!("pipe {dst}");
-    Ok(())
+    let res = s3
+        .put_multipart_reader(&mut stdin, &dst, &metadata, part_size, concurrency)
+        .await;
+    // The result as an operation line, a JSON object with --json, like cp's (#8).
+    match res {
+        Ok(()) => {
+            crate::output::op_result_to("pipe", &dst.to_string(), None);
+            Ok(())
+        }
+        // With --json the failure is a record on stdout too; the text error is unchanged.
+        Err(e) if crate::output::is_json() => {
+            let msg = crate::error::format_error(&e);
+            crate::output::op_result_to("pipe", &dst.to_string(), Some(&msg));
+            anyhow::bail!("pipe failed")
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Guesses a content type from the destination's file extension, falling back

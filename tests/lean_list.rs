@@ -1,7 +1,8 @@
 //! Listings and deletes on the lean data path (`--data-path lean`) against the SDK path, on an
 //! in-test S3 server that pages its listings two entries at a time and records every request:
 //! the same output, the same requests (method, path, query), and the same DeleteObjects body and
-//! checksum.
+//! checksum; version ids for `rm --all-versions` (#34) and listed times with their milliseconds
+//! (#33).
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -12,6 +13,10 @@ use assert_cmd::prelude::*;
 
 const KEYS: &[&str] = &["a", "d/b", "d/c", "k&1", "z"];
 const PAGE: usize = 2;
+/// Every listed object's time, with its milliseconds (as MinIO lists them; #33).
+const LISTED: &str = "2026-11-02T10:00:00.500Z";
+/// Its whole seconds since the epoch.
+const LISTED_SECS: i64 = 1_793_613_600;
 
 #[derive(Clone, Debug)]
 struct Seen {
@@ -117,7 +122,7 @@ fn list_v2(q: &dyn Fn(&str) -> Option<String>) -> String {
             x.push_str(&format!("<CommonPrefixes><Prefix>{}</Prefix></CommonPrefixes>", encode(e)));
         } else {
             x.push_str(&format!(
-                "<Contents><Key>{}</Key><LastModified>2026-11-02T10:00:00.000Z</LastModified>\
+                "<Contents><Key>{}</Key><LastModified>{LISTED}</LastModified>\
                  <ETag>&quot;e-{}&quot;</ETag><Size>{}</Size><StorageClass>STANDARD</StorageClass>\
                  </Contents>",
                 encode(e),
@@ -150,13 +155,21 @@ fn list_versions() -> String {
     x
 }
 
-/// Every key of a DeleteObjects body, reported deleted.
+/// Every object of a DeleteObjects body, reported deleted with its version id if it named one.
 fn deleted(body: &[u8]) -> String {
     let body = String::from_utf8_lossy(body);
     let mut x = String::from("<DeleteResult>");
-    for part in body.split("<Key>").skip(1) {
-        let key = &part[..part.find("</Key>").unwrap()];
-        x.push_str(&format!("<Deleted><Key>{key}</Key></Deleted>"));
+    for part in body.split("<Object>").skip(1) {
+        let field = |name: &str| {
+            let start = part.find(&format!("<{name}>"))? + name.len() + 2;
+            let len = part[start..].find(&format!("</{name}>"))?;
+            Some(part[start..start + len].to_string())
+        };
+        x.push_str(&format!("<Deleted><Key>{}</Key>", field("Key").unwrap()));
+        if let Some(v) = field("VersionId") {
+            x.push_str(&format!("<VersionId>{v}</VersionId>"));
+        }
+        x.push_str("</Deleted>");
     }
     x.push_str("</DeleteResult>");
     x
@@ -330,4 +343,50 @@ fn rm_sends_the_sdks_delete_objects() {
     }
     assert!(b.header("x-amz-checksum-crc32").is_some());
     assert_eq!(b.header("x-amz-sdk-checksum-algorithm"), Some("CRC32"));
+}
+
+/// `rm --all-versions` (#34) names each version in the lean DeleteObjects body as the SDK does,
+/// and prints the version ids the server returns.
+#[test]
+fn rm_all_versions_sends_and_prints_the_version_ids() {
+    let args = ["rm", "--all-versions", "s3://bucket/*"];
+    let (sdk, sdk_seen) = run(&args, "sdk");
+    let (lean, lean_seen) = run(&args, "lean");
+    assert_eq!(sdk, lean);
+    assert_eq!(lean.0.len(), KEYS.len() + 1, "each version and the marker: {:?}", lean.0);
+    let line = |key: &str, id: &str| {
+        lean.0.iter().any(|l| {
+            let words: Vec<&str> = l.split_whitespace().collect();
+            words == ["rm", &format!("s3://bucket/{key}"), id]
+        })
+    };
+    assert!(line("k&1", "v-3") && line("gone", "dm"), "{:?}", lean.0);
+    let body = |seen: &[Seen]| {
+        let post = seen.iter().find(|s| s.method == "POST").expect("a DeleteObjects request");
+        String::from_utf8_lossy(&post.body).to_string()
+    };
+    assert_eq!(body(&sdk_seen), body(&lean_seen));
+    assert!(body(&lean_seen).contains("<Key>gone</Key><VersionId>dm</VersionId>"));
+}
+
+/// #33 on the lean data path: listed times keep their milliseconds, so `sync` copies a file
+/// changed after its copy's listed time (.700 against .500) and not one changed before it in the
+/// same second (.200), on both paths. Cut to whole seconds, both looked newer.
+#[test]
+fn sync_compares_listed_times_with_their_milliseconds() {
+    let dir = tempfile::tempdir().unwrap();
+    for (name, millis) in [("a", 200), ("z", 700)] {
+        let path = dir.path().join(name);
+        // One byte, as the server lists "a" and "z".
+        std::fs::write(&path, "x").unwrap();
+        let mtime = filetime::FileTime::from_unix_time(LISTED_SECS, millis * 1_000_000);
+        filetime::set_file_mtime(&path, mtime).unwrap();
+    }
+    let src = format!("{}/", dir.path().to_str().unwrap());
+    let args = ["--dry-run", "sync", &src, "s3://bucket/"];
+    let (sdk, _) = run(&args, "sdk");
+    let (lean, _) = run(&args, "lean");
+    assert_eq!(sdk.0, lean.0);
+    assert_eq!(lean.0.len(), 1, "{:?}", lean.0);
+    assert!(lean.0[0].ends_with("s3://bucket/z"), "{:?}", lean.0);
 }

@@ -62,10 +62,11 @@ private key.
 
 | Variable | Effect |
 |---|---|
-| `AWS_ENDPOINT_URL` or `S3_ENDPOINT_URL` | Present: e2e tests run. Absent: they skip |
+| `AWS_ENDPOINT_URL` or `S3_ENDPOINT_URL` | Present: e2e tests run. Absent: they skip (`tests/common`) |
+| `RS5CMD_E2E_REQUIRED=1` | A missing endpoint fails the e2e tests instead of skipping them. The compose `test` service sets it |
 | `RS5CMD_TEST_SOCKS5` | Enables `proxy_socks5_transfer` in `tests/e2e.rs` |
 | `RS5CMD_TLS_ENDPOINT` | Enables the HTTPS fast-path unit test |
-| `RS5CMD_TEST_ENDPOINT` | Endpoint for `tests/e2e_region.rs` (default `http://minio:9000`) |
+| `RS5CMD_TEST_ENDPOINT` | Endpoint for `tests/e2e_region.rs`, before `AWS_ENDPOINT_URL` / `S3_ENDPOINT_URL` |
 | `RS5CMD_TEST_TMP` | Scratch directory for `tests/e2e_region.rs` (default `/tmp`) |
 | `RS5CMD_DATA_PATH=lean` | Every `rs5cmd` the tests start uses the lean data path (`--data-path`'s variable): run the e2e suite once with it and once without. `tests/lean_path.rs` (downloads), `tests/lean_upload.rs` (uploads, checksums, aws-chunked) and `tests/lean_list.rs` (listings, deletes) compare the two paths themselves, on in-test servers, whatever it is set to |
 
@@ -98,9 +99,8 @@ Check, in this order:
 2. A `test result: ok.` line for every binary you expect, including the feature-gated ones in
    `test-fast` and `test-mount`.
 3. No unexpected `skipping:` lines. In the compose services the endpoint is set, so e2e tests
-   must run. On a bare host they all skip and the run is green without testing anything.
-4. `tests/e2e_region.rs` is the exception: it never skips and fails without MinIO at its
-   endpoint.
+   must run (the `test` service sets `RS5CMD_E2E_REQUIRED=1`, so a missing endpoint fails
+   there). On a bare host they all skip and the run is green without testing anything.
 
 `cargo build` does not compile tests. To check that everything compiles without running it:
 
@@ -111,7 +111,8 @@ docker compose run --rm --no-deps dev cargo build --tests --features "fast mount
 
 ## Writing tests
 
-- Start every e2e test with the endpoint guard, and print `skipping: ...` before returning.
+- Start every e2e test with the endpoint guard (`mod common;`, `common::endpoint_configured()`),
+  and print `skipping: ...` before returning.
 - Use a fresh bucket per test (`unique_bucket()`), create it with `mb`, and remove it at the
   end. Tests run in parallel against the same MinIO.
 - Use `tempfile::tempdir()` for local files. Do not write into the checkout.

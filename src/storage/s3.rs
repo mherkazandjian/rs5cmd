@@ -145,14 +145,68 @@ fn parse_content_range_total(cr: Option<&str>) -> Option<u64> {
     cr?.rsplit('/').next()?.trim().parse::<u64>().ok()
 }
 
+/// Sets what `metadata` asks of a new object on a PutObject, CreateMultipartUpload or CopyObject
+/// request, whose builders share these setters: storage class, ACL, cache control, `Expires`,
+/// content encoding and disposition, server-side encryption (the KMS key only with a method) and
+/// user metadata. Empty values are not sent. The content type and a copy's metadata directive are
+/// the callers'. `expires` was checked when the command was parsed (`expires_time`).
+macro_rules! object_properties {
+    ($req:expr, $metadata:expr) => {{
+        let m: &Metadata = $metadata;
+        let set = |v: &Option<String>| v.as_deref().filter(|v| !v.is_empty()).map(str::to_string);
+        let mut req = $req;
+        if let Some(v) = set(&m.storage_class) {
+            req = req.storage_class(aws_sdk_s3::types::StorageClass::from(v.as_str()));
+        }
+        if let Some(v) = set(&m.acl) {
+            req = req.acl(aws_sdk_s3::types::ObjectCannedAcl::from(v.as_str()));
+        }
+        if let Some(v) = set(&m.cache_control) {
+            req = req.cache_control(v);
+        }
+        if let Some(v) = set(&m.expires).and_then(|v| expires_time(&v).ok()) {
+            req = req.expires(v);
+        }
+        if let Some(v) = set(&m.content_encoding) {
+            req = req.content_encoding(v);
+        }
+        if let Some(v) = set(&m.content_disposition) {
+            req = req.content_disposition(v);
+        }
+        if let Some(v) = set(&m.encryption_method) {
+            req = req.server_side_encryption(aws_sdk_s3::types::ServerSideEncryption::from(
+                v.as_str(),
+            ));
+            if let Some(key) = set(&m.encryption_key_id) {
+                req = req.ssekms_key_id(key);
+            }
+        }
+        for (k, v) in &m.user_defined {
+            req = req.metadata(k, v);
+        }
+        req
+    }};
+}
+
+/// `--expires`: an RFC 3339 time, as s5cmd takes it (`2024-10-01T20:30:00Z`).
+pub fn expires_time(v: &str) -> anyhow::Result<aws_smithy_types::DateTime> {
+    aws_smithy_types::DateTime::from_str(v, aws_smithy_types::date_time::Format::DateTime)
+        .map_err(|_| {
+            anyhow::anyhow!("--expires: {v:?} is not an RFC 3339 time (e.g. 2024-10-01T20:30:00Z)")
+        })
+}
+
 /// Percent-decodes a string echoed back by S3 when the list request was made
 /// with `EncodingType=Url`. We must request URL encoding so that keys containing
 /// XML-illegal control characters (e.g. ESC `0x1b`) can be represented in the
 /// XML response and deserialized at all (upstream s5cmd #677); the echoed keys,
 /// prefixes and pagination markers then have to be decoded back to their raw
-/// bytes before use. `%XX` sequences are decoded as bytes and the result is
-/// interpreted as UTF-8 (lossily, to never panic on malformed input); a lone or
-/// malformed `%` is left verbatim.
+/// bytes before use. The encoding is the form encoding: a space comes as `+` and a
+/// real `+` as `%2B` (#31), so `+` decodes to a space, as botocore's `unquote_plus`
+/// does. `%XX` sequences are decoded as bytes and the result is interpreted as UTF-8
+/// (lossily, to never panic on malformed input); a lone or malformed `%` is left
+/// verbatim. Only keys, prefixes and key markers are encoded: a version id marker
+/// comes as it is and must not go through here (AWS version ids can contain `+`).
 fn percent_decode(s: &str) -> String {
     let bytes = s.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -166,7 +220,7 @@ fn percent_decode(s: &str) -> String {
                 continue;
             }
         }
-        out.push(bytes[i]);
+        out.push(if bytes[i] == b'+' { b' ' } else { bytes[i] });
         i += 1;
     }
     String::from_utf8_lossy(&out).into_owned()
@@ -259,6 +313,63 @@ async fn bucket_region(client: &Client, endpoint: &str, bucket: &str) -> Option<
     cache.push((key, r.clone()));
     r
 }
+
+/// Classifies `429 Too Many Requests` as a throttling error, as `503 SlowDown` is (#32). The SDK
+/// retries throttling only for the codes it lists (`TooManyRequestsException`, not the
+/// `TooManyRequests` S3-compatible servers send) and by status only 500, 502, 503 and 504, so a
+/// 429 failed at once; s5cmd (Go SDK v1) treats any 429 as throttling. Retried like `SlowDown`:
+/// same backoff, same retry quota, at most `--retry-count` times.
+mod too_many_requests {
+    use aws_smithy_runtime_api::client::interceptors::context::InterceptorContext;
+    use aws_smithy_runtime_api::client::retries::classifiers::{
+        ClassifyRetry, RetryAction, RetryClassifierPriority,
+    };
+
+    #[derive(Debug)]
+    pub(super) struct TooManyRequests;
+
+    impl ClassifyRetry for TooManyRequests {
+        fn classify_retry(&self, ctx: &InterceptorContext) -> RetryAction {
+            match ctx.response() {
+                Some(res) if u16::from(res.status()) == 429 => RetryAction::throttling_error(),
+                _ => RetryAction::NoActionIndicated,
+            }
+        }
+
+        fn name(&self) -> &'static str {
+            "429 Too Many Requests"
+        }
+
+        fn priority(&self) -> RetryClassifierPriority {
+            RetryClassifierPriority::http_status_code_classifier()
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use aws_smithy_runtime_api::client::interceptors::context::Input;
+        use aws_smithy_runtime_api::client::orchestrator::HttpResponse;
+        use aws_smithy_types::body::SdkBody;
+        use aws_smithy_types::retry::ErrorKind;
+
+        fn classify(status: u16) -> RetryAction {
+            let mut ctx = InterceptorContext::new(Input::erase(()));
+            let status = status.try_into().unwrap();
+            ctx.set_response(HttpResponse::new(status, SdkBody::empty()));
+            TooManyRequests.classify_retry(&ctx)
+        }
+
+        #[test]
+        fn a_429_is_throttling_and_other_statuses_are_left_to_the_sdk() {
+            assert_eq!(classify(429), RetryAction::retryable_error(ErrorKind::ThrottlingError));
+            for status in [200, 400, 403, 404, 500, 503] {
+                assert_eq!(classify(status), RetryAction::NoActionIndicated, "{status}");
+            }
+        }
+    }
+}
+use too_many_requests::TooManyRequests;
 
 /// The HTTP client of every S3 client in the process, one per distinct (no-verify, proxy, CA
 /// bundle), so they share connection pools: the SDK builds its default client per S3 client, which
@@ -1240,15 +1351,17 @@ impl S3 {
     /// `opts.endpoint` or the `AWS_ENDPOINT_URL`/`S3_ENDPOINT_URL` env vars,
     /// switching to path-style addressing in that case.
     pub async fn new(_u: &Url, opts: &Options) -> anyhow::Result<S3> {
-        // One config load (region, credentials provider and its cache) per (region, profile) for
-        // the whole process, however many S3 clients the command builds (F09). The loader reads
-        // nothing else from `opts`. The HTTP client is shared separately below. Cached with it:
-        // whether no region was configured at all (then the bucket's region is asked below).
-        // With them, the lean data path's credentials cache for that configuration.
+        // One config load (region, credentials provider and its cache) per (region, profile,
+        // --no-sign-request) for the whole process, however many S3 clients the command builds
+        // (F09). The loader reads nothing else from `opts`. The HTTP client is shared separately
+        // below. Cached with it: whether no region was configured at all (then the bucket's
+        // region is asked below), and the lean data path's credentials cache for that
+        // configuration.
+        type Key = (Option<String>, Option<String>, bool);
         type Loaded = (aws_config::SdkConfig, bool, std::sync::Arc<super::lean::CredsCache>);
-        static SHARED: tokio::sync::Mutex<Vec<((Option<String>, Option<String>), Loaded)>> =
+        static SHARED: tokio::sync::Mutex<Vec<(Key, Loaded)>> =
             tokio::sync::Mutex::const_new(Vec::new());
-        let key = (opts.region.clone(), opts.profile.clone());
+        let key = (opts.region.clone(), opts.profile.clone(), opts.no_sign_request);
         let (shared, region_unset, creds) = {
             let mut cache = SHARED.lock().await;
             match cache.iter().find(|(k, _)| *k == key) {
@@ -1261,6 +1374,11 @@ impl S3 {
                         .region(configured.unwrap_or_else(|| Region::new("us-east-1")));
                     if let Some(profile) = &opts.profile {
                         loader = loader.profile_name(profile);
+                    }
+                    // --no-sign-request: no credentials, so requests go unsigned (anonymous
+                    // access to public buckets), as in s5cmd (#6).
+                    if opts.no_sign_request {
+                        loader = loader.no_credentials();
                     }
                     let c = loader.load().await;
                     let creds =
@@ -1353,6 +1471,7 @@ impl S3 {
             aws_config::retry::RetryConfig::standard()
                 .with_max_attempts(opts.max_retries.saturating_add(1)),
         );
+        builder = builder.retry_classifier(TooManyRequests);
 
         let mut client = Client::from_conf(builder.clone().build());
         // No region configured: like s5cmd, ask the bucket where it lives (x-amz-bucket-region)
@@ -1724,7 +1843,7 @@ impl S3 {
             .unwrap_or_else(|| "application/octet-stream".to_string());
 
         if let Some(lean) = self.lean_for(&dst.bucket).await {
-            let mut headers = object_headers(Some(content_type), metadata, true, false);
+            let mut headers = object_headers(Some(content_type), metadata);
             if metadata.if_none_match {
                 headers.push(("if-none-match".to_string(), "*".to_string()));
             }
@@ -1743,7 +1862,7 @@ impl S3 {
             .content_type(content_type)
             .set_request_payer(self.request_payer());
 
-        req = apply_put_metadata(req, metadata)?;
+        req = object_properties!(req, metadata);
         if metadata.if_none_match {
             // Conditional write: fail with HTTP 412 if the object already exists.
             req = req.if_none_match("*");
@@ -1778,19 +1897,7 @@ impl S3 {
             .key(&dst.path)
             .content_type(content_type)
             .set_request_payer(self.request_payer());
-        if let Some(sc) = &metadata.storage_class {
-            if !sc.is_empty() {
-                create = create.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-            }
-        }
-        if let Some(acl) = &metadata.acl {
-            if !acl.is_empty() {
-                create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-            }
-        }
-        for (k, v) in &metadata.user_defined {
-            create = create.metadata(k, v);
-        }
+        create = object_properties!(create, metadata);
         let created = create.send().await?;
         let upload_id = created
             .upload_id()
@@ -1858,7 +1965,7 @@ impl S3 {
             .content_type
             .clone()
             .unwrap_or_else(|| "application/octet-stream".to_string());
-        let headers = object_headers(Some(content_type), metadata, false, false);
+        let headers = object_headers(Some(content_type), metadata);
         let upload_id = lean
             .create_multipart_upload(dst, headers, lean.trailers())
             .await?
@@ -1958,10 +2065,7 @@ impl S3 {
             let name = b.name().unwrap_or_default().to_string();
             if prefix.is_empty() || name.starts_with(prefix) {
                 out.push(Bucket {
-                    creation_date: b.creation_date().and_then(|t| {
-                        std::time::UNIX_EPOCH
-                            .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                    }),
+                    creation_date: b.creation_date().and_then(system_time),
                     name,
                 });
             }
@@ -2036,15 +2140,25 @@ impl S3 {
             return;
         }
 
+        // `rm --all-versions` deletes versions: their ids go with the keys and come back with the
+        // results.
+        let versioned = urls.iter().any(|u| !u.version_id.is_empty());
         if let Some(lean) = self.lean_for(&bucket).await {
-            let keys: Vec<&str> = urls.iter().map(|u| u.path.as_str()).collect();
-            let resp = lean.delete_objects(&bucket, &keys).await;
-            return report_deleted(&bucket, resp, tx).await;
+            let objects: Vec<(&str, Option<&str>)> = urls
+                .iter()
+                .map(|u| {
+                    let id = Some(u.version_id.as_str()).filter(|v| !v.is_empty());
+                    (u.path.as_str(), id)
+                })
+                .collect();
+            let resp = lean.delete_objects(&bucket, &objects).await;
+            return report_deleted(&bucket, versioned, resp, tx).await;
         }
 
         let mut objs = Vec::with_capacity(urls.len());
         for u in &urls {
-            match ObjectIdentifier::builder().key(&u.path).build() {
+            let id = Some(u.version_id.clone()).filter(|v| !v.is_empty());
+            match ObjectIdentifier::builder().key(&u.path).set_version_id(id).build() {
                 Ok(o) => objs.push(o),
                 Err(e) => {
                     let _ = tx.send(Object::with_error(e.into())).await;
@@ -2069,7 +2183,7 @@ impl S3 {
             .send()
             .await
             .map_err(anyhow::Error::from);
-        report_deleted(&bucket, resp, tx).await
+        report_deleted(&bucket, versioned, resp, tx).await
     }
 
 
@@ -2160,11 +2274,7 @@ impl S3 {
                             let obj = Object {
                                 url: Some(newurl),
                                 etag: c.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                                mod_time: c.last_modified().and_then(|t| {
-                                    std::time::UNIX_EPOCH.checked_add(
-                                        std::time::Duration::from_secs(t.secs().max(0) as u64),
-                                    )
-                                }),
+                                mod_time: c.last_modified().and_then(system_time),
                                 typ,
                                 size: c.size().unwrap_or(0),
                                 storage_class: StorageClass(
@@ -2267,10 +2377,7 @@ impl S3 {
                     let obj = Object {
                         url: Some(newurl),
                         etag: c.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                        mod_time: c.last_modified().and_then(|t| {
-                            std::time::UNIX_EPOCH
-                                .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                        }),
+                        mod_time: c.last_modified().and_then(system_time),
                         typ,
                         size: c.size().unwrap_or(0),
                         storage_class: StorageClass(
@@ -2398,10 +2505,7 @@ impl S3 {
                     let obj = Object {
                         url: Some(nu),
                         etag: v.e_tag().unwrap_or_default().trim_matches('"').to_string(),
-                        mod_time: v.last_modified().and_then(|t| {
-                            std::time::UNIX_EPOCH
-                                .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                        }),
+                        mod_time: v.last_modified().and_then(system_time),
                         typ,
                         size: v.size().unwrap_or(0),
                         storage_class: StorageClass(
@@ -2432,10 +2536,7 @@ impl S3 {
                     object_found = true;
                     let obj = Object {
                         url: Some(nu),
-                        mod_time: d.last_modified().and_then(|t| {
-                            std::time::UNIX_EPOCH
-                                .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                        }),
+                        mod_time: d.last_modified().and_then(system_time),
                         typ: ObjectType::File,
                         is_delete_marker: true,
                         ..Default::default()
@@ -2449,7 +2550,8 @@ impl S3 {
                     break;
                 }
                 key_marker = page.next_key_marker().map(percent_decode);
-                version_marker = page.next_version_id_marker().map(percent_decode);
+                // Not URL-encoded by S3 (only keys, prefixes and key markers are).
+                version_marker = page.next_version_id_marker().map(str::to_string);
                 if key_marker.is_none() && version_marker.is_none() {
                     break;
                 }
@@ -2531,10 +2633,7 @@ impl Storage for S3 {
             Ok(h) => Ok(Object {
                 url: Some(src.clone()),
                 etag: h.etag.trim_matches('"').to_string(),
-                mod_time: h.last_modified.and_then(|t| {
-                    std::time::UNIX_EPOCH
-                        .checked_add(std::time::Duration::from_secs(t.secs().max(0) as u64))
-                }),
+                mod_time: h.last_modified.as_ref().and_then(system_time),
                 size: h.size,
                 typ: ObjectType::File,
                 ..Default::default()
@@ -2654,34 +2753,12 @@ impl S3 {
             .copy_source(Self::copy_source_header(src))
             .set_request_payer(self.request_payer());
 
-        if let Some(sc) = &metadata.storage_class {
-            if !sc.is_empty() {
-                req = req.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-            }
+        req = object_properties!(req, metadata);
+        if let Some(ct) = metadata.content_type.as_deref().filter(|v| !v.is_empty()) {
+            req = req.content_type(ct);
         }
-        if let Some(acl) = &metadata.acl {
-            if !acl.is_empty() {
-                req = req.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-            }
-        }
-        if let Some(cc) = &metadata.cache_control {
-            if !cc.is_empty() {
-                req = req.cache_control(cc);
-            }
-        }
-        if let Some(ct) = &metadata.content_type {
-            if !ct.is_empty() {
-                req = req.content_type(ct);
-            }
-        }
-        if let Some(dir) = &metadata.directive {
-            if !dir.is_empty() {
-                req = req
-                    .metadata_directive(aws_sdk_s3::types::MetadataDirective::from(dir.as_str()));
-            }
-        }
-        for (k, v) in &metadata.user_defined {
-            req = req.metadata(k, v);
+        if let Some(dir) = metadata.directive.as_deref().filter(|v| !v.is_empty()) {
+            req = req.metadata_directive(aws_sdk_s3::types::MetadataDirective::from(dir));
         }
 
         req.send().await?;
@@ -2717,21 +2794,7 @@ impl S3 {
         if let Some(ct) = content_type {
             create = create.content_type(ct);
         }
-        if let Some(sc) = &metadata.storage_class {
-            if !sc.is_empty() {
-                create = create.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-            }
-        }
-        if let Some(acl) = &metadata.acl {
-            if !acl.is_empty() {
-                create = create.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-            }
-        }
-        if let Some(cc) = &metadata.cache_control {
-            if !cc.is_empty() {
-                create = create.cache_control(cc);
-            }
-        }
+        create = object_properties!(create, metadata);
         let created = create.send().await?;
         let upload_id = created
             .upload_id()
@@ -2931,6 +2994,19 @@ impl S3 {
     }
 }
 
+/// An S3 time (`LastModified`, a bucket's `CreationDate`) as a `SystemTime`, its sub-second part
+/// included (#33). MinIO and other servers return milliseconds; dropping them made a file written
+/// in the same second as its upload look newer than its copy to `sync`, which compares with local
+/// times kept to the nanosecond. AWS S3 returns whole seconds. A time before 1970 becomes the
+/// epoch, as before.
+pub(crate) fn system_time(t: &aws_smithy_types::DateTime) -> Option<std::time::SystemTime> {
+    let since = match u64::try_from(t.secs()) {
+        Ok(secs) => std::time::Duration::new(secs, t.subsec_nanos()),
+        Err(_) => std::time::Duration::ZERO,
+    };
+    std::time::UNIX_EPOCH.checked_add(since)
+}
+
 /// Formats a local file's modification time as `seconds.nanoseconds` since the
 /// Unix epoch, for storage as object metadata under `MTIME_METADATA_KEY`.
 fn file_mtime_value(src: &Path) -> Option<String> {
@@ -3014,17 +3090,21 @@ fn nonempty(s: &str) -> Option<&str> {
 }
 
 /// Sends a DeleteObjects outcome to the printer: one entry per key deleted, one error per key
-/// refused, or the request's error.
+/// refused, or the request's error. With `versioned` (the request named versions), each entry
+/// carries the version id the server returned.
 async fn report_deleted(
     bucket: &str,
+    versioned: bool,
     resp: anyhow::Result<aws_sdk_s3::operation::delete_objects::DeleteObjectsOutput>,
     tx: &mpsc::Sender<Object>,
 ) {
+        let version = |v: Option<&str>| v.filter(|_| versioned).unwrap_or_default().to_string();
         match resp {
             Ok(out) => {
                 for d in out.deleted() {
                     let key = format!("s3://{}/{}", bucket, d.key().unwrap_or_default());
-                    if let Ok(u) = Url::parse(&key) {
+                    if let Ok(mut u) = Url::parse(&key) {
+                        u.version_id = version(d.version_id());
                         let _ = tx
                             .send(Object {
                                 url: Some(u),
@@ -3035,7 +3115,10 @@ async fn report_deleted(
                 }
                 for e in out.errors() {
                     let key = format!("s3://{}/{}", bucket, e.key().unwrap_or_default());
-                    let u = Url::parse(&key).ok();
+                    let u = Url::parse(&key).ok().map(|mut u| {
+                        u.version_id = version(e.version_id());
+                        u
+                    });
                     let _ = tx
                         .send(Object {
                             url: u,
@@ -3054,78 +3137,45 @@ async fn report_deleted(
         }
 }
 
-/// What an upload's SDK request sets from `metadata`, as headers for the lean data path: the
-/// content type, storage class, ACL and user metadata; with `details`, cache control, content
-/// encoding and disposition; with `sse`, server-side encryption. Each caller asks for the set its
-/// SDK request sets.
+/// What `object_properties!` sets on an upload's SDK request, as headers for the lean data path:
+/// the content type, storage class, ACL, cache control, `Expires` (as the SDK writes it, an HTTP
+/// date), content encoding and disposition, server-side encryption (the KMS key only with a
+/// method) and user metadata. Empty values are not sent.
 pub(crate) fn object_headers(
     content_type: Option<String>,
     metadata: &Metadata,
-    details: bool,
-    sse: bool,
 ) -> Vec<(String, String)> {
     let mut h = Vec::new();
     if let Some(ct) = content_type {
         h.push(("content-type".to_string(), ct));
     }
-    let mut set = |name: &str, value: &Option<String>| {
-        if let Some(v) = value.as_ref().filter(|v| !v.is_empty()) {
-            h.push((name.to_string(), v.clone()));
+    let given = |v: &Option<String>| v.as_deref().filter(|v| !v.is_empty()).map(str::to_string);
+    let mut set = |name: &str, value: Option<String>| {
+        if let Some(v) = value {
+            h.push((name.to_string(), v));
         }
     };
-    set("x-amz-storage-class", &metadata.storage_class);
-    set("x-amz-acl", &metadata.acl);
-    if details {
-        set("cache-control", &metadata.cache_control);
-        set("content-encoding", &metadata.content_encoding);
-        set("content-disposition", &metadata.content_disposition);
-    }
-    if sse {
-        set("x-amz-server-side-encryption", &metadata.encryption_method);
+    set("x-amz-storage-class", given(&metadata.storage_class));
+    set("x-amz-acl", given(&metadata.acl));
+    set("cache-control", given(&metadata.cache_control));
+    let expires = given(&metadata.expires).and_then(|v| expires_time(&v).ok());
+    set(
+        "expires",
+        expires.and_then(|t| t.fmt(aws_smithy_types::date_time::Format::HttpDate).ok()),
+    );
+    set("content-encoding", given(&metadata.content_encoding));
+    set("content-disposition", given(&metadata.content_disposition));
+    if let Some(method) = given(&metadata.encryption_method) {
+        set("x-amz-server-side-encryption", Some(method));
         set(
             "x-amz-server-side-encryption-aws-kms-key-id",
-            &metadata.encryption_key_id,
+            given(&metadata.encryption_key_id),
         );
     }
     for (k, v) in &metadata.user_defined {
         h.push((format!("x-amz-meta-{k}"), v.clone()));
     }
     h
-}
-
-fn apply_put_metadata(
-    mut req: aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder,
-    metadata: &Metadata,
-) -> anyhow::Result<aws_sdk_s3::operation::put_object::builders::PutObjectFluentBuilder> {
-    if let Some(sc) = &metadata.storage_class {
-        if !sc.is_empty() {
-            req = req.storage_class(aws_sdk_s3::types::StorageClass::from(sc.as_str()));
-        }
-    }
-    if let Some(acl) = &metadata.acl {
-        if !acl.is_empty() {
-            req = req.acl(aws_sdk_s3::types::ObjectCannedAcl::from(acl.as_str()));
-        }
-    }
-    if let Some(cc) = &metadata.cache_control {
-        if !cc.is_empty() {
-            req = req.cache_control(cc);
-        }
-    }
-    if let Some(ce) = &metadata.content_encoding {
-        if !ce.is_empty() {
-            req = req.content_encoding(ce);
-        }
-    }
-    if let Some(cd) = &metadata.content_disposition {
-        if !cd.is_empty() {
-            req = req.content_disposition(cd);
-        }
-    }
-    for (k, v) in &metadata.user_defined {
-        req = req.metadata(k, v);
-    }
-    Ok(req)
 }
 
 #[cfg(test)]
@@ -3278,6 +3328,28 @@ mod tests {
     }
 
     #[test]
+    fn copy_source_encodes_the_key_and_keeps_the_version_id() {
+        use crate::storage::url::{Url, UrlOptions};
+        let opts = UrlOptions { version_id: Some("3/L4k+q".to_string()), ..Default::default() };
+        let u = Url::new("s3://b/s/a b+c.txt", opts).unwrap();
+        assert_eq!(super::S3::copy_source_header(&u), "b/s/a%20b%2Bc.txt?versionId=3/L4k+q");
+    }
+
+    #[test]
+    fn system_time_keeps_the_sub_second_part() {
+        use aws_smithy_types::date_time::Format;
+        use aws_smithy_types::DateTime;
+        let t = DateTime::from_str("2026-11-23T10:00:05.123Z", Format::DateTime).unwrap();
+        let since = super::system_time(&t).unwrap().duration_since(std::time::UNIX_EPOCH);
+        assert_eq!(since.unwrap(), std::time::Duration::new(t.secs() as u64, 123_000_000));
+        let whole = DateTime::from_secs(1_795_000_000);
+        let since = super::system_time(&whole).unwrap().duration_since(std::time::UNIX_EPOCH);
+        assert_eq!(since.unwrap(), std::time::Duration::from_secs(1_795_000_000));
+        let before_1970 = DateTime::from_secs(-5);
+        assert_eq!(super::system_time(&before_1970), Some(std::time::UNIX_EPOCH));
+    }
+
+    #[test]
     fn percent_decode_passthrough_plain() {
         assert_eq!(percent_decode("hello/world.txt"), "hello/world.txt");
     }
@@ -3297,6 +3369,11 @@ mod tests {
         // URL-encoding of keys.
         assert_eq!(percent_decode("a%20b"), "a b");
         assert_eq!(percent_decode("a%2Bb"), "a+b");
+        // #31: the form encoding sends a space as '+'; a real '+' always comes as %2B.
+        assert_eq!(percent_decode("s/a+b.txt"), "s/a b.txt");
+        assert_eq!(percent_decode("s/c%2Bd.txt"), "s/c+d.txt");
+        assert_eq!(percent_decode("s/e+f%2Bg++h.txt"), "s/e f+g  h.txt");
+        assert_eq!(percent_decode("+"), " ");
         assert_eq!(percent_decode("a%25b"), "a%b");
         // The encoded forward slash must round-trip to a real path separator.
         assert_eq!(percent_decode("a%2Fb"), "a/b");

@@ -12,9 +12,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use assert_cmd::prelude::*;
 use predicates::prelude::*;
 
-fn endpoint_configured() -> bool {
-    std::env::var("AWS_ENDPOINT_URL").is_ok() || std::env::var("S3_ENDPOINT_URL").is_ok()
-}
+mod common;
+use common::endpoint_configured;
 
 fn fuse_available() -> bool {
     Path::new("/dev/fuse").exists()

@@ -550,16 +550,17 @@ impl Lean {
         })
     }
 
-    /// DeleteObjects of `keys`, with the CRC32 its SDK request carries (the operation requires a
-    /// checksum and the SDK's default algorithm is CRC32).
+    /// DeleteObjects of `objects` (each a key and, for `rm --all-versions`, a version id), with
+    /// the CRC32 its SDK request carries (the operation requires a checksum and the SDK's default
+    /// algorithm is CRC32).
     pub(crate) async fn delete_objects(
         &self,
         bucket: &str,
-        keys: &[&str],
+        objects: &[(&str, Option<&str>)],
     ) -> anyhow::Result<DeleteObjectsOutput> {
         let mut req = Request::new("POST", "");
         req.query.push(("delete", None));
-        let body = delete_body(keys);
+        let body = delete_body(objects);
         req.headers
             .push(("content-type".to_string(), "application/xml".to_string()));
         req.headers
@@ -1036,12 +1037,16 @@ fn parse_deleted(body: &[u8]) -> Result<DeleteObjectsOutput, XmlDecodeError> {
         .build())
 }
 
-/// DeleteObjects' body: the keys, as `delete_chunk` sends them (no version ids).
-fn delete_body(keys: &[&str]) -> String {
+/// DeleteObjects' body: the keys, each with its version id when it has one, as the SDK
+/// serializes `delete_chunk`'s request.
+fn delete_body(objects: &[(&str, Option<&str>)]) -> String {
     let mut out = String::from("<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">");
-    for k in keys {
+    for (k, version) in objects {
         out.push_str("<Object>");
         xml_element(&mut out, "Key", k);
+        if let Some(v) = version {
+            xml_element(&mut out, "VersionId", v);
+        }
         out.push_str("</Object>");
     }
     out.push_str("</Delete>");
@@ -1790,20 +1795,24 @@ mod tests {
         assert_eq!(page.delete_markers()[0].version_id(), Some("v0"));
         assert_eq!(page.next_key_marker(), Some("k"));
         assert_eq!(page.next_version_id_marker(), Some("v2"));
-        let body = b"<DeleteResult><Deleted><Key>a&amp;b</Key></Deleted><Error><Key>c</Key>\
+        let body = b"<DeleteResult><Deleted><Key>a&amp;b</Key></Deleted><Deleted><Key>d</Key>\
+            <VersionId>v3</VersionId></Deleted><Error><Key>c</Key><VersionId>v1</VersionId>\
             <Code>AccessDenied</Code><Message>Access Denied</Message></Error></DeleteResult>";
         let out = parse_deleted(body).unwrap();
         assert_eq!(out.deleted()[0].key(), Some("a&b"));
+        assert_eq!(out.deleted()[0].version_id(), None);
+        assert_eq!(out.deleted()[1].version_id(), Some("v3"));
+        assert_eq!(out.errors()[0].version_id(), Some("v1"));
         assert_eq!(out.errors()[0].message(), Some("Access Denied"));
         assert!(!body_is_error(body), "an <Error> inside DeleteResult is not an error document");
     }
 
     #[test]
-    fn delete_sends_the_keys_with_a_crc32() {
+    fn delete_sends_the_keys_and_version_ids_with_a_crc32() {
         assert_eq!(
-            delete_body(&["a&b", "c"]),
+            delete_body(&[("a&b", None), ("c", Some("v1"))]),
             "<Delete xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Object><Key>a&amp;b</Key>\
-             </Object><Object><Key>c</Key></Object></Delete>"
+             </Object><Object><Key>c</Key><VersionId>v1</VersionId></Object></Delete>"
         );
         // The CRC-32 check value: 0xCBF43926 for "123456789".
         assert_eq!(crc32(b"123456789"), "y/Q5Jg==");

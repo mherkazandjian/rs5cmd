@@ -351,6 +351,67 @@ fn a_multipart_upload_sends_the_sdks_requests() {
     assert_eq!(runs[0], runs[1]);
 }
 
+/// `cp`'s object properties (#34) go with a lean upload as with the SDK's: on a PutObject and on
+/// a multipart upload's Create, `--expires` as an HTTP date.
+#[test]
+fn object_properties_go_with_lean_uploads_as_with_the_sdks() {
+    let dir = tempfile::tempdir().unwrap();
+    let props = [
+        "--cache-control",
+        "max-age=60",
+        "--expires",
+        "2027-01-02T03:04:05Z",
+        "--content-encoding",
+        "identity",
+        "--content-disposition",
+        "attachment",
+        "--metadata",
+        "k1=v1",
+        "--sse",
+        "AES256",
+        "--acl",
+        "private",
+        "--part-size",
+        "5",
+    ];
+    let expected = [
+        ("cache-control", "max-age=60"),
+        ("expires", "Sat, 02 Jan 2027 03:04:05 GMT"),
+        ("content-encoding", "identity"),
+        ("content-disposition", "attachment"),
+        ("x-amz-meta-k1", "v1"),
+        ("x-amz-server-side-encryption", "AES256"),
+        ("x-amz-acl", "private"),
+    ];
+    for (name, len) in [("small", 1000), ("big", 12 * MIB)] {
+        let src = dir.path().join(name);
+        std::fs::write(&src, data(len)).unwrap();
+        let mut sent = Vec::new();
+        for path in ["sdk", "lean"] {
+            let (port, store) = start_server();
+            let dst = format!("s3://bucket/{name}");
+            let args: Vec<&str> = ["cp"]
+                .into_iter()
+                .chain(props)
+                .chain([src.to_str().unwrap(), dst.as_str()])
+                .collect();
+            ok(&rs5cmd(port, path, &[], &args, None), path);
+            // The PutObject, or the multipart upload's Create.
+            let first = requests(&store)
+                .into_iter()
+                .find(|s| s.method == "PUT" && !s.has("partNumber") || s.has("uploads"))
+                .expect("an upload");
+            sent.push(first);
+        }
+        let (sdk, lean) = (&sent[0], &sent[1]);
+        assert_eq!(sdk.shape(), lean.shape(), "{name}");
+        for (h, v) in expected {
+            assert_eq!(sdk.header(h), Some(v), "{name}: {h}");
+            assert_eq!(lean.header(h), Some(v), "{name}: {h}");
+        }
+    }
+}
+
 #[test]
 fn checksum_trailers_frame_streamed_uploads_as_aws_chunked() {
     let dir = tempfile::tempdir().unwrap();
